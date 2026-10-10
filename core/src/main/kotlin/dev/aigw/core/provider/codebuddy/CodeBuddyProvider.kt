@@ -268,7 +268,7 @@ class CodeBuddyProvider(
             "/billing/meter/claim-compensation" to "补偿",
         )) {
             runCatching {
-                val (status, body) = postJson("${billingRoot}$path", "{}", headers)
+                val (status, body) = postJson("${billingRoot}$path", credential, "{}", headers)
                 if (status !in 200..299) return@runCatching
                 val credit = firstNumber(jsonOf(body), "credit", "reward_credit", "amount")
                 if (credit != null) parts.add("$label +$credit")
@@ -299,9 +299,9 @@ class CodeBuddyProvider(
             if (adopted) return@runCatching
 
             val agree = "${chatBase(credential)}/activity/growth/buddy/agreement"
-            runCatching { postJson(agree, """{"agree":true}""", headers) }
+            runCatching { postJson(agree, credential, """{"agree":true}""", headers) }
             val first = "${chatBase(credential)}/activity/growth/buddy/first"
-            val (status, body) = postJson(first, "{}", headers)
+            val (status, body) = postJson(first, credential, "{}", headers)
             if (status in 200..299) {
                 val credit = firstNumber(jsonOf(body), "credit", "reward_credit")
                 parts.add(if (credit != null) "领养 Buddy +$credit" else "领养 Buddy")
@@ -331,7 +331,7 @@ class CodeBuddyProvider(
                 // 已领过 / 未达标都跳过；只处理明确可领的
                 if (state.isEmpty() || state == "claimed" || state == "redeemed" || state == "false") continue
                 if (state != "true" && state != "available" && state != "claimable") continue
-                val (rs, _) = postJson("$root/activity/growth/redeem", """{"tier":"$tier","client_token":"${uuid4()}"}""", headers)
+                val (rs, _) = postJson("$root/activity/growth/redeem", credential, """{"tier":"$tier","client_token":"${uuid4()}"}""", headers)
                 if (rs in 200..299) parts.add("连登 $tier 兑奖")
             }
         }
@@ -354,6 +354,7 @@ class CodeBuddyProvider(
             repeat(draws) {
                 val (rs, rb) = postJson(
                     "$root/activity/growth/lottery/draw",
+                    credential,
                     """{"client_token":"${uuid4()}"}""",
                     headers,
                 )
@@ -390,7 +391,7 @@ class CodeBuddyProvider(
                 } ?: false
                 val st = firstString(task, "status").lowercase()
                 if (!done || st == "claimed" || st == "received") return@forEach
-                val (rs, _) = postJson("$root/portal/activity/school/tasks/$code/claim", "{}", headers)
+                val (rs, _) = postJson("$root/portal/activity/school/tasks/$code/claim", credential, "{}", headers)
                 if (rs in 200..299) parts.add("开学季任务 $code")
             }
             // 有抽奖机会就转一次
@@ -404,6 +405,7 @@ class CodeBuddyProvider(
                 if (balance > 0) {
                     val (ws, wb) = postJson(
                         "$root/portal/activity/school/wheel/draw",
+                        credential,
                         """{"draw_uuid":"${uuid4()}"}""",
                         headers,
                     )
@@ -1178,6 +1180,23 @@ internal fun JsonObject.firstString(vararg keys: String): String {
     }
     return ""
 }
+
+/** 按顺序取第一个能解析成数字的字段（用于 credits / reward_credit 这类可能是字符串的字段）。 */
+internal fun JsonObject.firstNumber(vararg keys: String): Double? {
+    for (key in keys) {
+        val value = get(key) ?: continue
+        if (value.isJsonNull) continue
+        if (value.isJsonPrimitive) {
+            val prim = value.asJsonPrimitive
+            if (prim.isNumber) return prim.asDouble
+            prim.asString.trim().toDoubleOrNull()?.let { return it }
+        }
+    }
+    return null
+}
+
+/** 生成一个小写 UUIDv4（幂等键用，每次请求都要全新）。 */
+internal fun uuid4(): String = java.util.UUID.randomUUID().toString()
 
 internal fun JsonObject.firstLong(vararg keys: String): Long {
     for (key in keys) {
