@@ -22,7 +22,8 @@ sealed interface DeviceAuthPoll {
 }
 
 interface WebLoginSupport {
-    fun beginWebLogin(callbackUrl: String): WebLoginTicket
+    /** [region] 为供应商自定义的区域标识（如 Trae 的 trae.cn / trae.ai），无区域概念时可忽略。 */
+    fun beginWebLogin(callbackUrl: String, region: String = ""): WebLoginTicket
 
     /** 回调链接可能来自 WebView 拦截，也可能由用户粘贴。 */
     fun completeWebLogin(callbackUrl: String): ProviderAccount
