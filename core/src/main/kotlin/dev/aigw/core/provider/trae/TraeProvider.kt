@@ -105,7 +105,25 @@ class TraeProvider(
         val catalog = catalog(region)
         val models = catalog.models(trae)
         return ProviderModelCatalogView(
-            models = models.map { ProviderModel(it.id, it.name, it.contextWindow) },
+            models = models.map { model ->
+                // 倍率不是上游字段（get_detail_param 不返回），取自本地维护的 ModelRates 参考表；
+                // 查不到就不写 extra，UI 显示「—」而不是编造数字。
+                val rate = ModelRates.rateOf(model.id)
+                ProviderModel(
+                    id = model.id,
+                    name = model.name,
+                    contextWindow = model.contextWindow,
+                    extra = buildMap {
+                        if (rate != null) {
+                            put("rate", rate.baseLabel())
+                            put("rateSummary", rate.summaryLabel())
+                            rate.discountLabel()?.let { put("rateDiscount", it) }
+                            rate.discountTag?.let { put("rateDiscountTag", it) }
+                            put("rateNote", rate.note)
+                        }
+                    },
+                )
+            },
             fromFallback = catalog.fromFallback,
             error = catalog.lastError,
         )
