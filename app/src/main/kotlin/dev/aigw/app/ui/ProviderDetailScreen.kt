@@ -49,6 +49,9 @@ fun ProviderDetailScreen(
     val accounts = state.accountsOf(providerId)
     val context = LocalContext.current
 
+    // 记住这次是给哪个供应商登录（Activity 回调只会带回 Cookie）
+    var pendingCookieProvider by remember { mutableStateOf("") }
+
     // 内嵌网页登录：打开上游网站，用户登录完成后把读到的 Cookie 交回 ViewModel 导入。
     // 不注入 JS、不开多窗口，旧机器上也能跑（详见 CookieLoginActivity 的兼容说明）。
     val cookieLogin = rememberLauncherForActivityResult(
@@ -62,8 +65,6 @@ fun ProviderDetailScreen(
         }
         pendingCookieProvider = ""
     }
-    // 记住这次是给哪个供应商登录（回调时 Activity 只带回 Cookie）
-    var pendingCookieProvider by remember { mutableStateOf("") }
 
     val actions = ProviderUiActions(
         // 登录一律交给系统浏览器：本机 WebView 渲染异常（整页缩放错乱、输入框文字镜像），
