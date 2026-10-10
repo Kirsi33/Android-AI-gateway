@@ -540,7 +540,7 @@ class CodeBuddyProvider(
                     contextWindow = item.get("maxInputTokens")?.asLong ?: 0L,
                     extra = buildMap {
                         // 上游给的是 "x0.79 credits" 这种串，抽出数值作为倍率展示
-                        parseCredits(item.get("credits")?.asString)?.let { put("rate", "$it×") }
+                        parseCreditsStatic(item.get("credits")?.asString)?.let { put("rate", "$it×") }
                         item.get("maxOutputTokens")?.asLong?.takeIf { it > 0 }?.let {
                             put("maxOutput", it.toString())
                         }
@@ -553,22 +553,6 @@ class CodeBuddyProvider(
             )
         }
         return result
-    }
-
-    /**
-     * 解析上游的 `credits` 字段（形如 `"x0.79 credits"` / `"0.79"` / 数字）。
-     *
-     * 拿不到数字返回 null —— 界面显示「—」而不是编造一个倍率。
-     */
-    private fun parseCredits(raw: String?): String? {
-        val text = raw?.trim().orEmpty()
-        if (text.isEmpty()) return null
-        val token = text.removePrefix("x").removePrefix("X").trim().split(' ').firstOrNull().orEmpty()
-        val value = token.toDoubleOrNull() ?: return null
-        if (!value.isFinite() || value < 0) return null
-        // 0.79 -> "0.79"；0.8 -> "0.8"；1.0 -> "1"
-        return if (value == value.toLong().toDouble()) value.toLong().toString()
-        else value.toString().trimEnd('0').trimEnd('.')
     }
 
     // ------------------------------------------------------------------ HTTP
@@ -848,14 +832,66 @@ class CodeBuddyProvider(
 
         private val SESSION_DEAD_MARKERS = listOf("Offline user session not found", "12153")
 
-        /** 内置模型快照：上游拉不到时兜底（`cli` agent 的常见模型）。 */
-        val FALLBACK_MODELS: List<ProviderModel> = listOf(
-            ProviderModel("deepseek-v4-flash", "DeepSeek V4 Flash", 128_000),
-            ProviderModel("deepseek-v4-pro", "DeepSeek V4 Pro", 128_000),
+        /**
+         * 内置模型快照：上游拉不到时兜底。
+         *
+         * 数据源是打包的官方 CLI 目录（`codebuddy-international-models.json`，36 个模型，
+         * 含 `credits` 倍率、上下文、能力位）。读不到资源时才退到 [MINIMAL_MODELS]——
+         * 硬编码一份精简清单是为了让资源缺失也不至于整个模型页空白。
+         */
+        val FALLBACK_MODELS: List<ProviderModel> by lazy { loadBundledCatalog() ?: MINIMAL_MODELS }
+
+        private val MINIMAL_MODELS: List<ProviderModel> = listOf(
+            ProviderModel("default-model", "Auto", 176_000),
             ProviderModel("glm-5.2", "GLM-5.2", 128_000),
             ProviderModel("kimi-k2.5", "Kimi-K2.5", 128_000),
-            ProviderModel("minimax-m2.5", "MiniMax-M2.5", 128_000),
         )
+
+        private const val BUNDLED_CATALOG = "codebuddy-international-models.json"
+
+        /** 解析打包的官方模型目录；任何异常都返回 null 交给上游实时接口。 */
+        fun loadBundledCatalog(): List<ProviderModel>? = try {
+            val stream = CodeBuddyProvider::class.java.classLoader
+                ?.getResourceAsStream(BUNDLED_CATALOG)
+            stream?.use { input ->
+                val text = input.readBytes().toString(Charsets.UTF_8)
+                val root = JsonParser.parseString(text).asJsonObject
+                val models = root.arrayOrNull("models") ?: return@use null
+                models.mapNotNull { element ->
+                    val item = runCatching { element.asJsonObject }.getOrNull() ?: return@mapNotNull null
+                    val id = item.get("id")?.asString.orEmpty()
+                    if (id.isEmpty()) return@mapNotNull null
+                    ProviderModel(
+                        id = id,
+                        name = item.get("name")?.asString.orEmpty().ifEmpty { id },
+                        contextWindow = item.get("maxInputTokens")?.asLong ?: 0L,
+                        extra = buildMap {
+                            parseCreditsStatic(item.get("credits")?.asString)?.let { put("rate", "$it×") }
+                            item.get("maxOutputTokens")?.asLong?.takeIf { it > 0 }?.let {
+                                put("maxOutput", it.toString())
+                            }
+                            if (item.get("supportsReasoning")?.asBoolean == true) put("reasoning", "true")
+                            if (item.get("supportsImages")?.asBoolean == true) put("vision", "true")
+                            if (item.get("supportsToolCall")?.asBoolean == true) put("tools", "true")
+                            item.get("vendor")?.asString?.takeIf { it.isNotBlank() }?.let { put("vendor", it) }
+                        },
+                    )
+                }.takeIf { it.isNotEmpty() }
+            }
+        } catch (_: Exception) {
+            null
+        }
+
+        /** 解析 `"x0.79 credits"` 这类串；不合法返回 null。 */
+        fun parseCreditsStatic(raw: String?): String? {
+            val text = raw?.trim().orEmpty()
+            if (text.isEmpty()) return null
+            val token = text.removePrefix("x").removePrefix("X").trim().split(' ').firstOrNull().orEmpty()
+            val value = token.toDoubleOrNull() ?: return null
+            if (!value.isFinite() || value < 0) return null
+            return if (value == value.toLong().toDouble()) value.toLong().toString()
+            else value.toString().trimEnd('0').trimEnd('.')
+        }
 
         private const val CONNECT_TIMEOUT_MS = 30_000
         private const val READ_TIMEOUT_MS = 300_000
