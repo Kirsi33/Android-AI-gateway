@@ -5,11 +5,9 @@ import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import dev.aigw.core.util.asObjectOrNull
 import dev.aigw.core.util.arrayOrNull
-import dev.aigw.core.util.boolOrNull
 import dev.aigw.core.util.longOrNull
 import dev.aigw.core.util.objOrNull
 import dev.aigw.core.util.str
-import dev.aigw.core.util.stringOrNull
 import java.util.UUID
 
 /**
@@ -30,17 +28,31 @@ import java.util.UUID
  *  - `finish`         结束，带 `finalContentX`（完整正文）与 `usage`
  *  - `event_error`    流内错误
  *
- * 关键坑：开思考且**未联网**时，`content` 事件里既有开场套话也有最终答案。
- * 上游没有明确分隔，只有 `finish.finalContentX` 能给出「什么是答案」。
- * 因此本翻译器在 [LongCatSseTranslator.finish] 阶段用 `finalContentX` 校正：
- * 若累计正文与 `finalContentX` 不匹配，则把此前的正文整体降级为思维链。
+ * ## 思考模式的「答案归属」问题
+ *
+ * 上游在 `reasonEnabled=1 && searchEnabled=0` 时，`content` 事件里**既有开场套话、
+ * 也有最终答案**，二者没有结构区分，唯一可靠信号是 `finish.finalContentX`（它就是答案）。
+ *
+ * 因此本翻译器在思考模式下采取**延迟发送**策略：[deferContent] 为 true 时，
+ * `content` 事件只累积不发送，等到 `finish` 拿到 `finalContentX` 才一次性发出；
+ * 此前累积的内容作为思维链（`reasoning_content`）补发。
+ *
+ * 非思考模式（或开了联网搜索）下 content 就是正文，正常逐条流式下发。
  */
 class LongCatSseTranslator(
     private val model: String,
+    /** true = 把上游 content 推迟到 finish 再判定归属（思考模式用）。 */
+    private val deferContent: Boolean = false,
     private val id: String = "chatcmpl-" + UUID.randomUUID().toString().replace("-", "").take(24),
 ) {
     private var created = System.currentTimeMillis() / 1000
+
+    /** 已累积但未必已发送的正文。 */
     private val contentBuffer = StringBuilder()
+
+    /** 已发送给客户端的正文（用于判断是否已流式输出过）。 */
+    private val sentContent = StringBuilder()
+
     private val reasoningBuffer = StringBuilder()
     private var sentRole = false
     private var finished = false
@@ -52,7 +64,7 @@ class LongCatSseTranslator(
     /** 结束时的 stopReason（stop / content_filter）。 */
     private var stopReason = "stop"
 
-    /** 上游给的 usage（原始字段名，映射成 OpenAI 命名）。 */
+    /** 上游给的 usage（已映射成 OpenAI 命名）。 */
     private var usage: JsonObject? = null
 
     private fun chunk(delta: JsonObject, finishReason: String? = null): String {
@@ -78,6 +90,11 @@ class LongCatSseTranslator(
         return chunk(JsonObject().apply { addProperty("role", "assistant") })
     }
 
+    private fun textChunk(field: String, text: String): String {
+        sentContent.append(text)
+        return roleChunk() + chunk(JsonObject().apply { addProperty(field, text) })
+    }
+
     /**
      * 处理上游一行；返回要写给客户端的若干 SSE 帧（可能为空）。
      */
@@ -91,6 +108,9 @@ class LongCatSseTranslator(
         val obj = runCatching { JsonParser.parseString(payload).asJsonObject }.getOrNull()
             ?: return emptyList()
 
+        // 顶层 tokenInfo（有些帧把它放在事件外层）
+        obj.objOrNull("tokenInfo")?.let { usage = toOpenAiUsage(it) }
+
         // 上游可能 200 但 body 直接是业务错误 JSON（非 SSE）
         val topCode = obj.longOrNull("code")
         if (obj.objOrNull("event") == null && topCode != null && topCode != 0L) {
@@ -102,45 +122,40 @@ class LongCatSseTranslator(
 
         val event = obj.objOrNull("event") ?: return emptyList()
         val type = event.str("type")
-        return when (type) {
+        val out = when (type) {
             "create" -> listOf(roleChunk())
 
             "content" -> {
                 val text = event.str("content")
                 if (text.isEmpty()) return emptyList()
                 contentBuffer.append(text)
-                listOf(roleChunk(), chunk(JsonObject().apply { addProperty("content", text) }))
+                // 思考模式：先不发，等 finish 判定归属
+                if (deferContent) emptyList() else listOf(textChunk("content", text))
             }
 
             "reason", "think" -> {
                 val text = event.str("content")
                 if (text.isEmpty()) return emptyList()
                 reasoningBuffer.append(text)
-                listOf(
-                    roleChunk(),
-                    chunk(JsonObject().apply { addProperty("reasoning_content", text) }),
-                )
+                listOf(textChunk("reasoning_content", text))
             }
 
             // 阶段标记，无内容
             "summary" -> emptyList()
 
-            // 联网检索片段：能取到文本就当正文，取不到就丢弃
+            // 联网检索片段：能取到文本就当正文
             "common_search", "general_search", "local_life_search" -> {
                 val text = event.str("content")
                 if (text.isEmpty()) return emptyList()
                 contentBuffer.append(text)
-                listOf(roleChunk(), chunk(JsonObject().apply { addProperty("content", text) }))
+                if (deferContent) emptyList() else listOf(textChunk("content", text))
             }
 
             "finish" -> {
-                val finalText = event.str("finalContentX")
                 val finishType = event.str("finishType")
                 if (finishType.equals("sensitive", ignoreCase = true)) stopReason = "content_filter"
                 event.objOrNull("usage")?.let { usage = toOpenAiUsage(it) }
-                // finalContentX 才是真答案：与累计正文不一致时，把累计内容整体降级为思维链
-                val correction = correctFinalText(finalText)
-                if (correction != null) listOf(correction) else emptyList()
+                resolveFinalContent(event.str("finalContentX"))
             }
 
             "event_error" -> {
@@ -149,29 +164,47 @@ class LongCatSseTranslator(
             }
 
             else -> emptyList()
-        }.also { if (type == "finish") finished = true }
+        }
+
+        if (type == "finish") finished = true
+        return out
     }
 
     /**
-     * 用 `finalContentX` 校正正文。
+     * 用 `finalContentX` 定稿正文。
      *
-     * 返回一个额外的 SSE 帧：把「已经发出去的正文」与最终答案的差异补上。
-     * 由于 SSE 是单向追加的，无法撤回已发内容，这里只在**尚未发送内容**时补发全文；
-     * 已发过内容则不动（宁可多一段开场白，也不能重复输出）。
+     * 上游可能返回的形态：
+     *  1. `finalContentX` 非空 → **它就是答案**；此前累积的 content 归入思维链（只在延迟模式下改写）；
+     *  2. `finalContentX` 为空 → 用累积的 content 兜底；
+     *  3. 已流式发送过 → 不动（SSE 无法撤回，避免重复输出）。
      */
-    private fun correctFinalText(finalText: String): String? {
-        if (finalText.isEmpty()) return null
-        val sent = contentBuffer.toString()
-        if (sent.isNotEmpty()) return null
-        contentBuffer.append(finalText)
-        return roleChunk() + chunk(JsonObject().apply { addProperty("content", finalText) })
+    private fun resolveFinalContent(finalText: String): List<String> {
+        // 已经流式发过正文：不做任何改写
+        if (sentContent.isNotEmpty()) return emptyList()
+
+        val accumulated = contentBuffer.toString()
+        val answer = finalText.ifEmpty { accumulated }
+        if (answer.isEmpty()) return emptyList()
+
+        val out = ArrayList<String>(2)
+        // 延迟模式：此前累积的内容不是答案，作为思维链补发
+        if (deferContent && accumulated.isNotEmpty() && accumulated != answer) {
+            reasoningBuffer.append(accumulated)
+            out += textChunk("reasoning_content", accumulated)
+        }
+        out += textChunk("content", answer)
+        return out
     }
 
-    /** 流结束：产出收尾帧（finish_reason + usage + [DONE]）。未发过任何内容则补一个空 role 帧。 */
+    /** 流结束：产出收尾帧（finish_reason + usage + [DONE]）。 */
     fun finish(): List<String> {
         if (finished) return emptyList()
         finished = true
         val out = ArrayList<String>(3)
+        // 没有 finish 事件时（异常断流）也要把累积内容发出去，避免「有 token 无输出」
+        if (sentContent.isEmpty() && contentBuffer.isNotEmpty()) {
+            out += textChunk("content", contentBuffer.toString())
+        }
         out += roleChunk()
         out += chunk(JsonObject(), stopReason)
         out += "data: [DONE]\n\n"
@@ -182,7 +215,7 @@ class LongCatSseTranslator(
     fun aggregatedResponse(): String {
         val message = JsonObject().apply {
             addProperty("role", "assistant")
-            addProperty("content", contentBuffer.toString())
+            addProperty("content", sentContent.toString().ifEmpty { contentBuffer.toString() })
         }
         if (reasoningBuffer.isNotEmpty()) {
             message.addProperty("reasoning_content", reasoningBuffer.toString())
@@ -215,10 +248,5 @@ class LongCatSseTranslator(
             addProperty("completion_tokens", completion)
             addProperty("total_tokens", total)
         }
-    }
-
-    companion object {
-        /** 从任意 JSON 里抽取顶层 `tokenInfo`（有些帧把它放在事件外层）。 */
-        fun usageFrom(obj: JsonObject): JsonObject? = obj.objOrNull("tokenInfo")
     }
 }
