@@ -1061,6 +1061,8 @@ class GatewayEngine(
             lower.startsWith("codebuddy-") || lower.startsWith("workbuddy-") -> "codebuddy"
             lower in listOf("trae", "bytedance", "doubao", "solo") -> "trae"
             lower in listOf("loomy", "iflytek", "spark", "xf") -> "loomy"
+            lower in listOf("longcat", "meituan", "lc") -> "longcat"
+            lower.startsWith("longcat-") -> "longcat"
             else -> if (lower.startsWith("custom:")) lower else null
         }
     }
@@ -1072,6 +1074,7 @@ class GatewayEngine(
             lower.startsWith("claude") && (lower.contains("thinking") || lower.contains("4-6") || lower.contains("sonnet") || lower.contains("opus")) -> "antigravity"
             lower.startsWith("doubao") || lower.startsWith("seed-") -> "trae"
             lower.startsWith("spark") || lower.contains("星火") -> "loomy"
+            lower.startsWith("longcat") || lower.contains("龙猫") -> "longcat"
             lower.startsWith("deepseek") || lower.startsWith("kimi") || lower.startsWith("minimax") || lower.startsWith("glm") || lower.startsWith("qwen") -> {
                 listOf("codebuddy", "trae").firstOrNull { pool.size(it) > 0 }
             }
