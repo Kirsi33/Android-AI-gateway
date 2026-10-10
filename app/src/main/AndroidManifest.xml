@@ -29,6 +29,13 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <!-- 内嵌网页登录：打开上游网站，用户登录后读取 Cookie 作为凭证 -->
+        <activity
+            android:name=".ui.CookieLoginActivity"
+            android:exported="false"
+            android:configChanges="keyboardHidden|orientation|screenSize"
+            android:windowSoftInputMode="adjustResize" />
+
 
         <service
             android:name=".service.GatewayService"
