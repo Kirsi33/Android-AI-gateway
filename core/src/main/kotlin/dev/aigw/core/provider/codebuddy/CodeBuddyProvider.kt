@@ -77,12 +77,21 @@ class CodeBuddyProvider(
 
     override fun resolveModel(requested: String): String {
         val model = requested.trim()
-        if (model.isEmpty() || model == "auto") return FALLBACK_MODELS.first().id
+        // 默认走官方的 Auto（id = default-model）。不要用 FALLBACK_MODELS.first()——
+        // 那份列表的顺序会随数据源变化，一旦首位不是 Auto 就会把请求打到别的模型上。
+        if (model.isEmpty() || model == "auto") return DEFAULT_MODEL_ID
         return model
     }
 
+    /**
+     * 上游域名后缀（代理分流的判定依据）。
+     *
+     * 注意成长中心分为**插件链路**（`copilot.tencent.com` / `codebuddy.cn`）与
+     * **网页链路**（`workbuddy.cn`），两条路用的是不同身份头，域名都要列上，
+     * 否则代理开关对网页链路不生效。
+     */
     override fun hosts(): List<String> =
-        listOf("copilot.tencent.com", "codebuddy.cn", "workbuddy.ai")
+        listOf("copilot.tencent.com", "codebuddy.cn", "workbuddy.cn", "codebuddy.ai", "workbuddy.ai")
 
     // ------------------------------------------------------------------ 对话
 
@@ -818,6 +827,9 @@ class CodeBuddyProvider(
         /** 成长中心：任务、Buddy 旅行、盲盒都在这个前缀下。 */
         const val PATH_GROWTH = "/v2/activity/growth"
 
+        /** 官方默认模型（`name = "Auto"`）。 */
+        const val DEFAULT_MODEL_ID = "default-model"
+
         /** 设备授权等待中的业务码。 */
         const val CODE_LOGIN_PENDING = 11217L
 
@@ -841,10 +853,19 @@ class CodeBuddyProvider(
          */
         val FALLBACK_MODELS: List<ProviderModel> by lazy { loadBundledCatalog() ?: MINIMAL_MODELS }
 
+        /**
+         * 极简兜底：资源文件读不到时才用。
+         *
+         * 这里只放官方目录里**确实存在**的模型（旧版曾写过 `deepseek-v4-flash` /
+         * `deepseek-v4-pro` / `minimax-m2.5`，这三个 id 在官方目录里并不存在，
+         * 会导致默认请求打到空模型）。
+         */
         private val MINIMAL_MODELS: List<ProviderModel> = listOf(
             ProviderModel("default-model", "Auto", 176_000),
-            ProviderModel("glm-5.2", "GLM-5.2", 128_000),
-            ProviderModel("kimi-k2.5", "Kimi-K2.5", 128_000),
+            ProviderModel("glm-5.2", "GLM-5.2", 1_000_000),
+            ProviderModel("kimi-k2.5", "Kimi-K2.5", 164_000),
+            ProviderModel("deepseek-v4.1-flash", "DeepSeek-V4.1-Flash", 96_000),
+            ProviderModel("minimax-m3", "MiniMax-M3", 512_000),
         )
 
         private const val BUNDLED_CATALOG = "codebuddy-international-models.json"
