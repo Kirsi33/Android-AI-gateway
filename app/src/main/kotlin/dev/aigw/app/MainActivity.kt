@@ -120,6 +120,16 @@ class MainActivity : ComponentActivity() {
                         CookieLoginActivity.EXTRA_COOKIE_HOSTS,
                         state.inAppLoginCookieHosts.toTypedArray(),
                     )
+                    // 成功信号按上游类型给，命中即自动收尾（用户不用点「完成」）：
+                    //  - Trae / Antigravity / WorkBuddy：登录完会跳到本地回调端口；
+                    //  - LongCat：站内跳转、没有回调地址，靠关键 Cookie 判断。
+                    putExtra(
+                        CookieLoginActivity.EXTRA_SUCCESS_URL_PREFIXES,
+                        LocalHostCallbackPorts.map { "http://127.0.0.1:$it/" }.toTypedArray(),
+                    )
+                    if (state.inAppLoginCookieHosts.any { it.contains("longcat") }) {
+                        putExtra(CookieLoginActivity.EXTRA_SUCCESS_COOKIE, "passport_token_key")
+                    }
                 }
                 loginLauncher.launch(intent)
             }
@@ -358,3 +368,6 @@ private fun MainTabs(
         }
     }
 }
+
+/** 网关本地回调端口：Trae 51120、Antigravity 51121。 */
+private val LocalHostCallbackPorts = listOf(51120, 51121)
