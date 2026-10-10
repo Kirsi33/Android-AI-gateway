@@ -17,6 +17,14 @@ import dev.aigw.core.provider.QuotaPack
 class ProviderUiActions(
     /** 拉起 WebView 登录（Trae 回调型 / Antigravity OAuth）。 */
     val onWebLogin: (providerId: String) -> Unit = {},
+    /**
+     * 内嵌网页登录（LongCat 这类「凭证就是浏览器 Cookie」的上游）：
+     * 打开 [startUrl]，用户登录完成后由宿主读取 [cookieHosts] 下的 Cookie，
+     * 再通过 [onImport] 以 `{"cookie":"..."}` 的形式导入。
+     */
+    val onCookieLogin: (providerId: String, startUrl: String, cookieHosts: List<String>, title: String) -> Unit =
+        { _, _, _, _ -> }
+
     /** 设备授权登录（WorkBuddy）：拉起 WebView 并开始轮询；region 由组件按滑块传入。 */
     val onDeviceLogin: (providerId: String, region: String) -> Unit = { _, _ -> },
     /** 读供应商私有设置项（同步，取引擎内存值）。 */
