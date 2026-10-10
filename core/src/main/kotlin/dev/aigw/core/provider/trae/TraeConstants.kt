@@ -22,7 +22,7 @@ enum class TraeRegion(
     val consoleHost: String,
 ) {
     CN(
-        id = "trae.cn",
+        id = "cn",
         label = "国内版",
         agentHost = "https://trae-api-cn.mchost.guru",
         ugHost = "https://api.trae.cn",
@@ -30,7 +30,7 @@ enum class TraeRegion(
         consoleHost = "https://www.trae.cn",
     ),
     INTL(
-        id = "trae.ai",
+        id = "ai",
         label = "国际版",
         agentHost = "https://api.trae.ai",
         ugHost = "https://ug-normal.trae.ai",
