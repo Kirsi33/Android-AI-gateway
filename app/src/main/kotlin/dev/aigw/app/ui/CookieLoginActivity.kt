@@ -2,6 +2,7 @@ package dev.aigw.app.ui
 
 import android.app.Activity
 import android.content.Intent
+import android.graphics.Bitmap
 import android.graphics.Color
 import android.os.Bundle
 import android.view.Gravity
@@ -36,11 +37,26 @@ class CookieLoginActivity : Activity() {
     private var web: WebView? = null
     private var status: TextView? = null
 
+    /** 判定「登录已完成」的 URL 前缀（Trae 51120 / Antigravity 51121 的回调地址）。 */
+    private var successPrefixes: List<String> = emptyList()
+    /** 需要等待出现的 Cookie 名（LongCat 这类站内跳转、没有回调地址的上游）。 */
+    private var successCookieName: String = ""
+    /** 已经触发过自动确认，避免重复。 */
+    private var autoConfirmed = false
+    /** 本次要读取 Cookie 的域名（保存下来给自动确认路径用）。 */
+    private var pendingHosts: Array<String> = emptyArray()
+    /** 判断「关键 Cookie 是否出现」时要查的域名。 */
+    private var cookieHostsForCheck: List<String> = emptyList()
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
         val startUrl = intent.getStringExtra(EXTRA_START_URL).orEmpty()
         val cookieHosts = intent.getStringArrayExtra(EXTRA_COOKIE_HOSTS) ?: emptyArray()
+        successPrefixes = intent.getStringArrayExtra(EXTRA_SUCCESS_URL_PREFIXES)?.toList() ?: emptyList()
+        successCookieName = intent.getStringExtra(EXTRA_SUCCESS_COOKIE).orEmpty()
+        pendingHosts = cookieHosts
+        cookieHostsForCheck = cookieHosts.toList()
         val title = intent.getStringExtra(EXTRA_TITLE).orEmpty().ifEmpty { "登录" }
 
         if (startUrl.isEmpty()) {
@@ -131,14 +147,27 @@ class CookieLoginActivity : Activity() {
             override fun shouldOverrideUrlLoading(
                 view: WebView?,
                 request: WebResourceRequest?,
-            ): Boolean = false
+            ): Boolean {
+                maybeAutoConfirm(request?.url?.toString().orEmpty())
+                return false
+            }
 
             @Deprecated("仅老系统走这个重载")
-            override fun shouldOverrideUrlLoading(view: WebView?, url: String?): Boolean = false
+            override fun shouldOverrideUrlLoading(view: WebView?, url: String?): Boolean {
+                maybeAutoConfirm(url.orEmpty())
+                return false
+            }
+
+            override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+                super.onPageStarted(view, url, favicon)
+                maybeAutoConfirm(url.orEmpty())
+            }
 
             override fun onPageFinished(view: WebView?, url: String?) {
                 super.onPageFinished(view, url)
                 status?.text = "已打开：${url.orEmpty().take(60)}"
+                // 回调页渲染完再确认：给上游一个把 Set-Cookie 写完的窗口
+                maybeAutoConfirm(url.orEmpty())
             }
         }
 
@@ -149,8 +178,42 @@ class CookieLoginActivity : Activity() {
         }
     }
 
+    /**
+     * 检测登录是否已完成，完成就自动收尾。
+     *
+     * 两种信号：
+     *  1. **回调地址**（Trae 51120 / Antigravity 51121）—— 页面跳到 `http://127.0.0.1:5112x/...`
+     *     说明服务端已经下发凭证，此时直接读 Cookie 收尾，用户不用再点「完成」；
+     *  2. **关键 Cookie 出现**（LongCat 这类站内跳转、没有回调地址的上游）—— 只有登录成功后
+     *     浏览器才会拿到 `passport_token_key`，看到它就说明登录完成了。
+     */
+    private fun maybeAutoConfirm(url: String) {
+        if (autoConfirmed) return
+        val hitPrefix = successPrefixes.any { url.startsWith(it) }
+        val hitCookie = successCookieName.isNotEmpty() && hasCookieNamed(successCookieName)
+        if (!hitPrefix && !hitCookie) return
+        autoConfirmed = true
+        status?.text = "登录成功，正在保存…"
+        // 稍等一拍：让 Set-Cookie 落盘、页面别闪一下就关
+        web?.postDelayed({ collectAndFinish(true) }, AUTO_CONFIRM_DELAY_MS)
+    }
+
+    /** 目标域名下是否存在指定名字的 Cookie。 */
+    private fun hasCookieNamed(name: String): Boolean {
+        val manager = CookieManager.getInstance()
+        for (host in cookieHostsForCheck) {
+            val raw = manager.getCookie(host).orEmpty()
+            if (raw.split(';').any { it.trim().startsWith("$name=") }) return true
+        }
+        return false
+    }
+
     /** 读取目标域名下的 Cookie 并回传；拿不到就提示用户先登录。 */
-    private fun collectAndFinish(hosts: Array<String>) {
+    private fun collectAndFinish(hosts: Array<String>) = collectAndFinish(hosts, false)
+
+    private fun collectAndFinish(fromAuto: Boolean) = collectAndFinish(pendingHosts, fromAuto)
+
+    private fun collectAndFinish(hosts: Array<String>, fromAuto: Boolean) {
         val manager = CookieManager.getInstance()
         manager.flush()
         val builder = StringBuilder()
@@ -162,7 +225,9 @@ class CookieLoginActivity : Activity() {
             }
         }
         if (builder.isEmpty()) {
-            Toast.makeText(this, "还没读到登录信息，请先在页面里完成登录", Toast.LENGTH_LONG).show()
+            if (!fromAuto) {
+                Toast.makeText(this, "还没读到登录信息，请先在页面里完成登录", Toast.LENGTH_LONG).show()
+            }
             return
         }
         setResult(
@@ -200,6 +265,13 @@ class CookieLoginActivity : Activity() {
         const val EXTRA_COOKIE_HOSTS = "cookie_hosts"
         const val EXTRA_TITLE = "title"
         const val EXTRA_RESULT_COOKIE = "cookie"
+        /** 命中任一前缀即视为登录完成（回调地址）。 */
+        const val EXTRA_SUCCESS_URL_PREFIXES = "success_url_prefixes"
+        /** 出现这个 Cookie 即视为登录完成（没有回调地址的上游）。 */
+        const val EXTRA_SUCCESS_COOKIE = "success_cookie"
+
+        /** 自动确认后等多久再收尾，给 Set-Cookie 落盘留时间。 */
+        private const val AUTO_CONFIRM_DELAY_MS = 600L
         const val REQUEST_CODE = 8803
     }
 }
