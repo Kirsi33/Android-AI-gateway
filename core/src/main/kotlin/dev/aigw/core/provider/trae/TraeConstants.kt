@@ -60,10 +60,11 @@ enum class TraeRegion(
 
 /** Trae 上游常量。取值来自实测，改动需重新验证。 */
 object TraeConstants {
-    const val AGENT_HOST = TraeRegion.CN.agentHost
-    const val UG_HOST = TraeRegion.CN.ugHost
-    const val OAUTH_HOST = TraeRegion.CN.oauthHost
-    const val CONSOLE_HOST = TraeRegion.CN.consoleHost
+    // 注意：Kotlin 的 const val 只能用编译期常量初始化，不能引用 enum 成员。
+    val AGENT_HOST = TraeRegion.CN.agentHost
+    val UG_HOST = TraeRegion.CN.ugHost
+    val OAUTH_HOST = TraeRegion.CN.oauthHost
+    val CONSOLE_HOST = TraeRegion.CN.consoleHost
 
     const val CLIENT_ID = "en1oxy7wnw8j9n"
     const val APP_ID = "6eefa01c-1036-4c7e-9ca5-d891f63bfcd8"
