@@ -538,10 +538,37 @@ class CodeBuddyProvider(
                     id = modelId,
                     name = item.get("name")?.asString.orEmpty().ifEmpty { modelId },
                     contextWindow = item.get("maxInputTokens")?.asLong ?: 0L,
+                    extra = buildMap {
+                        // 上游给的是 "x0.79 credits" 这种串，抽出数值作为倍率展示
+                        parseCredits(item.get("credits")?.asString)?.let { put("rate", "$it×") }
+                        item.get("maxOutputTokens")?.asLong?.takeIf { it > 0 }?.let {
+                            put("maxOutput", it.toString())
+                        }
+                        if (item.get("supportsReasoning")?.asBoolean == true) put("reasoning", "true")
+                        if (item.get("supportsImages")?.asBoolean == true) put("vision", "true")
+                        if (item.get("supportsToolCall")?.asBoolean == true) put("tools", "true")
+                        item.get("vendor")?.asString?.takeIf { it.isNotBlank() }?.let { put("vendor", it) }
+                    },
                 ),
             )
         }
         return result
+    }
+
+    /**
+     * 解析上游的 `credits` 字段（形如 `"x0.79 credits"` / `"0.79"` / 数字）。
+     *
+     * 拿不到数字返回 null —— 界面显示「—」而不是编造一个倍率。
+     */
+    private fun parseCredits(raw: String?): String? {
+        val text = raw?.trim().orEmpty()
+        if (text.isEmpty()) return null
+        val token = text.removePrefix("x").removePrefix("X").trim().split(' ').firstOrNull().orEmpty()
+        val value = token.toDoubleOrNull() ?: return null
+        if (!value.isFinite() || value < 0) return null
+        // 0.79 -> "0.79"；0.8 -> "0.8"；1.0 -> "1"
+        return if (value == value.toLong().toDouble()) value.toLong().toString()
+        else value.toString().trimEnd('0').trimEnd('.')
     }
 
     // ------------------------------------------------------------------ HTTP
