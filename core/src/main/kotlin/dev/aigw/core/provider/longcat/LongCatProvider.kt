@@ -164,7 +164,7 @@ class LongCatProvider(
         } catch (e: Exception) {
             return FailedChatCall(0, e.message ?: "连接失败")
         }
-        return consume(conn, model, streaming)
+        return consume(conn, model, streaming, reason && !search)
     }
 
     /** 登录态通道：先建会话，再发消息。 */
@@ -191,7 +191,7 @@ class LongCatProvider(
         } catch (e: Exception) {
             return FailedChatCall(0, e.message ?: "连接失败")
         }
-        return consume(conn, model, streaming)
+        return consume(conn, model, streaming, reason && !search)
     }
 
     private fun createSession(credential: LongCatAccount, agentId: String): String {
@@ -219,7 +219,12 @@ class LongCatProvider(
     }
 
     /** 统一处理上游响应：非 2xx / 非 SSE / 空回复都要有可检测的结论。 */
-    private fun consume(conn: HttpURLConnection, model: String, streaming: Boolean): ChatCall {
+    private fun consume(
+        conn: HttpURLConnection,
+        model: String,
+        streaming: Boolean,
+        deferContent: Boolean,
+    ): ChatCall {
         val status = try {
             conn.responseCode
         } catch (e: Exception) {
@@ -263,7 +268,9 @@ class LongCatProvider(
             }
         }
 
-        val translator = LongCatSseTranslator(model)
+        // 思考模式（reasonEnabled=1 且未联网）下，上游 content 里混有开场套话和最终答案，
+        // 只有 finish.finalContentX 能区分。此时延迟发送 content，等 finish 再定稿。
+        val translator = LongCatSseTranslator(model, deferContent = deferContent)
         val transformed = LineTransformStream(
             source = raw,
             transform = { line -> translator.feed(line) },
