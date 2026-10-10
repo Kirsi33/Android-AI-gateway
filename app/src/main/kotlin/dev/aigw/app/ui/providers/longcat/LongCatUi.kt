@@ -121,7 +121,7 @@ object LongCatUi : ProviderUi {
     private fun AccountCard(status: AccountStatus, actions: ProviderUiActions) {
         SectionCard {
             Text(
-                status.account.nickname.ifEmpty { status.account.uid },
+                status.nickname.ifEmpty { status.uid },
                 style = MaterialTheme.typography.titleSmall,
             )
             Text(
@@ -129,7 +129,7 @@ object LongCatUi : ProviderUi {
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            val region = actions.regionOf(id, status.account.uid)
+            val region = actions.regionOf(id, status.uid)
             if (region.isNotEmpty()) {
                 Text(
                     if (region == "cn") "通道：Cookie 登录" else "通道：免登录",
@@ -142,11 +142,11 @@ object LongCatUi : ProviderUi {
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
             ) {
                 OutlinedButton(
-                    onClick = { actions.onRefreshCredits(id, status.account.uid) },
+                    onClick = { actions.onRefreshCredits(id, status.uid) },
                     modifier = Modifier.weight(1f),
                 ) { Text("刷新") }
                 OutlinedButton(
-                    onClick = { actions.onRemoveAccount(id, status.account.uid) },
+                    onClick = { actions.onRemoveAccount(id, status.uid) },
                     modifier = Modifier.weight(1f),
                 ) { Text("删除") }
             }
