@@ -1,5 +1,10 @@
 package dev.aigw.app.ui
 
+import android.app.Activity
+import android.content.Intent
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -14,8 +19,13 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import dev.aigw.app.ui.providers.ProviderUiActions
@@ -37,12 +47,38 @@ fun ProviderDetailScreen(
     val ui = ProviderUiRegistry.require(providerId)
     val info = state.providerOf(providerId)
     val accounts = state.accountsOf(providerId)
+    val context = LocalContext.current
+
+    // 内嵌网页登录：打开上游网站，用户登录完成后把读到的 Cookie 交回 ViewModel 导入。
+    // 不注入 JS、不开多窗口，旧机器上也能跑（详见 CookieLoginActivity 的兼容说明）。
+    val cookieLogin = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult(),
+    ) { result ->
+        if (result.resultCode != Activity.RESULT_OK) return@rememberLauncherForActivityResult
+        val cookie = result.data?.getStringExtra(CookieLoginActivity.EXTRA_RESULT_COOKIE).orEmpty()
+        val target = pendingCookieProvider
+        if (cookie.isNotEmpty() && target.isNotEmpty()) {
+            viewModel.importCredentials(target, """{"cookie":${jsonQuote(cookie)}}""")
+        }
+        pendingCookieProvider = ""
+    }
+    // 记住这次是给哪个供应商登录（回调时 Activity 只带回 Cookie）
+    var pendingCookieProvider by remember { mutableStateOf("") }
 
     val actions = ProviderUiActions(
         // 登录一律交给系统浏览器：本机 WebView 渲染异常（整页缩放错乱、输入框文字镜像），
         // 网关会在本地临时监听回调端口接住登录结果。
         onWebLogin = { id -> viewModel.beginBrowserLogin(id) },
         onDeviceLogin = { id, region -> viewModel.beginDeviceLogin(id, region) },
+        onCookieLogin = { id, url, hosts, title ->
+            pendingCookieProvider = id
+            val intent = Intent(context, CookieLoginActivity::class.java).apply {
+                putExtra(CookieLoginActivity.EXTRA_START_URL, url)
+                putExtra(CookieLoginActivity.EXTRA_COOKIE_HOSTS, hosts.toTypedArray())
+                putExtra(CookieLoginActivity.EXTRA_TITLE, title)
+            }
+            cookieLogin.launch(intent)
+        },
         onSmsLogin = { id, phone, code, onResult ->
             if (code.isEmpty()) {
                 viewModel.sendSmsCode(id, phone, onResult)
@@ -179,4 +215,20 @@ private fun LinkText(text: String, onClick: () -> Unit) {
         color = MaterialTheme.colorScheme.primary,
         modifier = Modifier.clickable(onClick = onClick),
     )
+}
+
+/** 极简 JSON 字符串转义（Cookie 里可能带引号或反斜杠）。 */
+private fun jsonQuote(value: String): String {
+    val builder = StringBuilder("\"")
+    for (ch in value) {
+        when (ch) {
+            '"' -> builder.append("\\\"")
+            '\\' -> builder.append("\\\\")
+            '\n' -> builder.append("\\n")
+            '\r' -> builder.append("\\r")
+            '\t' -> builder.append("\\t")
+            else -> if (ch < ' ') builder.append(String.format("\\u%04x", ch.code)) else builder.append(ch)
+        }
+    }
+    return builder.append("\"").toString()
 }
