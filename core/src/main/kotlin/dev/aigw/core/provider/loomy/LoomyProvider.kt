@@ -2,6 +2,7 @@ package dev.aigw.core.provider.loomy
 
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
+import dev.aigw.core.provider.ACTION_TASKS
 import dev.aigw.core.provider.AggregatedChatCall
 import dev.aigw.core.provider.AuthKind
 import dev.aigw.core.provider.ChatCall
@@ -229,7 +230,9 @@ class LoomyProvider(
                     }
                 }
 
-                ACTION_COMPLETE_ALL_TASKS -> {
+                // 同时认标准名 ACTION_TASKS 与历史名 complete_all_tasks：
+                // 早先 UI 与实现各用了一套名字，导致点「一键做任务」报「该供应商不支持 tasks」。
+                ACTION_TASKS, ACTION_COMPLETE_ALL_TASKS -> {
                     val pending = taskClient.tasks(loomy.session).tasks.filter { !it.completed }
                     if (pending.isEmpty()) return ProviderActionResult.success("所有任务都已完成")
                     val lines = pending.map { task ->
