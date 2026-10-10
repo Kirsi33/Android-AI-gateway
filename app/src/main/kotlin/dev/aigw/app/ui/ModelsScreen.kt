@@ -40,6 +40,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -61,8 +62,15 @@ import dev.aigw.core.provider.RoutedModel
 fun ModelsScreen(state: AppUiState, viewModel: AppViewModel) {
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
-    // 按 routePrefix 分组：区域型供应商（如 WorkBuddy 国内与国外）各成一个分组
-    val grouped = remember(state.models) { state.models.groupBy { it.routePrefix } }
+    // 按 routePrefix 分组：区域型供应商（如 WorkBuddy 国内与国外）各成一个分组。
+    // 用 derivedStateOf 而不是 remember(key)：模型列表在流式加载期间会被不断替换，
+    // remember(key) 每次都是新引用、必然重算；derivedStateOf 只在真正读到的值变化时才失效，
+    // 且能避免与之无关的重组（如折叠状态变化）触发分组重算。
+    val grouped by remember {
+        derivedStateOf {
+            state.models.groupBy { it.routePrefix }
+        }
+    }
     // 折叠状态：记「被折叠」的分组（默认全展开）。用 rememberSaveable 让旋转屏幕后保持。
     val collapsed = rememberSaveable(
         saver = androidx.compose.runtime.saveable.listSaver(
@@ -192,65 +200,24 @@ fun ModelsScreen(state: AppUiState, viewModel: AppViewModel) {
                     }
                 }
             } else {
-                // 已加载的模型按组展示
+                // 已加载的模型按组展示。
+                //
+                // 性能注意：折叠状态不要在这里读——状态一变整页都会重组，
+                // 模型多的时候点一下要卡好几帧。这里把「这一组是否折叠」的判断
+                // 下沉到 [ModelGroupSection] 内部，由它自己订阅状态，
+                // 这样点击只重组那一个分组。
                 for ((routePrefix, models) in grouped) {
-                    val title = models.firstOrNull()?.providerName ?: routePrefix
-                    val isCollapsed = routePrefix in collapsed
-                    item(key = "header-$routePrefix") {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(MaterialTheme.shapes.large)
-                                .background(MaterialTheme.colorScheme.surface)
-                                .bouncyClick {
-                                    // 折叠/展开这一组
-                                    if (isCollapsed) collapsed.remove(routePrefix)
-                                    else collapsed.add(routePrefix)
-                                }
-                                .padding(start = 14.dp, end = 14.dp, top = 12.dp, bottom = 12.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                            ) {
-                                Icon(
-                                    imageVector = if (isCollapsed) Icons.Filled.ExpandMore
-                                    else Icons.Filled.ExpandLess,
-                                    contentDescription = if (isCollapsed) "展开" else "折叠",
-                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    modifier = Modifier.size(18.dp),
-                                )
-                                SectionLabel(title)
-                            }
-                            Box(
-                                modifier = Modifier
-                                    .clip(CircleShape)
-                                    .background(MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.6f))
-                                    .padding(horizontal = 8.dp, vertical = 2.dp),
-                            ) {
-                                Text(
-                                    text = "${models.size} 款",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSecondaryContainer,
-                                )
-                            }
-                        }
-                    }
-                    if (isCollapsed) continue
-                    items(models, key = { it.fullId }) { model ->
-                        val testStatus = state.modelTestLatencies[model.fullId]
-                        ModelRow(
-                            model = model,
-                            testStatus = testStatus,
-                            onCopy = {
-                                clipboard.setText(AnnotatedString(model.fullId))
-                                Toast.makeText(context, "已复制模型名称：${model.fullId}", Toast.LENGTH_SHORT).show()
-                            },
-                            onTest = { viewModel.testModel(model) },
-                        )
-                    }
+                    ModelGroupSection(
+                        routePrefix = routePrefix,
+                        models = models,
+                        collapsed = collapsed,
+                        testLatencies = state.modelTestLatencies,
+                        onCopy = { id ->
+                            clipboard.setText(AnnotatedString(id))
+                            Toast.makeText(context, "已复制模型名称：$id", Toast.LENGTH_SHORT).show()
+                        },
+                        onTest = { viewModel.testModel(it) },
+                    )
                 }
 
                 // 若已有部分模型展示，而剩余供应商仍在加载中，在下方继续展示该供应商的骨架占位
@@ -463,5 +430,81 @@ private fun ModelSkeletonCard(
                 )
             }
         }
+    }
+}
+
+/**
+ * 一个供应商分组的渲染单元。
+ *
+ * 把分组独立成 Composable 是为了让折叠状态的变化**只重组这一组**：
+ * 如果在调用方读 [collapsed]，任何一次折叠都会让整个 LazyColumn 重组，
+ * 模型多时手感明显发涩。
+ *
+ * [collapsed] 传的是同一个 [SnapshotStateList]，读取放在函数内部，
+ * Compose 的按需重组会把它限定在本函数范围。
+ */
+@Composable
+private fun ModelGroupSection(
+    routePrefix: String,
+    models: List<RoutedModel>,
+    collapsed: androidx.compose.runtime.snapshots.SnapshotStateList<String>,
+    testLatencies: Map<String, ModelTestStatus>,
+    onCopy: (String) -> Unit,
+    onTest: (RoutedModel) -> Unit,
+) {
+    val isCollapsed = routePrefix in collapsed
+    val title = models.firstOrNull()?.providerName ?: routePrefix
+
+    item(key = "header-$routePrefix") {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(MaterialTheme.shapes.large)
+                .background(MaterialTheme.colorScheme.surface)
+                // 标题栏不用 bouncyClick：那是给按钮用的超弹动画（spring damping 0.36），
+                // 放在会滚动的列表项上每帧都要跑插值，是折叠发卡的另一个原因。
+                .clickable {
+                    if (routePrefix in collapsed) collapsed.remove(routePrefix)
+                    else collapsed.add(routePrefix)
+                }
+                .padding(start = 14.dp, end = 14.dp, top = 12.dp, bottom = 12.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Icon(
+                    imageVector = if (isCollapsed) Icons.Filled.ExpandMore else Icons.Filled.ExpandLess,
+                    contentDescription = if (isCollapsed) "展开" else "折叠",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(18.dp),
+                )
+                SectionLabel(title)
+            }
+            Box(
+                modifier = Modifier
+                    .clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.6f))
+                    .padding(horizontal = 8.dp, vertical = 2.dp),
+            ) {
+                Text(
+                    text = "${models.size} 款",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSecondaryContainer,
+                )
+            }
+        }
+    }
+
+    if (isCollapsed) return
+    items(models, key = { it.fullId }) { model ->
+        ModelRow(
+            model = model,
+            testStatus = testLatencies[model.fullId],
+            onCopy = { onCopy(model.fullId) },
+            onTest = { onTest(model) },
+        )
     }
 }
