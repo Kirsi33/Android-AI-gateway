@@ -257,7 +257,14 @@ class TraeProvider(
         action: String,
         payload: JsonObject,
     ): ProviderActionResult = when (action) {
-        ACTION_CHECKIN -> checkin(account)
+        ACTION_CHECKIN -> {
+            // 国际版没有签到制度（前端 JS 里 checkin 零命中）
+            if (regionOfAccount(account) == TraeRegion.INTL) {
+                ProviderActionResult.failure("国际版没有签到制度")
+            } else {
+                checkin(account)
+            }
+        }
         else -> ProviderActionResult.unsupported(action)
     }
 
