@@ -23,7 +23,7 @@ class ProviderUiActions(
      * 再通过 [onImport] 以 `{"cookie":"..."}` 的形式导入。
      */
     val onCookieLogin: (providerId: String, startUrl: String, cookieHosts: List<String>, title: String) -> Unit =
-        { _, _, _, _ -> }
+        { _, _, _, _ -> },
 
     /** 设备授权登录（WorkBuddy）：拉起 WebView 并开始轮询；region 由组件按滑块传入。 */
     val onDeviceLogin: (providerId: String, region: String) -> Unit = { _, _ -> },
