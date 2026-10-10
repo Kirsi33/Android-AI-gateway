@@ -66,10 +66,18 @@ class LongCatProvider(
 
     override fun listModels(account: ProviderAccount?): ProviderModelCatalogView {
         val models = LongCatConstants.MODEL_IDS.map { id ->
+            val (agent, reason, search) = LongCatConstants.resolve(id)
             ProviderModel(
                 id = id,
                 name = describe(id),
                 contextWindow = 128_000,
+                extra = buildMap {
+                    // LongCat 上游没有倍率/价格字段（请求体里连 model 都没有），
+                    // 这里只标注模型的能力开关，倍率留给界面显示「—」。
+                    if (reason) put("reasoning", "true")
+                    if (search) put("search", "true")
+                    if (agent == LongCatConstants.AGENT_PRO) put("agent", "pro")
+                },
             )
         }
         return ProviderModelCatalogView(models, fromFallback = true, error = "")
