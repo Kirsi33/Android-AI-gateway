@@ -154,6 +154,12 @@ object LoomyUi : ProviderUi {
                 singleLine = true,
                 label = { Text("兑换邀请码") },
             )
+            Text(
+                text = "邀请码是双向的：填别人的码，你和对方都能得积分。" +
+                    "自己的邀请码在 Loomy 官方 App / 网页的「邀请好友」页面里。",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
             Button(
                 onClick = {
                     val value = invite.trim()
@@ -177,6 +183,11 @@ object LoomyUi : ProviderUi {
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true,
                 label = { Text("兑换码") },
+            )
+            Text(
+                text = "兑换码由讯飞官方发放（节日活动、发布会、官方社群福利），App 里不生成。",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Button(
                 onClick = {
