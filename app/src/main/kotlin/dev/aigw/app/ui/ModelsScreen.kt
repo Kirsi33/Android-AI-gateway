@@ -26,6 +26,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -207,7 +208,7 @@ fun ModelsScreen(state: AppUiState, viewModel: AppViewModel) {
                 // 下沉到 [ModelGroupSection] 内部，由它自己订阅状态，
                 // 这样点击只重组那一个分组。
                 for ((routePrefix, models) in grouped) {
-                    ModelGroupSection(
+                    modelGroupSection(
                         routePrefix = routePrefix,
                         models = models,
                         collapsed = collapsed,
@@ -443,8 +444,7 @@ private fun ModelSkeletonCard(
  * [collapsed] 传的是同一个 [SnapshotStateList]，读取放在函数内部，
  * Compose 的按需重组会把它限定在本函数范围。
  */
-@Composable
-private fun ModelGroupSection(
+private fun LazyListScope.modelGroupSection(
     routePrefix: String,
     models: List<RoutedModel>,
     collapsed: androidx.compose.runtime.snapshots.SnapshotStateList<String>,
@@ -452,10 +452,12 @@ private fun ModelGroupSection(
     onCopy: (String) -> Unit,
     onTest: (RoutedModel) -> Unit,
 ) {
-    val isCollapsed = routePrefix in collapsed
-    val title = models.firstOrNull()?.providerName ?: routePrefix
-
+    // 注意：这里**不能**在 LazyListScope 作用域里读 collapsed——
+    // 它不是 @Composable，读了也不会订阅变更。所以把读取放进 item 的内容 lambda，
+    // 让 Compose 在那一层做订阅，折叠时只重建这一个分组。
     item(key = "header-$routePrefix") {
+        val isCollapsed = routePrefix in collapsed
+        val title = models.firstOrNull()?.providerName ?: routePrefix
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -498,7 +500,7 @@ private fun ModelGroupSection(
         }
     }
 
-    if (isCollapsed) return
+    if (routePrefix in collapsed) return
     items(models, key = { it.fullId }) { model ->
         ModelRow(
             model = model,
