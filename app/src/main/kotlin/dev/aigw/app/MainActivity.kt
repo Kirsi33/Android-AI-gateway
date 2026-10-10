@@ -8,7 +8,10 @@ import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
+import android.content.Intent
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.Arrangement
@@ -55,6 +58,7 @@ import dev.aigw.app.service.GatewayTileService
 import dev.aigw.app.ui.pushPopSpec
 import dev.aigw.app.ui.tabContentSpec
 import dev.aigw.app.ui.AppUiState
+import dev.aigw.app.ui.CookieLoginActivity
 import dev.aigw.app.ui.ApiSettingsScreen
 import dev.aigw.app.ui.AppViewModel
 import dev.aigw.app.ui.AppearanceThemeScreen
@@ -98,6 +102,29 @@ class MainActivity : ComponentActivity() {
             val vm: AppViewModel = viewModel(factory = appViewModelFactory())
             viewModel = vm
             val state by vm.state.collectAsStateWithLifecycle()
+
+            // 内嵌登录页：ViewModel 把要打开的 URL 放进 state，这里负责拉起 Activity，
+            // 并把结果（Cookie / 取消）回传给 ViewModel。全部在 App 内完成，不跳系统浏览器。
+            val loginLauncher = rememberLauncherForActivityResult(
+                ActivityResultContracts.StartActivityForResult(),
+            ) { result ->
+                val cookie = result.data?.getStringExtra(CookieLoginActivity.EXTRA_RESULT_COOKIE).orEmpty()
+                vm.applyInAppLoginCookie(cookie)
+            }
+            LaunchedEffect(state.inAppLoginUrl) {
+                val url = state.inAppLoginUrl
+                if (url.isEmpty()) return@LaunchedEffect
+                val intent = Intent(this@MainActivity, CookieLoginActivity::class.java).apply {
+                    putExtra(CookieLoginActivity.EXTRA_START_URL, url)
+                    putExtra(CookieLoginActivity.EXTRA_TITLE, state.inAppLoginTitle)
+                    putExtra(
+                        CookieLoginActivity.EXTRA_COOKIE_HOSTS,
+                        state.inAppLoginCookieHosts.toTypedArray(),
+                    )
+                }
+                loginLauncher.launch(intent)
+            }
+
             AiGatewayTheme(
                 dynamicColor = state.dynamicColor,
                 themeMode = state.themeMode,
