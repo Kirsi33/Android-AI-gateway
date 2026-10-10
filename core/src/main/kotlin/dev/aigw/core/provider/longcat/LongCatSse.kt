@@ -101,7 +101,8 @@ class LongCatSseTranslator(
         obj.longOrNull("created")?.takeIf { it > 0 }?.let { created = it }
 
         val event = obj.objOrNull("event") ?: return emptyList()
-        return when (val type = event.str("type")) {
+        val type = event.str("type")
+        return when (type) {
             "create" -> listOf(roleChunk())
 
             "content" -> {
