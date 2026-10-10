@@ -93,6 +93,10 @@ class TraeProvider(
         return TraeRegion.infer(trae.domain, trae.apiHost)
     }
 
+    /** 已经解析成 [TraeAccount] 时直接用它的域名判区域，避免再解析一遍。 */
+    private fun regionOfAccount(account: TraeAccount?): TraeRegion =
+        TraeRegion.infer(account?.domain, account?.apiHost)
+
     // ------------------------------------------------------------------ 模型
 
     override fun listModels(account: ProviderAccount?): ProviderModelCatalogView {
