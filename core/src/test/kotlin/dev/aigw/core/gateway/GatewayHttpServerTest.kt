@@ -74,19 +74,17 @@ class GatewayHttpServerTest {
     }
 
     @Test
-    fun `模型列表走内置快照，不带账号也能查`() {
+    fun `不带账号时模型列表为空但接口正常`() {
+        // 模型目录只在登录后拉取：没有账号时返回空列表，但 /v1/models 仍是合法的
+        // OpenAI 结构（客户端不该因此报错）。
         withServer { port ->
             val response = send(
                 port,
                 "GET /v1/models HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
             )
             assertTrue(response.startsWith("HTTP/1.1 200"), response.lineSequence().first())
-            // Trae 加了区域支持（国内/国际）后，模型前缀按区域拆分为 trae-cn / trae-ai
-            assertTrue(
-                response.contains("\"trae-cn/glm-5.2\"") || response.contains("\"trae/glm-5.2\""),
-                "模型 id 应带 provider 前缀",
-            )
-            assertTrue(response.contains("\"object\":\"list\""))
+            assertTrue(response.contains("\"object\":\"list\""), "应返回标准 list 结构")
+            assertTrue(response.contains("\"data\":[]") || response.contains("\"data\": []"), "无账号时 data 应为空")
         }
     }
 
