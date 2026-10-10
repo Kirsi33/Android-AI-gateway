@@ -271,7 +271,7 @@ class CodeBuddyProvider(
             runCatching {
                 val (status, body) = postJson("${billingRoot}$path", credential, "{}", headers)
                 if (status !in 200..299) return@runCatching
-                val credit = firstNumber(jsonOf(body), "credit", "reward_credit", "amount")
+                val credit = jsonOf(body)?.firstNumber("credit", "reward_credit", "amount")
                 if (credit != null) parts.add("$label +$credit")
             }
         }
@@ -304,7 +304,7 @@ class CodeBuddyProvider(
             val first = "${chatBase(credential)}/activity/growth/buddy/first"
             val (status, body) = postJson(first, credential, "{}", headers)
             if (status in 200..299) {
-                val credit = firstNumber(jsonOf(body), "credit", "reward_credit")
+                val credit = jsonOf(body)?.firstNumber("credit", "reward_credit")
                 parts.add(if (credit != null) "领养 Buddy +$credit" else "领养 Buddy")
             }
         }
@@ -349,7 +349,7 @@ class CodeBuddyProvider(
             val root = chatBase(credential)
             val (status, body) = getJson("$root/activity/growth/lottery/summary", headers)
             if (status !in 200..299) return@runCatching
-            val chances = firstNumber(jsonOf(body), "chances", "chance", "count") ?: return@runCatching
+            val chances = jsonOf(body)?.firstNumber("chances", "chance", "count") ?: return@runCatching
             if (chances <= 0) return@runCatching
             val draws = minOf(chances.toInt(), MAX_LOTTERY_DRAWS)
             repeat(draws) {
@@ -360,7 +360,7 @@ class CodeBuddyProvider(
                     headers,
                 )
                 if (rs in 200..299) {
-                    val prize = firstString(jsonOf(rb), "prize_code")
+                    val prize = jsonOf(rb)?.firstString("prize_code")
                     parts.add(if (prize.isEmpty()) "抽奖" else "抽奖 $prize")
                 }
             }
@@ -383,14 +383,14 @@ class CodeBuddyProvider(
             if (payload.get("in_period")?.asBoolean != true) return@runCatching
             payload.arrayOrNull("tasks")?.forEach { element ->
                 val task = runCatching { element.asJsonObject }.getOrNull() ?: return@forEach
-                val code = firstString(task, "task_code")
+                val code = task.firstString("task_code")
                 if (code.isEmpty()) return@forEach
                 val done = task.objOrNull("progress")?.let { p ->
-                    val cur = firstNumber(p, "current", "progress") ?: 0.0
-                    val target = firstNumber(p, "target", "target_count") ?: 1.0
+                    val cur = p.firstNumber("current", "progress") ?: 0.0
+                    val target = p.firstNumber("target", "target_count") ?: 1.0
                     cur >= target && target > 0
                 } ?: false
-                val st = firstString(task, "status").lowercase()
+                val st = task.firstString("status").lowercase()
                 if (!done || st == "claimed" || st == "received") return@forEach
                 val (rs, _) = postJson("$root/portal/activity/school/tasks/$code/claim", credential, "{}", headers)
                 if (rs in 200..299) parts.add("开学季任务 $code")
@@ -400,7 +400,7 @@ class CodeBuddyProvider(
             if (cs in 200..299) {
                 val balance = jsonOf(cb)?.let { o ->
                     (o.objOrNull("chance") ?: o.objOrNull("data")?.objOrNull("chance"))?.let {
-                        firstNumber(it, "balance", "count")
+                        it.firstNumber("balance", "count")
                     }
                 } ?: 0.0
                 if (balance > 0) {
@@ -411,7 +411,7 @@ class CodeBuddyProvider(
                         headers,
                     )
                     if (ws in 200..299) {
-                        val prize = firstString(jsonOf(wb), "prize_code")
+                        val prize = jsonOf(wb)?.firstString("prize_code")
                         parts.add(if (prize.isEmpty()) "开学季转盘" else "开学季转盘 $prize")
                     }
                 }
