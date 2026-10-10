@@ -28,6 +28,7 @@ import dev.aigw.core.provider.StreamingChatCall
 import dev.aigw.core.provider.UpstreamError
 import dev.aigw.core.util.arrayOrNull
 import dev.aigw.core.util.objOrNull
+import dev.aigw.core.util.str
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.net.HttpURLConnection
@@ -1019,6 +1020,9 @@ class CodeBuddyProvider(
         /** 成长中心：任务、Buddy 旅行、盲盒都在这个前缀下。 */
         const val PATH_GROWTH = "/v2/activity/growth"
 
+        /** 抽奖单次最多抽几次（官方客户端有硬上限，这里取一个保守值）。 */
+        const val MAX_LOTTERY_DRAWS = 10
+
         /** 官方默认模型（`name = "Auto"`）。 */
         const val DEFAULT_MODEL_ID = "default-model"
 
@@ -1181,23 +1185,6 @@ internal fun JsonObject.firstString(vararg keys: String): String {
     return ""
 }
 
-/** 按顺序取第一个能解析成数字的字段（用于 credits / reward_credit 这类可能是字符串的字段）。 */
-internal fun JsonObject.firstNumber(vararg keys: String): Double? {
-    for (key in keys) {
-        val value = get(key) ?: continue
-        if (value.isJsonNull) continue
-        if (value.isJsonPrimitive) {
-            val prim = value.asJsonPrimitive
-            if (prim.isNumber) return prim.asDouble
-            prim.asString.trim().toDoubleOrNull()?.let { return it }
-        }
-    }
-    return null
-}
-
-/** 生成一个小写 UUIDv4（幂等键用，每次请求都要全新）。 */
-internal fun uuid4(): String = java.util.UUID.randomUUID().toString()
-
 internal fun JsonObject.firstLong(vararg keys: String): Long {
     for (key in keys) {
         val value = get(key) ?: continue
@@ -1237,3 +1224,20 @@ internal fun jwtClaim(accessToken: String, vararg keys: String): String {
     val obj = runCatching { JsonParser.parseString(json).asJsonObject }.getOrNull() ?: return ""
     return obj.firstString(*keys)
 }
+
+/** 按顺序取第一个能解析成数字的字段（用于 credits / reward_credit 这类可能是字符串的字段）。 */
+internal fun JsonObject.firstNumber(vararg keys: String): Double? {
+    for (key in keys) {
+        val value = get(key) ?: continue
+        if (value.isJsonNull) continue
+        if (value.isJsonPrimitive) {
+            val prim = value.asJsonPrimitive
+            if (prim.isNumber) return prim.asDouble
+            prim.asString.trim().toDoubleOrNull()?.let { return it }
+        }
+    }
+    return null
+}
+
+/** 生成一个小写 UUIDv4（幂等键用，每次请求都要全新）。 */
+internal fun uuid4(): String = java.util.UUID.randomUUID().toString()
