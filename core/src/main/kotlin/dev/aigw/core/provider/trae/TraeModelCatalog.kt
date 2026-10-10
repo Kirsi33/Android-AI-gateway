@@ -29,9 +29,13 @@ class TraeModelCatalog(
         val now = nowMillis()
         cached?.let { if (now - fetchedAt < TTL_MILLIS) return it }
 
+        // 没有账号就不列模型（内置快照只在「有账号但拉取失败」时才兜底），
+        // 否则用户会以为这些模型能直接用，实际一发请求就缺凭证。
         if (account == null) {
-            fromFallback = true
-            return FALLBACK
+            // 没有账号不算失败：登录前本就不该有模型。
+            fromFallback = false
+            lastError = ""
+            return emptyList()
         }
         if (lastFailureAt != 0L && now - lastFailureAt < FAIL_TTL_MILLIS) {
             fromFallback = true
