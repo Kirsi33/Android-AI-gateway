@@ -99,15 +99,33 @@ fun ModelsScreen(state: AppUiState, viewModel: AppViewModel) {
             title = "模型",
             subtitle = subtitleText,
             actions = {
-                Icon(
-                    Icons.Filled.Refresh,
-                    contentDescription = "刷新",
-                    tint = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier
-                        .bouncyClick { viewModel.refreshModels() }
-                        .padding(6.dp)
-                        .graphicsLayer { rotationZ = iconRotation },
-                )
+                // 「只看可用模型」：隐藏上游的非对话内部条目（如 Trae 的内部 config）
+                val only = state.settings.onlyUsableModels
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        if (only) "只看可用" else "全部模型",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = if (only) MaterialTheme.colorScheme.primary
+                        else MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier
+                            .clip(MaterialTheme.shapes.small)
+                            .clickable {
+                                viewModel.updateSettings(
+                                    state.settings.copy(onlyUsableModels = !only),
+                                )
+                            }
+                            .padding(horizontal = 8.dp, vertical = 6.dp),
+                    )
+                    Icon(
+                        Icons.Filled.Refresh,
+                        contentDescription = "刷新",
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier
+                            .bouncyClick { viewModel.refreshModels() }
+                            .padding(6.dp)
+                            .graphicsLayer { rotationZ = iconRotation },
+                    )
+                }
             },
         )
 
@@ -263,6 +281,44 @@ private fun ModelRow(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+            // 能力标记：只有上游明确给了才显示
+            val tags = buildList {
+                if (model.model.extra["reasoning"] == "true") add("思考")
+                if (model.model.extra["search"] == "true") add("联网")
+                if (model.model.extra["vision"] == "true") add("识图")
+                if (model.model.extra["tools"] == "true") add("工具")
+                model.model.extra["maxOutput"]?.let { add("输出 ${it}") }
+                model.model.extra["vendor"]?.takeIf { it.isNotBlank() }?.let { add(it) }
+            }
+            if (tags.isNotEmpty()) {
+                Text(
+                    text = tags.joinToString(" · "),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f),
+                )
+            }
+            // 倍率：不是所有上游都有公开数据，没有就整行不渲染（不要编造）
+            val rateLabel = model.model.extra["rate"]
+            val rateDiscount = model.model.extra["rateDiscount"]
+            if (!rateLabel.isNullOrEmpty()) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(5.dp),
+                ) {
+                    Text(
+                        text = "倍率 $rateLabel",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                    if (!rateDiscount.isNullOrEmpty()) {
+                        Text(
+                            text = "限时 $rateDiscount",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.tertiary,
+                        )
+                    }
+                }
+            }
         }
 
         // 按钮左侧显示延迟：<5000ms 绿色，>=5000ms 橙色，失败/超时 红色
