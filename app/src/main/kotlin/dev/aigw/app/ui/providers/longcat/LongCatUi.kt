@@ -75,9 +75,21 @@ object LongCatUi : ProviderUi {
 
             if (!expanded) {
                 OutlinedButton(
+                    onClick = {
+                        // 内嵌网页登录：打开 longcat.chat，用户登录完由宿主读 Cookie
+                        actions.onCookieLogin(
+                            id,
+                            "https://longcat.chat/",
+                            listOf("https://longcat.chat/"),
+                            "登录 LongCat",
+                        )
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text("网页登录（推荐）") }
+                OutlinedButton(
                     onClick = { expanded = true },
                     modifier = Modifier.fillMaxWidth(),
-                ) { Text("用 Cookie 登录（更稳定）") }
+                ) { Text("手动粘贴 Cookie") }
                 return@SectionCard
             }
 
