@@ -80,11 +80,11 @@ fun ProviderDetailScreen(
             }
             cookieLogin.launch(intent)
         },
-        onSmsLogin = { id, phone, code, onResult ->
+        onSmsLogin = { id, phone, code, ccode, onResult ->
             if (code.isEmpty()) {
-                viewModel.sendSmsCode(id, phone, onResult)
+                viewModel.sendSmsCode(id, phone, ccode, onResult)
             } else {
-                viewModel.smsLogin(id, phone, code, onResult)
+                viewModel.smsLogin(id, phone, code, ccode, onResult)
             }
         },
         onImport = { id, raw -> viewModel.importCredentials(id, raw) },
