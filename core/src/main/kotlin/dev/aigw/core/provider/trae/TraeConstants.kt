@@ -30,7 +30,7 @@ enum class TraeRegion(
         consoleHost = "https://www.trae.cn",
     ),
     INTL(
-        id = "ai",
+        id = "global",
         label = "国际版",
         agentHost = "https://api.trae.ai",
         ugHost = "https://ug-normal.trae.ai",
