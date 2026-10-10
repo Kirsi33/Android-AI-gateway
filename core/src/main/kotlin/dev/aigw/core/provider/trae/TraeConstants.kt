@@ -11,7 +11,7 @@ package dev.aigw.core.provider.trae
  *    401「refresh token is invalid」——端点真实，且 client_id 国内国际通用；
  *  - `POST ug-normal.trae.ai/trae/api/v1/pay/user_current_entitlement_list` 对假 JWT 返回
  *    401 `{"code":1001,...,"user_entitlement_pack_list":[]}` ——额度接口在 v1；
- *  - `www.trae.ai/trae/api/v2/pay/*` 返回 200 但那是 SPA 兜底页（所有路径都 200），**不是接口**。
+ *  - `www.trae.ai/trae/api/v2/pay/...` 返回 200 但那是 SPA 兜底页（所有路径都 200），**不是接口**。
  */
 enum class TraeRegion(
     val id: String,
