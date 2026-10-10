@@ -1067,6 +1067,9 @@ class GatewayEngine(
             lower in listOf("codebuddy", "workbuddy", "tencent", "wb") -> "codebuddy"
             lower.startsWith("codebuddy-") || lower.startsWith("workbuddy-") -> "codebuddy"
             lower in listOf("trae", "bytedance", "doubao", "solo") -> "trae"
+            // 区域型前缀：trae-cn / trae-global（少了这条，`trae-cn/模型名` 会整个
+            // 当成模型名发给上游，Trae 直接以 4001「param is invalid」拒绝）
+            lower.startsWith("trae-") -> "trae"
             lower in listOf("loomy", "iflytek", "spark", "xf") -> "loomy"
             lower in listOf("longcat", "meituan", "lc") -> "longcat"
             lower.startsWith("longcat-") -> "longcat"
