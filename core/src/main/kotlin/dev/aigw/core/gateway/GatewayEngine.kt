@@ -221,6 +221,10 @@ class GatewayEngine(
     @Volatile
     private var proxy: ProxySettings = ProxySettings.fromJson(store.read(ProxySettings.STORE_KEY))
 
+    /** 模型开放名单：`/v1/models` 是否只返回模型页里勾选的模型。 */
+    @Volatile
+    private var modelExposure: ModelExposureSettings = ModelExposureSettings.load(store)
+
     /** 当前正在监听的登录回调服务（同一时间只允许一个登录流程）。 */
     private var callbackServer: LoopbackCallbackServer? = null
 
@@ -318,6 +322,21 @@ class GatewayEngine(
         settings = updated
         settingsRepository.save(updated)
         reconfigureProviders()
+    }
+
+    // ------------------------------------------------------------------ 模型开放名单
+
+    fun modelExposureSettings(): ModelExposureSettings = modelExposure
+
+    fun updateModelExposure(updated: ModelExposureSettings) {
+        modelExposure = updated
+        store.write(ModelExposureSettings.STORE_KEY, updated.toJson().toString())
+    }
+
+    /** `/v1/models` 过滤：开放名单启用时只放行勾选过的模型。 */
+    private fun filterExposed(models: List<RoutedModel>): List<RoutedModel> {
+        if (!modelExposure.filterEnabled) return models
+        return models.filter { modelExposure.allows(it.fullId) }
     }
 
     fun providerSettings(id: String): ProviderSettings =
@@ -783,6 +802,9 @@ class GatewayEngine(
 
     /** 阻塞聚合版：HTTP `/v1/models`、CLI 等需要一次性完整列表的场景使用。 */
     fun models(): List<RoutedModel> = modelsStreaming { }.models
+
+    /** HTTP 端点用：聚合后按模型开放名单过滤（模型页 UI 走 [modelsStreaming] 不过滤）。 */
+    fun exposedModels(): List<RoutedModel> = filterExposed(models())
 
     /** 拉取单个供应商的模型目录（id 带 `provider/` 前缀；区域型供应商按区域拆成多组）。 */
     private fun fetchProviderModels(provider: Provider): ProviderModelsChunk {
