@@ -35,6 +35,7 @@ import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -137,6 +138,22 @@ fun ModelsScreen(state: AppUiState, viewModel: AppViewModel) {
                             }
                             .padding(horizontal = 8.dp, vertical = 6.dp),
                     )
+                    // 「开放名单」开关：开启后 agent 只能拉到勾选的模型
+                    val exposure = state.modelExposure
+                    Text(
+                        if (exposure.filterEnabled) "开放名单·开" else "开放名单",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = if (exposure.filterEnabled) MaterialTheme.colorScheme.primary
+                        else MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier
+                            .clip(MaterialTheme.shapes.small)
+                            .clickable {
+                                viewModel.updateModelExposure(
+                                    exposure.copy(filterEnabled = !exposure.filterEnabled),
+                                )
+                            }
+                            .padding(horizontal = 8.dp, vertical = 6.dp),
+                    )
                     Icon(
                         Icons.Filled.Refresh,
                         contentDescription = "刷新",
@@ -213,11 +230,14 @@ fun ModelsScreen(state: AppUiState, viewModel: AppViewModel) {
                         models = models,
                         collapsed = collapsed,
                         testLatencies = state.modelTestLatencies,
+                        exposure = state.modelExposure,
                         onCopy = { id ->
                             clipboard.setText(AnnotatedString(id))
                             Toast.makeText(context, "已复制模型名称：$id", Toast.LENGTH_SHORT).show()
                         },
                         onTest = { viewModel.testModel(it) },
+                        onToggleGroup = { checked -> viewModel.toggleGroupExposed(routePrefix, checked) },
+                        onToggleModel = { fullId, checked -> viewModel.toggleModelExposed(fullId, checked) },
                     )
                 }
 
@@ -240,6 +260,9 @@ private fun ModelRow(
     testStatus: ModelTestStatus?,
     onCopy: () -> Unit,
     onTest: () -> Unit,
+    exposed: Boolean = false,
+    showCheckbox: Boolean = false,
+    onToggleExposed: ((Boolean) -> Unit)? = null,
 ) {
     Row(
         modifier = Modifier.fillMaxWidth(),
@@ -349,6 +372,15 @@ private fun ModelRow(
             null -> Unit
         }
 
+        // 开放勾选框：开放名单开着时显示，勾上的才会出现在 /v1/models
+        if (showCheckbox && onToggleExposed != null) {
+            Checkbox(
+                checked = exposed,
+                onCheckedChange = { onToggleExposed(it) },
+                modifier = Modifier.size(26.dp),
+            )
+        }
+
         // 右侧 Q 弹测试按钮
         Box(
             modifier = Modifier
@@ -449,8 +481,11 @@ private fun LazyListScope.modelGroupSection(
     models: List<RoutedModel>,
     collapsed: androidx.compose.runtime.snapshots.SnapshotStateList<String>,
     testLatencies: Map<String, ModelTestStatus>,
+    exposure: dev.aigw.core.gateway.ModelExposureSettings,
     onCopy: (String) -> Unit,
     onTest: (RoutedModel) -> Unit,
+    onToggleGroup: (Boolean) -> Unit,
+    onToggleModel: (String, Boolean) -> Unit,
 ) {
     // 注意：这里**不能**在 LazyListScope 作用域里读 collapsed——
     // 它不是 @Composable，读了也不会订阅变更。所以把读取放进 item 的内容 lambda，
@@ -485,17 +520,33 @@ private fun LazyListScope.modelGroupSection(
                 )
                 SectionLabel(title)
             }
-            Box(
-                modifier = Modifier
-                    .clip(CircleShape)
-                    .background(MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.6f))
-                    .padding(horizontal = 8.dp, vertical = 2.dp),
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
+                // 全选本组：开放名单开着时用来整组放行/收回
+                val allExposed = models.isNotEmpty() && models.all { exposure.allows(it.fullId) }
                 Text(
-                    text = "${models.size} 款",
+                    if (allExposed) "取消全选" else "全选",
                     style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSecondaryContainer,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier
+                        .clip(MaterialTheme.shapes.small)
+                        .clickable { onToggleGroup(!allExposed) }
+                        .padding(horizontal = 6.dp, vertical = 4.dp),
                 )
+                Box(
+                    modifier = Modifier
+                        .clip(CircleShape)
+                        .background(MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.6f))
+                        .padding(horizontal = 8.dp, vertical = 2.dp),
+                ) {
+                    Text(
+                        text = "${models.size} 款",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSecondaryContainer,
+                    )
+                }
             }
         }
     }
@@ -507,6 +558,9 @@ private fun LazyListScope.modelGroupSection(
             testStatus = testLatencies[model.fullId],
             onCopy = { onCopy(model.fullId) },
             onTest = { onTest(model) },
+            exposed = exposure.allows(model.fullId),
+            showCheckbox = exposure.filterEnabled,
+            onToggleExposed = { checked -> onToggleModel(model.fullId, checked) },
         )
     }
 }
