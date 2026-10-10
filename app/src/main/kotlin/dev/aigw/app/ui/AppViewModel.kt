@@ -209,6 +209,20 @@ data class AppUiState(
     val taskLists: Map<String, dev.aigw.core.provider.ProviderTaskListView> = emptyMap(),
     val logs: List<LogLine> = emptyList(),
     val settings: GatewaySettings = GatewaySettings(),
+    /**
+     * 非空表示需要打开内嵌登录页（URL）。
+     *
+     * 优先用 App 内的 WebView 而不是系统浏览器：权限、Cookie 抓取、回调拦截
+     * 都在自己进程里，用户不用在 App 和浏览器之间来回切。
+     * 消费后由 UI 调 [AppViewModel.consumeInAppLogin] 清空。
+     */
+    val inAppLoginUrl: String = "",
+    /** 内嵌登录页的标题（展示用）。 */
+    val inAppLoginTitle: String = "",
+    /** 内嵌登录页需要回读 Cookie 的域名；为空表示只是完成登录、不需要抓 Cookie。 */
+    val inAppLoginCookieHosts: List<String> = emptyList(),
+    /** 内嵌登录完成后要导入凭证的供应商 id；为空表示登录结果由网关自己接（Trae/Antigravity/WorkBuddy）。 */
+    val inAppLoginImportTarget: String = "",
     /** 代理设置。 */
     val proxy: ProxySettings = ProxySettings(),
     val dynamicColor: Boolean = false,
@@ -685,11 +699,46 @@ class AppViewModel(
         }
     }
 
-    private fun openBrowser(url: String): Boolean = runCatching {
+    /**
+     * 打开登录页。
+     *
+     * 默认走 **App 内嵌 WebView**（[inAppLoginUrl] 交给 UI 层拉起），
+     * 全部流程在自己进程里完成，不依赖系统浏览器。
+     *
+     * 备注：Trae / Antigravity / WorkBuddy 的登录结果由网关自己的本地回调端口
+     * 或 state 轮询接住，所以这里只需要把页面打开。
+     */
+    private fun openBrowser(url: String): Boolean {
+        if (url.isEmpty()) return false
+        _state.value = _state.value.copy(inAppLoginUrl = url, inAppLoginTitle = "登录")
+        return true
+    }
+
+    /** 外部链接（项目主页、更新说明等）仍走系统浏览器。 */
+    private fun openExternal(url: String): Boolean = runCatching {
         app.startActivity(
             Intent(Intent.ACTION_VIEW, Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
         )
     }.isSuccess
+
+    /** UI 拉起内嵌登录页后调用，清掉待办状态。 */
+    fun consumeInAppLogin() {
+        _state.value = _state.value.copy(
+            inAppLoginUrl = "",
+            inAppLoginTitle = "",
+            inAppLoginCookieHosts = emptyList(),
+            inAppLoginImportTarget = "",
+        )
+    }
+
+    /** 内嵌登录页返回的 Cookie 处理（LongCat 这类「凭证即 Cookie」的上游用）。 */
+    fun applyInAppLoginCookie(cookie: String) {
+        val target = _state.value.inAppLoginImportTarget
+        if (cookie.isNotEmpty() && target.isNotEmpty()) {
+            importCredentials(target, """{"cookie":${jsonQuoteForVm(cookie)}}""")
+        }
+        consumeInAppLogin()
+    }
 
     /**
      * 设备授权（WorkBuddy）：浏览器里登录完成后轮询换取 token，最长 5 分钟。
@@ -1137,13 +1186,13 @@ class AppViewModel(
     }
 
     fun openProjectRepo() {
-        if (!openBrowser(PROJECT_URL)) {
+        if (!openExternal(PROJECT_URL)) {
             _state.value = _state.value.copy(notice = "没有可用的浏览器，无法打开项目地址")
         }
     }
 
     fun openReleasePage(url: String) {
-        if (!openBrowser(url)) {
+        if (!openExternal(url)) {
             _state.value = _state.value.copy(notice = "没有可用的浏览器，无法打开下载页")
         }
     }
@@ -1240,4 +1289,20 @@ class AppViewModel(
             refreshStorage()
         }
     }
+}
+
+/** 极简 JSON 字符串转义（Cookie 里可能带引号或反斜杠）。 */
+private fun jsonQuoteForVm(value: String): String {
+    val builder = StringBuilder("\"")
+    for (ch in value) {
+        when (ch) {
+            '"' -> builder.append("\\\"")
+            '\\' -> builder.append("\\\\")
+            '\n' -> builder.append("\\n")
+            '\r' -> builder.append("\\r")
+            '\t' -> builder.append("\\t")
+            else -> if (ch < ' ') builder.append(String.format("\\u%04x", ch.code)) else builder.append(ch)
+        }
+    }
+    return builder.append("\"").toString()
 }
