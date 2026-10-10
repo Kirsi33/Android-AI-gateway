@@ -49,6 +49,6 @@ data class ModelExposureSettings(
         }
 
         fun load(store: KeyValueStore): ModelExposureSettings =
-            runCatching { fromJson(store.read(STORE_KEY)) }.getOrDefault(ModelExposureSettings())
+            runCatching { fromJson(store.read(STORE_KEY) ?: "") }.getOrDefault(ModelExposureSettings())
     }
 }
