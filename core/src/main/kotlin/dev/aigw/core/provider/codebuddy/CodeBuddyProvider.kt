@@ -66,8 +66,9 @@ class CodeBuddyProvider(
      * 把它当成可用模型列出来，用户会以为能直接调用，实际一发请求就 401。
      */
     override fun listModels(account: ProviderAccount?): ProviderModelCatalogView {
+        // 没有账号不算「失败」——登录前本就不该有模型，不能报红吓人。
         val credential = account?.let { parse(it) }
-            ?: return ProviderModelCatalogView(emptyList(), fromFallback = false, error = "登录后自动拉取模型")
+            ?: return ProviderModelCatalogView(emptyList(), fromFallback = false, error = "")
         val fallback = fallbackModels(regionOf(credential))
         return try {
             val models = fetchModels(credential)
