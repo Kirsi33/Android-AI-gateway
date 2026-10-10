@@ -360,7 +360,7 @@ class CodeBuddyProvider(
                     headers,
                 )
                 if (rs in 200..299) {
-                    val prize = jsonOf(rb)?.firstString("prize_code")
+                    val prize = jsonOf(rb)?.firstString("prize_code").orEmpty()
                     parts.add(if (prize.isEmpty()) "抽奖" else "抽奖 $prize")
                 }
             }
@@ -411,7 +411,7 @@ class CodeBuddyProvider(
                         headers,
                     )
                     if (ws in 200..299) {
-                        val prize = jsonOf(wb)?.firstString("prize_code")
+                        val prize = jsonOf(wb)?.firstString("prize_code").orEmpty()
                         parts.add(if (prize.isEmpty()) "开学季转盘" else "开学季转盘 $prize")
                     }
                 }
