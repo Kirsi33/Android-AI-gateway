@@ -62,10 +62,10 @@ import java.net.URL
 private const val SMS_RESEND_INTERVAL_MS = 60_000L
 
 /** 项目仓库地址（GitHub）。 */
-private const val PROJECT_URL = "https://github.com/xibai6668/Android-AI-gateway"
+private const val PROJECT_URL = "https://github.com/x3284728970/Android-AI-gateway"
 
 /** GitHub 最新 Release 接口（API 地址；网页地址 .../releases/latest 返回 HTML，不能当 JSON 解析）。 */
-private const val RELEASES_API = "https://api.github.com/repos/xibai6668/Android-AI-gateway/releases/latest"
+private const val RELEASES_API = "https://api.github.com/repos/x3284728970/Android-AI-gateway/releases/latest"
 
 /** GitHub API 要求请求带 User-Agent。 */
 private const val UPDATE_UA = "ai-gateway-android"
