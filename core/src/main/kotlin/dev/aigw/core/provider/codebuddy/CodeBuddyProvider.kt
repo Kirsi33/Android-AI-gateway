@@ -903,6 +903,9 @@ class CodeBuddyProvider(
             null
         }
 
+        /** 测试入口：直接取内置目录（等同无账号时的 [listModels] 结果）。 */
+        fun listModelsForTest(): List<ProviderModel> = FALLBACK_MODELS
+
         /** 解析 `"x0.79 credits"` 这类串；不合法返回 null。 */
         fun parseCreditsStatic(raw: String?): String? {
             val text = raw?.trim().orEmpty()
