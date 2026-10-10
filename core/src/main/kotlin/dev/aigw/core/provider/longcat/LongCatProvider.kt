@@ -245,7 +245,7 @@ class LongCatProvider(
             val obj = runCatching { JsonParser.parseString(text).asJsonObject }.getOrNull()
             val code = obj?.get("code")?.asLong ?: 0L
             if (obj?.objOrNull("choices") == null && code != 0L) {
-                val message = obj.str("message").ifEmpty { "上游返回 code=$code" }
+                val message = obj?.str("message").orEmpty().ifEmpty { "上游返回 code=$code" }
                 val kind = if (code == 401L || code == 403L) ErrorKind.SESSION_DEAD else ErrorKind.CLIENT
                 return StreamFailureChatCall(status, UpstreamError(kind, message, code))
             }
@@ -255,9 +255,9 @@ class LongCatProvider(
                     UpstreamError(ErrorKind.SERVER, "上游返回空响应（upstream_empty）"),
                 )
             }
-            // 上游给的是 JSON，客户端要流式就包成单 chunk SSE
+            // 上游给的是 JSON（非 SSE）：客户端要流式就包成单 chunk SSE，否则原样返回
             return if (streaming) {
-                AggregatedChatCall(status, text)
+                AggregatedChatCall(status, OpenAiSseAggregator.completionAsSse(text))
             } else {
                 AggregatedChatCall(status, text)
             }
@@ -268,7 +268,7 @@ class LongCatProvider(
             source = raw,
             transform = { line -> translator.feed(line) },
             onFinish = { translator.finish() },
-        ) { conn.disconnect() }
+        )
 
         return if (streaming) {
             StreamingChatCall(status, transformed) { conn.disconnect() }
