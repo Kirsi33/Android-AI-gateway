@@ -58,21 +58,42 @@ class CodeBuddyProvider(
 
     // ------------------------------------------------------------------ 模型
 
+    /**
+     * 模型目录**只在登录后**向官方接口拉取。
+     *
+     * 没有账号时不返回任何模型：内置快照只是「拉取失败」时的兜底，
+     * 把它当成可用模型列出来，用户会以为能直接调用，实际一发请求就 401。
+     */
     override fun listModels(account: ProviderAccount?): ProviderModelCatalogView {
         val credential = account?.let { parse(it) }
-        if (credential == null) {
-            return ProviderModelCatalogView(FALLBACK_MODELS, fromFallback = true, error = "没有可用账号，显示内置快照")
-        }
+            ?: return ProviderModelCatalogView(emptyList(), fromFallback = false, error = "登录后自动拉取模型")
+        val fallback = fallbackModels(regionOf(credential))
         return try {
             val models = fetchModels(credential)
             if (models.isEmpty()) {
-                ProviderModelCatalogView(FALLBACK_MODELS, fromFallback = true, error = "上游返回空模型列表")
+                ProviderModelCatalogView(fallback, fromFallback = true, error = "上游返回空模型列表")
             } else {
                 ProviderModelCatalogView(models, fromFallback = false, error = "")
             }
         } catch (e: Exception) {
-            ProviderModelCatalogView(FALLBACK_MODELS, fromFallback = true, error = e.message ?: "拉取模型失败")
+            ProviderModelCatalogView(fallback, fromFallback = true, error = e.message ?: "拉取模型失败")
         }
+    }
+
+    /**
+     * 兜底模型清单按区域区分。
+     *
+     * 打包的官方目录是**国际版**的（`codebuddy-international-models.json`）——
+     * 里面的 `credits` 反映国际版定价，与国内版**不一致**。
+     * 典型例子：`deepseek-v4.1-flash` 在国际版是无 `credits` 的（限时免费），
+     * 国内版却是有倍率的；直接拿国际目录填国内账号，就会显示成「无限免费」。
+     *
+     * 所以国内版只用[极简清单][MINIMAL_MODELS]占位，真实倍率一律以上游实时返回为准。
+     */
+    private fun fallbackModels(region: String): List<ProviderModel> = if (region == REGION_GLOBAL) {
+        FALLBACK_MODELS_INTL
+    } else {
+        FALLBACK_MODELS_CN
     }
 
     override fun resolveModel(requested: String): String {
@@ -208,8 +229,11 @@ class CodeBuddyProvider(
     /**
      * 成长中心一键领取（WorkBuddy 的「任务」就在这里）。
      *
-     * 顺序按官方客户端：领旅行礼物 → 派 Buddy 出发 → 领任务/领任务奖 → 开盲盒。
-     * 各步单独容错：某一步的业务拒绝（活动未开、无配额）不该让其它步失败。
+     * 顺序按官方客户端的行为链：
+     *   签到日历 → 新手礼包 / 补偿 → 领养 Buddy → 连登档位兑奖 → 抽奖
+     *   → 领旅行礼物 / 派 Buddy 出发 → 领任务 → 开盲盒 → 开学季
+     *
+     * 各步单独容错：某一步的业务拒绝（活动未开、无配额、条件未达）不该让其它步失败。
      */
     private fun growth(account: ProviderAccount): ProviderActionResult {
         val credential = parse(account) ?: return ProviderActionResult.failure("凭证无法解析")
@@ -217,13 +241,179 @@ class CodeBuddyProvider(
         val headers = billingHeaders(credential)
         val parts = ArrayList<String>()
 
+        claimGiftAndCompensation(credential, base, headers, parts)
+        adoptBuddy(credential, base, headers, parts)
+        redeemStreak(credential, base, headers, parts)
+        drawLottery(credential, base, headers, parts)
         claimTravel(credential, base, headers, parts)
         claimTasks(credential, base, headers, parts)
         openBlindBox(credential, base, headers, parts)
+        claimSchoolSeason(credential, base, headers, parts)
 
         return ProviderActionResult.success(
             if (parts.isEmpty()) "成长中心没有可领取的内容" else parts.joinToString("；"),
         )
+    }
+
+    /** 新手礼包与补偿：两个独立的一次性领取，各自容错。 */
+    private fun claimGiftAndCompensation(
+        credential: Credential,
+        base: String,
+        headers: Map<String, String>,
+        parts: MutableList<String>,
+    ) {
+        val billingRoot = chatBase(credential)
+        for ((path, label) in listOf(
+            "/billing/meter/claim-gift" to "新手礼包",
+            "/billing/meter/claim-compensation" to "补偿",
+        )) {
+            runCatching {
+                val (status, body) = postJson("${billingRoot}$path", "{}", headers)
+                if (status !in 200..299) return@runCatching
+                val credit = firstNumber(jsonOf(body), "credit", "reward_credit", "amount")
+                if (credit != null) parts.add("$label +$credit")
+            }
+        }
+    }
+
+    /**
+     * 领养 Buddy：先报「完成任务」，再同意协议，最后触发领养。
+     *
+     * 三步有先后依赖，任一步失败就停（上游会以 `first_buddy task not completed yet` 拒绝）。
+     * 注意路径**没有 /v2 前缀**（与其它成长接口不同）。
+     */
+    private fun adoptBuddy(
+        credential: Credential,
+        base: String,
+        headers: Map<String, String>,
+        parts: MutableList<String>,
+    ) {
+        val root = chatBase(credential)
+        runCatching {
+            val (infoStatus, infoBody) = getJson("$root$PATH_GROWTH/buddy/info", headers)
+            if (infoStatus !in 200..299) return@runCatching
+            val adopted = jsonOf(infoBody)?.let { obj ->
+                val buddy = obj.objOrNull("buddy") ?: obj.objOrNull("data")?.objOrNull("buddy")
+                buddy != null && buddy.entrySet().isNotEmpty()
+            } ?: false
+            if (adopted) return@runCatching
+
+            val agree = "${chatBase(credential)}/activity/growth/buddy/agreement"
+            runCatching { postJson(agree, """{"agree":true}""", headers) }
+            val first = "${chatBase(credential)}/activity/growth/buddy/first"
+            val (status, body) = postJson(first, "{}", headers)
+            if (status in 200..299) {
+                val credit = firstNumber(jsonOf(body), "credit", "reward_credit")
+                parts.add(if (credit != null) "领养 Buddy +$credit" else "领养 Buddy")
+            }
+        }
+    }
+
+    /**
+     * 连登档位兑奖：查连登状态，对**已达标但未领取**的档位调 redeem。
+     *
+     * 档位固定 `7d` / `14d` / `28d`；每次请求要带一个全新的小写 UUIDv4 作为幂等键。
+     */
+    private fun redeemStreak(
+        credential: Credential,
+        base: String,
+        headers: Map<String, String>,
+        parts: MutableList<String>,
+    ) {
+        runCatching {
+            val root = chatBase(credential)
+            val (status, body) = getJson("$root/activity/growth/streak", headers)
+            if (status !in 200..299) return@runCatching
+            val obj = jsonOf(body) ?: return@runCatching
+            val entitle = obj.objOrNull("redemption_status") ?: obj.objOrNull("data")?.objOrNull("redemption_status")
+            for (tier in listOf("7d", "14d", "28d")) {
+                val state = entitle?.str("tier_${tier}_status").orEmpty().lowercase()
+                // 已领过 / 未达标都跳过；只处理明确可领的
+                if (state.isEmpty() || state == "claimed" || state == "redeemed" || state == "false") continue
+                if (state != "true" && state != "available" && state != "claimable") continue
+                val (rs, _) = postJson("$root/activity/growth/redeem", """{"tier":"$tier","client_token":"${uuid4()}"}""", headers)
+                if (rs in 200..299) parts.add("连登 $tier 兑奖")
+            }
+        }
+    }
+
+    /** 抽奖：先查次数，有剩余就抽（每次全新 client_token）。 */
+    private fun drawLottery(
+        credential: Credential,
+        base: String,
+        headers: Map<String, String>,
+        parts: MutableList<String>,
+    ) {
+        runCatching {
+            val root = chatBase(credential)
+            val (status, body) = getJson("$root/activity/growth/lottery/summary", headers)
+            if (status !in 200..299) return@runCatching
+            val chances = firstNumber(jsonOf(body), "chances", "chance", "count") ?: return@runCatching
+            if (chances <= 0) return@runCatching
+            val draws = minOf(chances.toInt(), MAX_LOTTERY_DRAWS)
+            repeat(draws) {
+                val (rs, rb) = postJson(
+                    "$root/activity/growth/lottery/draw",
+                    """{"client_token":"${uuid4()}"}""",
+                    headers,
+                )
+                if (rs in 200..299) {
+                    val prize = firstString(jsonOf(rb), "prize_code")
+                    parts.add(if (prize.isEmpty()) "抽奖" else "抽奖 $prize")
+                }
+            }
+        }
+    }
+
+    /** 开学季：活动在期时领任务奖、再用获得的机会抽转盘。 */
+    private fun claimSchoolSeason(
+        credential: Credential,
+        base: String,
+        headers: Map<String, String>,
+        parts: MutableList<String>,
+    ) {
+        runCatching {
+            val root = chatBase(credential)
+            val (status, body) = getJson("$root/portal/activity/school/tasks", headers)
+            if (status !in 200..299) return@runCatching
+            val obj = jsonOf(body) ?: return@runCatching
+            val payload = obj.objOrNull("data") ?: obj
+            if (payload.get("in_period")?.asBoolean != true) return@runCatching
+            payload.arrayOrNull("tasks")?.forEach { element ->
+                val task = runCatching { element.asJsonObject }.getOrNull() ?: return@forEach
+                val code = firstString(task, "task_code")
+                if (code.isEmpty()) return@forEach
+                val done = task.objOrNull("progress")?.let { p ->
+                    val cur = firstNumber(p, "current", "progress") ?: 0.0
+                    val target = firstNumber(p, "target", "target_count") ?: 1.0
+                    cur >= target && target > 0
+                } ?: false
+                val st = firstString(task, "status").lowercase()
+                if (!done || st == "claimed" || st == "received") return@forEach
+                val (rs, _) = postJson("$root/portal/activity/school/tasks/$code/claim", "{}", headers)
+                if (rs in 200..299) parts.add("开学季任务 $code")
+            }
+            // 有抽奖机会就转一次
+            val (cs, cb) = getJson("$root/portal/activity/school/config", headers)
+            if (cs in 200..299) {
+                val balance = jsonOf(cb)?.let { o ->
+                    (o.objOrNull("chance") ?: o.objOrNull("data")?.objOrNull("chance"))?.let {
+                        firstNumber(it, "balance", "count")
+                    }
+                } ?: 0.0
+                if (balance > 0) {
+                    val (ws, wb) = postJson(
+                        "$root/portal/activity/school/wheel/draw",
+                        """{"draw_uuid":"${uuid4()}"}""",
+                        headers,
+                    )
+                    if (ws in 200..299) {
+                        val prize = firstString(jsonOf(wb), "prize_code")
+                        parts.add(if (prize.isEmpty()) "开学季转盘" else "开学季转盘 $prize")
+                    }
+                }
+            }
+        }
     }
 
     /** 旅行：已到达先领礼物，空闲则派 Buddy 出发。 */
@@ -847,64 +1037,73 @@ class CodeBuddyProvider(
         /**
          * 内置模型快照：上游拉不到时兜底。
          *
-         * 数据源是打包的官方 CLI 目录（`codebuddy-international-models.json`，36 个模型，
-         * 含 `credits` 倍率、上下文、能力位）。读不到资源时才退到 [MINIMAL_MODELS]——
-         * 硬编码一份精简清单是为了让资源缺失也不至于整个模型页空白。
+         * 数据源是官方 CLI（`@tencent-ai/codebuddy-code`）自带的 `product*.json`，
+         * **国内版与国际版是两份不同的清单**——同名模型的倍率并不一样，
+         * 例如 `deepseek-v4.1-flash` 国内 `x0.03`、国际 `x0.00`（限免）。
+         * 所以必须按账号区域取对应那份，不能混用。
          */
-        val FALLBACK_MODELS: List<ProviderModel> by lazy { loadBundledCatalog() ?: MINIMAL_MODELS }
+        val FALLBACK_MODELS_CN: List<ProviderModel> by lazy {
+            loadCatalog("codebuddy-models-cn.json") ?: MINIMAL_MODELS
+        }
 
-        /**
-         * 极简兜底：资源文件读不到时才用。
-         *
-         * 这里只放官方目录里**确实存在**的模型（旧版曾写过 `deepseek-v4-flash` /
-         * `deepseek-v4-pro` / `minimax-m2.5`，这三个 id 在官方目录里并不存在，
-         * 会导致默认请求打到空模型）。
-         */
+        val FALLBACK_MODELS_INTL: List<ProviderModel> by lazy {
+            loadCatalog("codebuddy-models-intl.json") ?: MINIMAL_MODELS
+        }
+
+        /** 极简兜底：资源文件读不到时才用。 */
         private val MINIMAL_MODELS: List<ProviderModel> = listOf(
             ProviderModel("default-model", "Auto", 176_000),
             ProviderModel("glm-5.2", "GLM-5.2", 1_000_000),
-            ProviderModel("kimi-k2.5", "Kimi-K2.5", 164_000),
+            ProviderModel("kimi-k2.6", "Kimi-K2.6", 256_000),
             ProviderModel("deepseek-v4.1-flash", "DeepSeek-V4.1-Flash", 96_000),
-            ProviderModel("minimax-m3", "MiniMax-M3", 512_000),
         )
 
-        private const val BUNDLED_CATALOG = "codebuddy-international-models.json"
-
         /** 解析打包的官方模型目录；任何异常都返回 null 交给上游实时接口。 */
-        fun loadBundledCatalog(): List<ProviderModel>? = try {
-            val stream = CodeBuddyProvider::class.java.classLoader
-                ?.getResourceAsStream(BUNDLED_CATALOG)
-            stream?.use { input ->
-                val text = input.readBytes().toString(Charsets.UTF_8)
-                val root = JsonParser.parseString(text).asJsonObject
-                val models = root.arrayOrNull("models") ?: return@use null
-                models.mapNotNull { element ->
-                    val item = runCatching { element.asJsonObject }.getOrNull() ?: return@mapNotNull null
-                    val id = item.get("id")?.asString.orEmpty()
-                    if (id.isEmpty()) return@mapNotNull null
-                    ProviderModel(
-                        id = id,
-                        name = item.get("name")?.asString.orEmpty().ifEmpty { id },
-                        contextWindow = item.get("maxInputTokens")?.asLong ?: 0L,
-                        extra = buildMap {
-                            parseCreditsStatic(item.get("credits")?.asString)?.let { put("rate", "$it×") }
-                            item.get("maxOutputTokens")?.asLong?.takeIf { it > 0 }?.let {
-                                put("maxOutput", it.toString())
-                            }
-                            if (item.get("supportsReasoning")?.asBoolean == true) put("reasoning", "true")
-                            if (item.get("supportsImages")?.asBoolean == true) put("vision", "true")
-                            if (item.get("supportsToolCall")?.asBoolean == true) put("tools", "true")
-                            item.get("vendor")?.asString?.takeIf { it.isNotBlank() }?.let { put("vendor", it) }
-                        },
-                    )
-                }.takeIf { it.isNotEmpty() }
-            }
+        fun loadCatalog(resource: String): List<ProviderModel>? = try {
+            CodeBuddyProvider::class.java.classLoader
+                ?.getResourceAsStream(resource)
+                ?.use { input ->
+                    val text = input.readBytes().toString(Charsets.UTF_8)
+                    val root = JsonParser.parseString(text).asJsonObject
+                    val models = root.arrayOrNull("models") ?: return@use null
+                    models.mapNotNull { element ->
+                        val item = runCatching { element.asJsonObject }.getOrNull()
+                            ?: return@mapNotNull null
+                        val id = item.get("id")?.asString.orEmpty()
+                        if (id.isEmpty()) return@mapNotNull null
+                        ProviderModel(
+                            id = id,
+                            name = item.get("name")?.asString.orEmpty().ifEmpty { id },
+                            contextWindow = item.get("maxInputTokens")?.asLong ?: 0L,
+                            extra = buildMap {
+                                parseCreditsStatic(item.get("credits")?.asString)?.let {
+                                    put("rate", "$it×")
+                                }
+                                item.get("maxOutputTokens")?.asLong?.takeIf { it > 0 }?.let {
+                                    put("maxOutput", it.toString())
+                                }
+                                if (item.get("supportsReasoning")?.asBoolean == true) put("reasoning", "true")
+                                if (item.get("supportsImages")?.asBoolean == true) put("vision", "true")
+                                if (item.get("supportsToolCall")?.asBoolean == true) put("tools", "true")
+                                item.get("vendor")?.asString?.takeIf { it.isNotBlank() }?.let {
+                                    put("vendor", it)
+                                }
+                                item.get("descriptionZh")?.asString?.takeIf { it.isNotBlank() }?.let {
+                                    put("desc", it)
+                                }
+                            },
+                        )
+                    }.takeIf { it.isNotEmpty() }
+                }
         } catch (_: Exception) {
             null
         }
 
-        /** 测试入口：直接取内置目录（等同无账号时的 [listModels] 结果）。 */
-        fun listModelsForTest(): List<ProviderModel> = FALLBACK_MODELS
+        /** 测试入口：国内版内置目录。 */
+        fun fallbackCnForTest(): List<ProviderModel> = FALLBACK_MODELS_CN
+
+        /** 测试入口：国际版内置目录。 */
+        fun fallbackIntlForTest(): List<ProviderModel> = FALLBACK_MODELS_INTL
 
         /** 解析 `"x0.79 credits"` 这类串；不合法返回 null。 */
         fun parseCreditsStatic(raw: String?): String? {
