@@ -38,7 +38,7 @@ data class ModelExposureSettings(
             val obj = runCatching { JsonParser.parseString(raw).asJsonObject }.getOrNull()
                 ?: return ModelExposureSettings()
             val ids = LinkedHashSet<String>()
-            for (e in obj.arrayOrNull("exposed").orEmpty()) {
+            obj.arrayOrNull("exposed")?.forEach { e ->
                 val s = (e as? com.google.gson.JsonPrimitive)?.takeIf { it.isString }?.asString
                 if (!s.isNullOrBlank()) ids.add(s)
             }
