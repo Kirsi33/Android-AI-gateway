@@ -135,13 +135,39 @@ call/...                           # 调用日志
 
 ## 4. 供应商速查表
 
-| Provider | id | 登录方式 | 上游 | 协议陷阱 |
-|---|---|---|---|---|
-| Trae | `trae` | WebView 回调 51120 | `trae-api-cn.mchost.guru` | SOLO 私有 SSE；content 必须是 `[{type:text}]` 数组；tool 参数是字符串；流内 `notify_usage` 上报计费 |
-| WorkBuddy | `codebuddy` | 设备授权（state 轮询） | 国内 `copilot.tencent.com` / 国际 `workbuddy.ai` | 上游拒绝非流式（必须 stream:true）；tool_choice 只认字符串；签到/成长中心仅国内版 |
-| Antigravity | `antigravity` | OAuth loopback 51121 | `cloudcode-pa.googleapis.com` | Gemini 风格：role 用 user/model；schema 不支持 const/$ref；contents 必须严格交替；tool 参数名是 parametersJsonSchema；response.result 必须是字符串 |
-| Loomy | `loomy` | 手机短信 | `xfinfr.com` | 鉴权失败是 **HTTP 200 + 业务码**，不是 4xx |
-| 自定义 | `custom:<key>` | API Key | 用户填的 baseUrl | 无 |
+| Provider | id | 区域 | 登录方式 | 上游 | 协议陷阱 |
+|---|---|---|---|---|---|
+| Trae | `trae` | `cn` / `global` | 内嵌网页（回调 51120） | 国内 `api.trae.com.cn` / 国际 `api.trae.ai` | SOLO 私有 SSE；content 必须是 `[{type:text}]` 数组；tool 参数是字符串；流内 `notify_usage` 上报计费 |
+| WorkBuddy | `codebuddy` | `cn` / `global` | 内嵌网页（state 轮询） | 国内 `copilot.tencent.com` / 国际 `workbuddy.ai` | 上游拒绝非流式（必须 stream:true）；tool_choice 只认字符串；签到/成长中心仅国内版 |
+| Antigravity | `antigravity` | — | 内嵌网页（OAuth loopback 51121） | `cloudcode-pa.googleapis.com` | Gemini 风格：role 用 user/model；schema 不支持 const/$ref；contents 必须严格交替；tool 参数名是 parametersJsonSchema；response.result 必须是字符串 |
+| Loomy | `loomy` | — | 手机短信（**支持国家码**） | `xfinfr.com` | 鉴权失败是 **HTTP 200 + 业务码**，不是 4xx |
+| LongCat | `longcat` | `cn` / `global` | 内嵌网页 / 免登录 | `longcat.chat` | 上游**没有 model 字段**，靠 `agentId`+`reasonEnabled`+`searchEnabled`；思考模式下 `content` 里混有套话与答案，须用 `finish.finalContentX` 定稿 |
+| 自定义 | `custom:<key>` | — | API Key | 用户填的 baseUrl | 无 |
+
+### 区域命名约定
+
+区域标识**必须用 `cn` / `global`**：`GatewayEngine` 的模型分组标题按这两个值映射中文标签
+（`cn` → 国内、`global` → 国外），其它值会原样显示在界面上。
+
+### 内嵌网页登录
+
+`app/.../ui/CookieLoginActivity.kt` 是所有登录页的统一载体：
+
+- 打开上游网站 → 用户自行登录 → 点「完成」后读取该域名下的 Cookie 返回；
+- **凭证即 Cookie** 的上游（LongCat）走 `onCookieLogin`，结果以 `{"cookie":"..."}` 形式经 `importCredentials` 导入；
+- Trae / Antigravity / WorkBuddy 只是借它打开页面，登录结果仍由网关自己的本地回调端口或 state 轮询接住；
+- **兼容性**：全程单 WebView、`onCreateWindow` 一律拒绝、零 JS 注入、不用 `useWideViewPort`/`loadWithOverviewMode`
+  （这两项是设备上「整页缩放错乱、输入框文字镜像」的元凶）。
+
+### 模型清单与倍率
+
+- 模型**只在有账号时向上游拉取**；没有账号返回空列表且**不算失败**
+  （`GatewayEngine` 把 `models.isEmpty() && error 非空` 当 failure，所以「没账号」时 error 必须为空串）。
+- WorkBuddy 的内置兜底清单**国内与国际是两份**（`core/src/main/resources/codebuddy-models-{cn,intl}.json`），
+  来自官方 CLI（`@tencent-ai/codebuddy-code`）的 `product.internal.json` / `product.json`。
+  同名模型两边倍率不同（`deepseek-v4.1-flash` 国内 `x0.03`、国际 `x0.00`），**不能混用**。
+- 倍率通过 `ProviderModel.extra["rate"]` 传给 UI；没有公开数据的模型**不填**，界面留空而不是编造。
+- Trae 的倍率取自本地参考表 `ModelRates`（上游 `get_detail_param` 不返回价格字段）。
 
 ---
 
