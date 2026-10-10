@@ -938,9 +938,12 @@ class AppViewModel(
     }
 
     /**
-     * 对所有支持任务的账号批量执行任务（目前是 Loomy 的新手任务）。
+     * 对所有支持任务的账号批量执行「任务中心」的动作。
      *
-     * Trae / WorkBuddy 的「任务」实际就是每日签到，已由 [checkinAll] 覆盖。
+     * 各家含义不同，由 provider 自己解释：
+     *  - Loomy：新手任务；
+     *  - WorkBuddy（国内版）：成长中心（领任务、Buddy 旅行、开盲盒）；
+     *  - Trae：无独立任务中心，每日签到已由 [checkinAll] 覆盖。
      */
     fun runAllTasks() = action {
         val targets = engine.providers()
