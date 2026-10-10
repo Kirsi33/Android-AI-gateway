@@ -31,14 +31,18 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -58,6 +62,13 @@ fun ModelsScreen(state: AppUiState, viewModel: AppViewModel) {
     val clipboard = LocalClipboardManager.current
     // 按 routePrefix 分组：区域型供应商（如 WorkBuddy 国内与国外）各成一个分组
     val grouped = remember(state.models) { state.models.groupBy { it.routePrefix } }
+    // 折叠状态：记「被折叠」的分组（默认全展开）。用 rememberSaveable 让旋转屏幕后保持。
+    val collapsed = rememberSaveable(
+        saver = androidx.compose.runtime.saveable.listSaver(
+            save = { it.toList() },
+            restore = { it.toMutableStateList() },
+        ),
+    ) { mutableStateListOf<String>() }
 
     // 刷新按钮旋转动效：仅在加载中才创建无限过渡，停止后不空转每帧插值
     val spinAngle = if (state.modelsLoading) {
@@ -183,17 +194,35 @@ fun ModelsScreen(state: AppUiState, viewModel: AppViewModel) {
                 // 已加载的模型按组展示
                 for ((routePrefix, models) in grouped) {
                     val title = models.firstOrNull()?.providerName ?: routePrefix
+                    val isCollapsed = routePrefix in collapsed
                     item(key = "header-$routePrefix") {
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clip(MaterialTheme.shapes.large)
                                 .background(MaterialTheme.colorScheme.surface)
+                                .bouncyClick {
+                                    // 折叠/展开这一组
+                                    if (isCollapsed) collapsed.remove(routePrefix)
+                                    else collapsed.add(routePrefix)
+                                }
                                 .padding(start = 14.dp, end = 14.dp, top = 12.dp, bottom = 12.dp),
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            SectionLabel(title)
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            ) {
+                                Icon(
+                                    imageVector = if (isCollapsed) Icons.Filled.ExpandMore
+                                    else Icons.Filled.ExpandLess,
+                                    contentDescription = if (isCollapsed) "展开" else "折叠",
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.size(18.dp),
+                                )
+                                SectionLabel(title)
+                            }
                             Box(
                                 modifier = Modifier
                                     .clip(CircleShape)
@@ -208,6 +237,7 @@ fun ModelsScreen(state: AppUiState, viewModel: AppViewModel) {
                             }
                         }
                     }
+                    if (isCollapsed) continue
                     items(models, key = { it.fullId }) { model ->
                         val testStatus = state.modelTestLatencies[model.fullId]
                         ModelRow(
