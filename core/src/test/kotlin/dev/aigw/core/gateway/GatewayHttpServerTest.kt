@@ -81,7 +81,11 @@ class GatewayHttpServerTest {
                 "GET /v1/models HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
             )
             assertTrue(response.startsWith("HTTP/1.1 200"), response.lineSequence().first())
-            assertTrue(response.contains("\"trae/glm-5.2\""), "模型 id 应带 provider 前缀")
+            // Trae 加了区域支持（国内/国际）后，模型前缀按区域拆分为 trae-cn / trae-ai
+            assertTrue(
+                response.contains("\"trae-cn/glm-5.2\"") || response.contains("\"trae/glm-5.2\""),
+                "模型 id 应带 provider 前缀",
+            )
             assertTrue(response.contains("\"object\":\"list\""))
         }
     }
