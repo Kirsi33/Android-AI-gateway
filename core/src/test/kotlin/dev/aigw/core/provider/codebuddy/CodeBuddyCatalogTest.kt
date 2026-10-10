@@ -74,7 +74,8 @@ class CodeBuddyCatalogTest {
     fun `关键模型都能查到倍率`() {
         val cn = CodeBuddyProvider.fallbackCnForTest()
         // 这些是官方清单里明确标了 credits 的，缺了说明解析出错
-        listOf("deepseek-v4.1-flash", "glm-5.2", "gpt-5.6-sol").forEach { id ->
+        // 这几个在国内版官方清单里都明确标了 credits
+        listOf("deepseek-v4.1-flash", "glm-5.2", "glm-5.3", "kimi-k2.6").forEach { id ->
             val rate = rateOf(cn, id)
             println("$id -> $rate")
             assertNotNull(rate, "$id 在官方清单里有 credits，不该解析不出来")
