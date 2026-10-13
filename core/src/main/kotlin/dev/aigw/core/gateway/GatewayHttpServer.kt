@@ -122,6 +122,7 @@ class GatewayHttpServer(
                     aObj.addProperty("detail", current.detail)
                     aObj.addProperty("enabled", current.enabled)
                     aObj.addProperty("disabled", current.disabled)
+                    aObj.addProperty("priority", current.priority)
 
                     if (current.creditsKnown) {
                         totalCredits += current.credits
