@@ -383,12 +383,21 @@ class RaccoonProvider(
             ProviderActionResult.success(
                 when {
                     points > 0 -> "签到成功，+$points 积分"
-                    message.isNotEmpty() -> message
-                    else -> "签到成功"
+                    else -> friendlyCheckinResult(message)
                 },
             )
         } catch (e: Exception) {
             ProviderActionResult.failure(e.message ?: "签到失败")
+        }
+    }
+
+    /** 上游回执多是英文短词（success/ok），直接展示不友好；其余文案原样透出。 */
+    private fun friendlyCheckinResult(raw: String): String {
+        val text = raw.trim()
+        return when (text.lowercase()) {
+            "", "success", "ok", "true", "succeeded", "successful" -> "签到成功"
+            "already checked in", "already_checkin", "already signed", "already_sign" -> "今日已签到"
+            else -> text
         }
     }
 
