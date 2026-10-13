@@ -175,6 +175,49 @@ class AccountPoolTest {
         assertEquals(0, pool.size())
     }
 
+    @Test
+    fun `优先级高于余额：优先账号先用`() {
+        val pool = newPool()
+        pool.upsert(account("a"))
+        pool.upsert(account("b"))
+        pool.updateCredits(TRAE, "a", 900)
+        pool.updateCredits(TRAE, "b", 10)
+        assertEquals("a", pool.pick(TRAE)?.uid, "默认同级时按余额")
+
+        pool.setPriority(TRAE, "b", 1)
+        assertEquals("b", pool.pick(TRAE)?.uid, "b 提优先后应先用，哪怕余额少")
+    }
+
+    @Test
+    fun `上移下移调整显示顺序`() {
+        val pool = newPool()
+        pool.upsert(account("a"))
+        pool.upsert(account("b"))
+        pool.upsert(account("c"))
+        assertEquals(listOf("a", "b", "c"), pool.statuses(TRAE).map { it.uid })
+
+        assertTrue(pool.movePriority(TRAE, "c", up = true))
+        assertEquals(listOf("c", "a", "b"), pool.statuses(TRAE).map { it.uid })
+
+        assertTrue(pool.movePriority(TRAE, "c", up = false))
+        assertEquals(listOf("a", "b", "c"), pool.statuses(TRAE).map { it.uid })
+
+        assertFalse(pool.movePriority(TRAE, "a", up = true), "已在最前，不能上移")
+        assertFalse(pool.movePriority(TRAE, "nope", up = true), "未知账号空操作")
+    }
+
+    @Test
+    fun `优先级落盘并恢复`() {
+        val store = InMemoryKeyValueStore()
+        val pool = newPool(store)
+        pool.upsert(account("a"))
+        pool.setPriority(TRAE, "a", 5)
+
+        val second = newPool(store)
+        assertEquals(5, second.status(TRAE, "a")!!.priority)
+        assertEquals("a", second.pick(TRAE)?.uid)
+    }
+
     private companion object {
         const val TRAE = "trae"
         const val LOOMY = "loomy"
