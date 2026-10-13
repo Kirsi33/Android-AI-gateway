@@ -527,6 +527,13 @@ class GatewayEngine(
         log("${if (enabled) "启用" else "停用"}账号：$providerId/$uid")
     }
 
+    /** 调整账号使用优先级（↑/↓）：排在前面的先用，同级仍按余额。 */
+    fun moveAccountPriority(providerId: String, uid: String, up: Boolean): Boolean {
+        val moved = pool.movePriority(providerId, uid, up)
+        if (moved) log("账号优先级调整：$providerId/$uid ${if (up) "上移" else "下移"}")
+        return moved
+    }
+
     /**
      * 对话成功后异步补刷一次该账号的额度。
      *
@@ -1013,7 +1020,12 @@ class GatewayEngine(
             .filter { account -> account.uid !in exclude }
             .filter { account -> statusByUid[account.uid]?.usable == true }
             .filter { account -> regionAware.regionOf(account) == region }
-            .maxByOrNull { account -> statusByUid[account.uid]?.credits ?: 0L }
+            .maxWithOrNull(
+                compareBy<ProviderAccount>(
+                    { statusByUid[it.uid]?.priority ?: 0 },
+                    { statusByUid[it.uid]?.credits ?: 0L },
+                ),
+            )
     }
 
     /**
