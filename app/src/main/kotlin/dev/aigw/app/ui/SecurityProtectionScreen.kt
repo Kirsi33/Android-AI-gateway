@@ -234,7 +234,11 @@ private fun EvidenceSheet(
                     modifier = Modifier.fillMaxWidth(),
                     verticalArrangement = Arrangement.spacedBy(14.dp),
                 ) {
-                    itemsIndexed(evidences) { index, item ->
+                    itemsIndexed(
+                        evidences,
+                        // key 用单调自增的 seq：时间戳+模型+命中词可能重复，重复 key 会让 LazyColumn 崩溃
+                        key = { _, item -> item.seq },
+                    ) { index, item ->
                         Column(
                             modifier = Modifier
                                 .fillMaxWidth()

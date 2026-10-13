@@ -291,27 +291,76 @@ class AntigravityProvider(
 
     private val refreshLock = Any()
 
+    /**
+     * 最近一次成功刷新的凭证，按账号 uid 记录。
+     *
+     * 用 uid 而不是 refresh_token 作键：Google 会轮换 refresh_token，旧值随即作废，
+     * 以旧值为键会查不到刚写入的缓存而重复刷新。
+     */
+    @Volatile
+    private var lastRefreshed: Map<String, Credential> = emptyMap()
+
+    /** 各账号最近一次刷新失败的秒级时间戳（按 uid），用于失败冷却。 */
+    @Volatile
+    private var lastRefreshFailedAt: Map<String, Long> = emptyMap()
+
     override fun refreshAccount(account: ProviderAccount, skewSeconds: Long): ProviderAccount? {
         val credential = parse(account) ?: throw IllegalStateException("凭证无法解析，请重新登录")
         val nowSec = nowMillis() / 1000
         val hasExpiry = credential.expiresAt > 0
         val isExpired = hasExpiry && credential.expiresAt <= nowSec
-        val isNearExpiry = hasExpiry && (credential.expiresAt - nowSec <= REQUEST_SAFETY_WINDOW_SECONDS)
+        val window = effectiveRefreshWindow(skewSeconds)
+        val isNearExpiry = hasExpiry && (credential.expiresAt - nowSec <= window)
 
         if (!isExpired && !isNearExpiry) return null
 
+        val uid = account.uid
+
         synchronized(refreshLock) {
+            // 锁内复查：并发请求跨入同一临期窗口时，复用别的线程刚刷出的凭证，绝不重复打 OAuth。
+            // 必须返回新凭证——返回 null 会让调用方拿旧 token 去请求，直接 401。
+            val cached = lastRefreshed[uid]
+            if (cached != null && cached.expiresAt - nowSec > window) {
+                return toProviderAccount(cached, account)
+            }
+            // 刷新失败冷却：失败后短时间内不再重打 OAuth，否则 token 被吊销后会按请求频率轰炸端点。
+            val failedAt = lastRefreshFailedAt[uid]
+            if (failedAt != null && nowSec - failedAt < REFRESH_COOLDOWN_SECONDS) {
+                if (isExpired) throw IllegalStateException("凭证已过期且刷新失败，稍后重试或重新登录")
+                return null
+            }
             val refreshed = refreshAccessToken(credential)
             if (refreshed != null) {
+                lastRefreshed = lastRefreshed + (uid to refreshed)
+                if (lastRefreshFailedAt.containsKey(uid)) lastRefreshFailedAt = lastRefreshFailedAt - uid
                 val updated = toProviderAccount(refreshed, account)
                 hooks.onAccountUpdated(updated)
                 return updated
             }
+            lastRefreshFailedAt = lastRefreshFailedAt + (uid to nowSec)
         }
         if (isExpired) {
             throw IllegalStateException("凭证已过期且刷新失败，稍后重试或重新登录")
         }
         return null
+    }
+
+    /**
+     * 实际生效的临期窗口：尊重全局配置的 skew，但夹到 [REQUEST_SAFETY_WINDOW_SECONDS] 以内。
+     *
+     * 直接采用过大的 skew（如旧的 24h 默认）会把临期判断退化成「每次请求都刷新」，
+     * 反而把 OAuth 频率推到风控红线。
+     */
+    private fun effectiveRefreshWindow(skewSeconds: Long): Long =
+        if (skewSeconds <= 0) REQUEST_SAFETY_WINDOW_SECONDS
+        else minOf(skewSeconds, REQUEST_SAFETY_WINDOW_SECONDS)
+
+    /** 丢弃某账号的刷新缓存与失败冷却（凭证被外部替换时调用）。 */
+    private fun forgetRefreshState(uid: String) {
+        synchronized(refreshLock) {
+            if (lastRefreshed.containsKey(uid)) lastRefreshed = lastRefreshed - uid
+            if (lastRefreshFailedAt.containsKey(uid)) lastRefreshFailedAt = lastRefreshFailedAt - uid
+        }
     }
 
     // ------------------------------------------------------------------ 登录
@@ -341,7 +390,11 @@ class AntigravityProvider(
             email = email,
             projectId = projectId,
         )
-        return toProviderAccount(credential)
+        val account = toProviderAccount(credential)
+        // 重新登录拿到的是全新凭证：必须清掉该账号的刷新缓存与失败冷却，
+        // 否则重登前在途的请求可能命中旧缓存，把已作废的旧 refresh_token 回写进账号池。
+        forgetRefreshState(account.uid)
+        return account
     }
 
     /** 从回调 URL 里解析 code 并换凭证。 */
@@ -776,6 +829,9 @@ class AntigravityProvider(
         const val ID = "antigravity"
 
         const val CLIENT_ID = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
+        // 这是 Google 为「已安装应用」（installed-app）OAuth 客户端下发的公开 client_secret：
+        // 按 OAuth 2.0 规范，这类客户端的 secret 无法保密、Google 也不当它作凭证，公开在客户端里是正常做法。
+        // 不要因为它长得像密钥就删掉——删了 OAuth 换 token 会直接失败。
         const val CLIENT_SECRET = "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"
         const val CALLBACK_PORT = 51121
 
@@ -787,6 +843,9 @@ class AntigravityProvider(
 
         /** 与 CLIProxyAPI antigravityRequestTokenSafetyWindow 一致：临期 5 分钟才刷新。 */
         const val REQUEST_SAFETY_WINDOW_SECONDS = 5L * 60
+
+        /** 刷新失败后的冷却时长：token 被吊销时避免按请求频率反复打 OAuth。 */
+        private const val REFRESH_COOLDOWN_SECONDS = 60L
         const val API_BASE = "https://cloudcode-pa.googleapis.com"
         const val API_VERSION = "v1internal"
 

@@ -79,7 +79,7 @@ interface Provider {
 
     val capabilities: Set<ProviderCapability> get() = emptySet()
 
-    /** 模型目录；[account] 为空时用内置快照回退。 */
+    /** 模型目录；无账号或拉取失败时返回空列表。 */
     fun listModels(account: ProviderAccount?): ProviderModelCatalogView
 
     /** 把客户端传来的模型名归一化为上游真实名；查不到原样放行，交给上游判定。 */

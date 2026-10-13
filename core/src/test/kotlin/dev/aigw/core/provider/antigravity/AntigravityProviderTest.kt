@@ -4,6 +4,8 @@ import com.sun.net.httpserver.HttpServer
 import dev.aigw.core.provider.ProviderAccount
 import java.net.InetAddress
 import java.net.InetSocketAddress
+import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.CountDownLatch
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
@@ -131,6 +133,51 @@ class AntigravityProviderTest {
         val provider = AntigravityProvider(nowMillis = { 1_000_000L }, tokenEndpoint = "$base/token")
         val almostStale = account(expiresAt = 1_000_000L / 1000 + 60)
         assertEquals(null, provider.refreshAccount(almostStale, 3600))
+    }
+
+    @Test
+    fun `并发刷新同一临期账号只打一次 token 端点`() = withUpstream(
+        mapOf("/token" to (200 to """{"access_token":"new-access","refresh_token":"new-refresh","expires_in":3600}""")),
+    ) { base, received ->
+        val provider = AntigravityProvider(nowMillis = { 1_000_000L }, tokenEndpoint = "$base/token")
+        val almostStale = account(expiresAt = 1_000_000L / 1000 + 240)
+        val results = ConcurrentLinkedQueue<ProviderAccount?>()
+        val start = CountDownLatch(1)
+        val threads = (1..8).map {
+            Thread {
+                start.await()
+                results += provider.refreshAccount(almostStale, 3600)
+            }
+        }
+        threads.forEach { it.start() }
+        start.countDown()
+        threads.forEach { it.join() }
+        assertEquals(1, received.paths.count { it == "/token" }, "并发刷新应只打一次 token 端点：${received.paths}")
+        assertEquals(8, results.size)
+        for (result in results) {
+            assertTrue(result != null, "每个线程都应拿到刷新后的账号而非 null")
+            val secret = com.google.gson.JsonParser.parseString(result!!.secret).asJsonObject
+            assertEquals("new-access", secret.get("accessToken").asString)
+        }
+    }
+
+    @Test
+    fun `刷新失败后短时间冷却不再重打 token 端点`() = withUpstream(
+        mapOf("/token" to (500 to "boom")),
+    ) { base, received ->
+        val provider = AntigravityProvider(nowMillis = { 1_000_000L }, tokenEndpoint = "$base/token")
+        val almostStale = account(expiresAt = 1_000_000L / 1000 + 60)
+        assertEquals(null, provider.refreshAccount(almostStale, 3600))
+        assertEquals(null, provider.refreshAccount(almostStale, 3600))
+        assertEquals(1, received.paths.count { it == "/token" }, "冷却期内不应重打 token 端点：${received.paths}")
+    }
+
+    @Test
+    fun `过大的 skew 被夹到安全窗口内不再刷新`() = withUpstream(emptyMap()) { base, received ->
+        val provider = AntigravityProvider(nowMillis = { 1_000_000L }, tokenEndpoint = "$base/token")
+        val oneHourLeft = account(expiresAt = 1_000_000L / 1000 + 3600)
+        assertEquals(null, provider.refreshAccount(oneHourLeft, skewSeconds = 86400))
+        assertTrue(received.paths.none { it == "/token" }, "窗口应被夹到 5 分钟：${received.paths}")
     }
 
     // ------------------------------------------------------- Google One 积分

@@ -62,46 +62,29 @@ class CodeBuddyProvider(
     /**
      * 模型目录**只在登录后**向官方接口拉取。
      *
-     * 没有账号时不返回任何模型：内置快照只是「拉取失败」时的兜底，
-     * 把它当成可用模型列出来，用户会以为能直接调用，实际一发请求就 401。
+     * 没有账号时不返回任何模型：拉取不到真实目录就返回空列表，
+     * 不能把硬编码清单当成可用模型列出来，否则用户会以为能直接调用，实际一发请求就 401。
      */
     override fun listModels(account: ProviderAccount?): ProviderModelCatalogView {
         // 没有账号不算「失败」——登录前本就不该有模型，不能报红吓人。
         val credential = account?.let { parse(it) }
             ?: return ProviderModelCatalogView(emptyList(), fromFallback = false, error = "")
-        val fallback = fallbackModels(regionOf(credential))
         return try {
             val models = fetchModels(credential)
             if (models.isEmpty()) {
-                ProviderModelCatalogView(fallback, fromFallback = true, error = "上游返回空模型列表")
+                ProviderModelCatalogView(emptyList(), fromFallback = false, error = "上游返回空模型列表")
             } else {
                 ProviderModelCatalogView(models, fromFallback = false, error = "")
             }
         } catch (e: Exception) {
-            ProviderModelCatalogView(fallback, fromFallback = true, error = e.message ?: "拉取模型失败")
+            ProviderModelCatalogView(emptyList(), fromFallback = false, error = e.message ?: "拉取模型失败")
         }
-    }
-
-    /**
-     * 兜底模型清单按区域区分。
-     *
-     * 打包的官方目录是**国际版**的（`codebuddy-international-models.json`）——
-     * 里面的 `credits` 反映国际版定价，与国内版**不一致**。
-     * 典型例子：`deepseek-v4.1-flash` 在国际版是无 `credits` 的（限时免费），
-     * 国内版却是有倍率的；直接拿国际目录填国内账号，就会显示成「无限免费」。
-     *
-     * 所以国内版只用[极简清单][MINIMAL_MODELS]占位，真实倍率一律以上游实时返回为准。
-     */
-    private fun fallbackModels(region: String): List<ProviderModel> = if (region == REGION_GLOBAL) {
-        FALLBACK_MODELS_INTL
-    } else {
-        FALLBACK_MODELS_CN
     }
 
     override fun resolveModel(requested: String): String {
         val model = requested.trim()
-        // 默认走官方的 Auto（id = default-model）。不要用 FALLBACK_MODELS.first()——
-        // 那份列表的顺序会随数据源变化，一旦首位不是 Auto 就会把请求打到别的模型上。
+        // 默认走官方的 Auto（id = default-model）；模型列表里首位顺序会随上游变化，不能拿它当默认。
+
         if (model.isEmpty() || model == "auto") return DEFAULT_MODEL_ID
         return model
     }
@@ -1041,77 +1024,6 @@ class CodeBuddyProvider(
 
         private val SESSION_DEAD_MARKERS = listOf("Offline user session not found", "12153")
 
-        /**
-         * 内置模型快照：上游拉不到时兜底。
-         *
-         * 数据源是官方 CLI（`@tencent-ai/codebuddy-code`）自带的 `product*.json`，
-         * **国内版与国际版是两份不同的清单**——同名模型的倍率并不一样，
-         * 例如 `deepseek-v4.1-flash` 国内 `x0.03`、国际 `x0.00`（限免）。
-         * 所以必须按账号区域取对应那份，不能混用。
-         */
-        val FALLBACK_MODELS_CN: List<ProviderModel> by lazy {
-            loadCatalog("codebuddy-models-cn.json") ?: MINIMAL_MODELS
-        }
-
-        val FALLBACK_MODELS_INTL: List<ProviderModel> by lazy {
-            loadCatalog("codebuddy-models-intl.json") ?: MINIMAL_MODELS
-        }
-
-        /** 极简兜底：资源文件读不到时才用。 */
-        private val MINIMAL_MODELS: List<ProviderModel> = listOf(
-            ProviderModel("default-model", "Auto", 176_000),
-            ProviderModel("glm-5.2", "GLM-5.2", 1_000_000),
-            ProviderModel("kimi-k2.6", "Kimi-K2.6", 256_000),
-            ProviderModel("deepseek-v4.1-flash", "DeepSeek-V4.1-Flash", 96_000),
-        )
-
-        /** 解析打包的官方模型目录；任何异常都返回 null 交给上游实时接口。 */
-        fun loadCatalog(resource: String): List<ProviderModel>? = try {
-            CodeBuddyProvider::class.java.classLoader
-                ?.getResourceAsStream(resource)
-                ?.use { input ->
-                    val text = input.readBytes().toString(Charsets.UTF_8)
-                    val root = JsonParser.parseString(text).asJsonObject
-                    val models = root.arrayOrNull("models") ?: return@use null
-                    models.mapNotNull { element ->
-                        val item = runCatching { element.asJsonObject }.getOrNull()
-                            ?: return@mapNotNull null
-                        val id = item.get("id")?.asString.orEmpty()
-                        if (id.isEmpty()) return@mapNotNull null
-                        ProviderModel(
-                            id = id,
-                            name = item.get("name")?.asString.orEmpty().ifEmpty { id },
-                            contextWindow = item.get("maxInputTokens")?.asLong ?: 0L,
-                            extra = buildMap {
-                                parseCreditsStatic(item.get("credits")?.asString)?.let {
-                                    put("rate", "$it×")
-                                }
-                                item.get("maxOutputTokens")?.asLong?.takeIf { it > 0 }?.let {
-                                    put("maxOutput", it.toString())
-                                }
-                                if (item.get("supportsReasoning")?.asBoolean == true) put("reasoning", "true")
-                                if (item.get("supportsImages")?.asBoolean == true) put("vision", "true")
-                                if (item.get("supportsToolCall")?.asBoolean == true) put("tools", "true")
-                                item.get("vendor")?.asString?.takeIf { it.isNotBlank() }?.let {
-                                    put("vendor", it)
-                                }
-                                item.get("descriptionZh")?.asString?.takeIf { it.isNotBlank() }?.let {
-                                    put("desc", it)
-                                }
-                            },
-                        )
-                    }.takeIf { it.isNotEmpty() }
-                }
-        } catch (_: Exception) {
-            null
-        }
-
-        /** 测试入口：国内版内置目录。 */
-        fun fallbackCnForTest(): List<ProviderModel> = FALLBACK_MODELS_CN
-
-        /** 测试入口：国际版内置目录。 */
-        fun fallbackIntlForTest(): List<ProviderModel> = FALLBACK_MODELS_INTL
-
         /** 解析 `"x0.79 credits"` 这类串；不合法返回 null。 */
         fun parseCreditsStatic(raw: String?): String? {
             val text = raw?.trim().orEmpty()
@@ -1122,6 +1034,7 @@ class CodeBuddyProvider(
             return if (value == value.toLong().toDouble()) value.toLong().toString()
             else value.toString().trimEnd('0').trimEnd('.')
         }
+
 
         private const val CONNECT_TIMEOUT_MS = 30_000
         private const val READ_TIMEOUT_MS = 300_000
@@ -1195,6 +1108,23 @@ internal fun JsonObject.firstLong(vararg keys: String): Long {
     }
     return 0L
 }
+
+/** 按顺序取第一个能解析成数字的字段（用于 credits / reward_credit 这类可能是字符串的字段）。 */
+internal fun JsonObject.firstNumber(vararg keys: String): Double? {
+    for (key in keys) {
+        val value = get(key) ?: continue
+        if (value.isJsonNull) continue
+        if (value.isJsonPrimitive) {
+            val prim = value.asJsonPrimitive
+            if (prim.isNumber) return prim.asDouble
+            prim.asString.trim().toDoubleOrNull()?.let { return it }
+        }
+    }
+    return null
+}
+
+/** 生成一个小写 UUIDv4（幂等键用，每次请求都要全新）。 */
+internal fun uuid4(): String = java.util.UUID.randomUUID().toString()
 
 /**
  * 把上游响应体整理成一句可读的补充说明。

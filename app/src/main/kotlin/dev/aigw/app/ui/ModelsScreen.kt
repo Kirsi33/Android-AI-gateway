@@ -14,6 +14,7 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -25,6 +26,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
@@ -56,6 +58,7 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import dev.aigw.core.provider.RoutedModel
 
@@ -64,15 +67,9 @@ import dev.aigw.core.provider.RoutedModel
 fun ModelsScreen(state: AppUiState, viewModel: AppViewModel) {
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
-    // 按 routePrefix 分组：区域型供应商（如 WorkBuddy 国内与国外）各成一个分组。
-    // 用 derivedStateOf 而不是 remember(key)：模型列表在流式加载期间会被不断替换，
-    // remember(key) 每次都是新引用、必然重算；derivedStateOf 只在真正读到的值变化时才失效，
-    // 且能避免与之无关的重组（如折叠状态变化）触发分组重算。
-    val grouped by remember {
-        derivedStateOf {
-            state.models.groupBy { it.routePrefix }
-        }
-    }
+    // 按 routePrefix 分组：区域型供应商（如 WorkBuddy 国内与国外）各成一个分组
+    val grouped = remember(state.models) { state.models.groupBy { it.routePrefix } }
+    val exposure = state.modelExposure
     // 折叠状态：记「被折叠」的分组（默认全展开）。用 rememberSaveable 让旋转屏幕后保持。
     val collapsed = rememberSaveable(
         saver = androidx.compose.runtime.saveable.listSaver(
@@ -80,6 +77,10 @@ fun ModelsScreen(state: AppUiState, viewModel: AppViewModel) {
             restore = { it.toMutableStateList() },
         ),
     ) { mutableStateListOf<String>() }
+    // 折叠集合的稳定快照：读取必须发生在组合作用域（LazyListScope 不是组合作用域、不会订阅），
+    // 这样点击折叠才会重建列表、模型行即时收起。
+    val collapsedNow = collapsed.toSet()
+
 
     // 刷新按钮旋转动效：仅在加载中才创建无限过渡，停止后不空转每帧插值
     val spinAngle = if (state.modelsLoading) {
@@ -123,47 +124,34 @@ fun ModelsScreen(state: AppUiState, viewModel: AppViewModel) {
             actions = {
                 // 「只看可用模型」：隐藏上游的非对话内部条目（如 Trae 的内部 config）
                 val only = state.settings.onlyUsableModels
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        if (only) "只看可用" else "全部模型",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = if (only) MaterialTheme.colorScheme.primary
-                        else MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier
-                            .clip(MaterialTheme.shapes.small)
-                            .clickable {
-                                viewModel.updateSettings(
-                                    state.settings.copy(onlyUsableModels = !only),
-                                )
-                            }
-                            .padding(horizontal = 8.dp, vertical = 6.dp),
-                    )
-                    // 「开放名单」开关：开启后 agent 只能拉到勾选的模型
-                    val exposure = state.modelExposure
-                    Text(
-                        if (exposure.filterEnabled) "开放名单·开" else "开放名单",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = if (exposure.filterEnabled) MaterialTheme.colorScheme.primary
-                        else MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier
-                            .clip(MaterialTheme.shapes.small)
-                            .clickable {
-                                viewModel.updateModelExposure(
-                                    exposure.copy(filterEnabled = !exposure.filterEnabled),
-                                )
-                            }
-                            .padding(horizontal = 8.dp, vertical = 6.dp),
-                    )
-                    Icon(
-                        Icons.Filled.Refresh,
-                        contentDescription = "刷新",
-                        tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier
-                            .bouncyClick { viewModel.refreshModels() }
-                            .padding(6.dp)
-                            .graphicsLayer { rotationZ = iconRotation },
-                    )
-                }
+                Text(
+                    if (only) "只看可用" else "全部模型",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = if (only) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier
+                        .clip(MaterialTheme.shapes.small)
+                        .clickable {
+                            viewModel.updateSettings(state.settings.copy(onlyUsableModels = !only))
+                        }
+                        .padding(horizontal = 8.dp, vertical = 6.dp),
+                )
+                ExposureToggle(
+                    enabled = exposure.filterEnabled,
+                    onClick = {
+                        viewModel.updateModelExposure(exposure.copy(filterEnabled = !exposure.filterEnabled))
+                    },
+                )
+                Icon(
+                    Icons.Filled.Refresh,
+                    contentDescription = "刷新",
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier
+                        .bouncyClick { viewModel.refreshModels() }
+                        .padding(6.dp)
+                        .graphicsLayer { rotationZ = iconRotation },
+                )
+
             },
         )
 
@@ -225,20 +213,78 @@ fun ModelsScreen(state: AppUiState, viewModel: AppViewModel) {
                 // 下沉到 [ModelGroupSection] 内部，由它自己订阅状态，
                 // 这样点击只重组那一个分组。
                 for ((routePrefix, models) in grouped) {
-                    modelGroupSection(
-                        routePrefix = routePrefix,
-                        models = models,
-                        collapsed = collapsed,
-                        testLatencies = state.modelTestLatencies,
-                        exposure = state.modelExposure,
-                        onCopy = { id ->
-                            clipboard.setText(AnnotatedString(id))
-                            Toast.makeText(context, "已复制模型名称：$id", Toast.LENGTH_SHORT).show()
-                        },
-                        onTest = { viewModel.testModel(it) },
-                        onToggleGroup = { checked -> viewModel.toggleGroupExposed(routePrefix, checked) },
-                        onToggleModel = { fullId, checked -> viewModel.toggleModelExposed(fullId, checked) },
-                    )
+                // 已加载的模型按组展示；点击分组标题折叠/展开该组
+                for ((routePrefix, models) in grouped) {
+                    val isCollapsed = routePrefix in collapsedNow
+                    val title = models.firstOrNull()?.providerName ?: routePrefix
+                    val allExposed = models.isNotEmpty() && models.all { exposure.allows(it.fullId) }
+                    item(key = "header-$routePrefix") {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(MaterialTheme.shapes.large)
+                                .background(MaterialTheme.colorScheme.surface)
+                                .clickable {
+                                    if (routePrefix in collapsed) collapsed.remove(routePrefix)
+                                    else collapsed.add(routePrefix)
+                                }
+                                .padding(start = 14.dp, end = 14.dp, top = 12.dp, bottom = 12.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Icon(
+                                imageVector = if (isCollapsed) Icons.Filled.ExpandMore else Icons.Filled.ExpandLess,
+                                contentDescription = if (isCollapsed) "展开" else "折叠",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(18.dp),
+                            )
+                            SectionLabel(title)
+                            Box(Modifier.weight(1f))
+                            if (exposure.filterEnabled) {
+                                Text(
+                                    text = if (allExposed) "取消全选" else "全选",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier
+                                        .clip(CircleShape)
+                                        .clickable {
+                                            viewModel.toggleGroupExposed(routePrefix, !allExposed)
+                                        }
+                                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                                )
+                            }
+                            Box(
+                                modifier = Modifier
+                                    .clip(CircleShape)
+                                    .background(MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.6f))
+                                    .padding(horizontal = 8.dp, vertical = 2.dp),
+                            ) {
+                                Text(
+                                    text = "${models.size} 款",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSecondaryContainer,
+                                )
+                            }
+                        }
+                    }
+                    if (isCollapsed) continue
+                    items(models, key = { it.fullId }) { model ->
+                        val testStatus = state.modelTestLatencies[model.fullId]
+                        ModelRow(
+                            model = model,
+                            testStatus = testStatus,
+                            exposureEnabled = exposure.filterEnabled,
+                            exposed = exposure.allows(model.fullId),
+                            onToggleExposed = { viewModel.toggleModelExposed(model.fullId, it) },
+                            onCopy = {
+                                clipboard.setText(AnnotatedString(model.fullId))
+                                Toast.makeText(context, "已复制模型名称：${model.fullId}", Toast.LENGTH_SHORT).show()
+                            },
+                            onTest = { viewModel.testModel(model) },
+                        )
+                    }
+                }
+
                 }
 
                 // 若已有部分模型展示，而剩余供应商仍在加载中，在下方继续展示该供应商的骨架占位
@@ -253,22 +299,73 @@ fun ModelsScreen(state: AppUiState, viewModel: AppViewModel) {
     }
 }
 
+/**
+ * 「开放名单」开关：点击切换是否只对外暴露勾选的模型。
+ *
+ * 开启时用主色胶囊 + 填充圆点区分，关闭时用描边中性样式。
+ */
+@Composable
+private fun ExposureToggle(enabled: Boolean, onClick: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .clip(CircleShape)
+            .background(
+                if (enabled) MaterialTheme.colorScheme.primaryContainer
+                else MaterialTheme.colorScheme.surface,
+            )
+            .border(
+                width = 1.dp,
+                color = if (enabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline,
+                shape = CircleShape,
+            )
+            .bouncyClick(onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 5.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(5.dp),
+    ) {
+        Box(
+            modifier = Modifier
+                .size(7.dp)
+                .clip(CircleShape)
+                .background(
+                    if (enabled) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
+                ),
+        )
+        Text(
+            text = if (enabled) "开放名单 开" else "开放名单",
+            style = MaterialTheme.typography.labelSmall,
+            fontWeight = FontWeight.SemiBold,
+            color = if (enabled) MaterialTheme.colorScheme.onPrimaryContainer
+            else MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
 /** 单个模型行：左侧模型 id 与信息（点击复制），中部测速状态，右侧测速按钮。 */
 @Composable
 private fun ModelRow(
     model: RoutedModel,
     testStatus: ModelTestStatus?,
+    exposureEnabled: Boolean,
+    exposed: Boolean,
+    onToggleExposed: (Boolean) -> Unit,
     onCopy: () -> Unit,
     onTest: () -> Unit,
-    exposed: Boolean = false,
-    showCheckbox: Boolean = false,
-    onToggleExposed: ((Boolean) -> Unit)? = null,
 ) {
     Row(
         modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(10.dp),
     ) {
+        // 开放名单开启时，左侧显示勾选框决定该模型是否对外暴露
+        if (exposureEnabled) {
+            Checkbox(
+                checked = exposed,
+                onCheckedChange = onToggleExposed,
+                modifier = Modifier.size(22.dp),
+            )
+        }
         // 左侧模型名与信息：点击复制模型名称
         Column(
             modifier = Modifier
@@ -361,24 +458,18 @@ private fun ModelRow(
                     color = if (isFast) Color(0xFF2E7D32) else Color(0xFFEF6C00),
                 )
             }
-            is ModelTestStatus.Timeout -> {
+            is ModelTestStatus.Failed -> {
                 Text(
-                    text = "超时",
-                    style = MaterialTheme.typography.labelMedium,
+                    text = "失败：${testStatus.reason.take(60)}${if (testStatus.reason.length > 60) "…" else ""}",
+                    style = MaterialTheme.typography.labelSmall,
                     fontWeight = FontWeight.Bold,
                     color = MaterialTheme.colorScheme.error,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.widthIn(max = 200.dp),
                 )
             }
             null -> Unit
-        }
-
-        // 开放勾选框：开放名单开着时显示，勾上的才会出现在 /v1/models
-        if (showCheckbox && onToggleExposed != null) {
-            Checkbox(
-                checked = exposed,
-                onCheckedChange = { onToggleExposed(it) },
-                modifier = Modifier.size(26.dp),
-            )
         }
 
         // 右侧 Q 弹测试按钮
@@ -406,6 +497,8 @@ private fun ModelSkeletonCard(
     providerName: String,
     modifier: Modifier = Modifier,
 ) {
+    // 整卡共用一个动画进度：每个占位各建一套无限过渡会让加载期间成倍触发重组
+    val shimmerProgress = rememberShimmerProgress()
     SectionCard(modifier = modifier) {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -447,120 +540,21 @@ private fun ModelSkeletonCard(
                         modifier = Modifier
                             .fillMaxWidth(0.55f)
                             .height(16.dp)
-                            .shimmer(RoundedCornerShape(4.dp)),
+                            .shimmer(shimmerProgress, RoundedCornerShape(4.dp)),
                     )
                     Box(
                         modifier = Modifier
                             .fillMaxWidth(0.35f)
                             .height(12.dp)
-                            .shimmer(RoundedCornerShape(3.dp)),
+                            .shimmer(shimmerProgress, RoundedCornerShape(3.dp)),
                     )
                 }
                 Box(
                     modifier = Modifier
                         .size(width = 46.dp, height = 26.dp)
-                        .shimmer(MaterialTheme.shapes.small),
+                        .shimmer(shimmerProgress, MaterialTheme.shapes.small),
                 )
             }
         }
-    }
-}
-
-/**
- * 一个供应商分组的渲染单元。
- *
- * 把分组独立成 Composable 是为了让折叠状态的变化**只重组这一组**：
- * 如果在调用方读 [collapsed]，任何一次折叠都会让整个 LazyColumn 重组，
- * 模型多时手感明显发涩。
- *
- * [collapsed] 传的是同一个 [SnapshotStateList]，读取放在函数内部，
- * Compose 的按需重组会把它限定在本函数范围。
- */
-private fun LazyListScope.modelGroupSection(
-    routePrefix: String,
-    models: List<RoutedModel>,
-    collapsed: androidx.compose.runtime.snapshots.SnapshotStateList<String>,
-    testLatencies: Map<String, ModelTestStatus>,
-    exposure: dev.aigw.core.gateway.ModelExposureSettings,
-    onCopy: (String) -> Unit,
-    onTest: (RoutedModel) -> Unit,
-    onToggleGroup: (Boolean) -> Unit,
-    onToggleModel: (String, Boolean) -> Unit,
-) {
-    // 注意：这里**不能**在 LazyListScope 作用域里读 collapsed——
-    // 它不是 @Composable，读了也不会订阅变更。所以把读取放进 item 的内容 lambda，
-    // 让 Compose 在那一层做订阅，折叠时只重建这一个分组。
-    item(key = "header-$routePrefix") {
-        val isCollapsed = routePrefix in collapsed
-        val title = models.firstOrNull()?.providerName ?: routePrefix
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clip(MaterialTheme.shapes.large)
-                .background(MaterialTheme.colorScheme.surface)
-                // 标题栏不用 bouncyClick：那是给按钮用的超弹动画（spring damping 0.36），
-                // 放在会滚动的列表项上每帧都要跑插值，是折叠发卡的另一个原因。
-                .clickable {
-                    if (routePrefix in collapsed) collapsed.remove(routePrefix)
-                    else collapsed.add(routePrefix)
-                }
-                .padding(start = 14.dp, end = 14.dp, top = 12.dp, bottom = 12.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
-                Icon(
-                    imageVector = if (isCollapsed) Icons.Filled.ExpandMore else Icons.Filled.ExpandLess,
-                    contentDescription = if (isCollapsed) "展开" else "折叠",
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.size(18.dp),
-                )
-                SectionLabel(title)
-            }
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                // 全选本组：开放名单开着时用来整组放行/收回
-                val allExposed = models.isNotEmpty() && models.all { exposure.allows(it.fullId) }
-                Text(
-                    if (allExposed) "取消全选" else "全选",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier
-                        .clip(MaterialTheme.shapes.small)
-                        .clickable { onToggleGroup(!allExposed) }
-                        .padding(horizontal = 6.dp, vertical = 4.dp),
-                )
-                Box(
-                    modifier = Modifier
-                        .clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.6f))
-                        .padding(horizontal = 8.dp, vertical = 2.dp),
-                ) {
-                    Text(
-                        text = "${models.size} 款",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSecondaryContainer,
-                    )
-                }
-            }
-        }
-    }
-
-    if (routePrefix in collapsed) return
-    items(models, key = { it.fullId }) { model ->
-        ModelRow(
-            model = model,
-            testStatus = testLatencies[model.fullId],
-            onCopy = { onCopy(model.fullId) },
-            onTest = { onTest(model) },
-            exposed = exposure.allows(model.fullId),
-            showCheckbox = exposure.filterEnabled,
-            onToggleExposed = { checked -> onToggleModel(model.fullId, checked) },
-        )
     }
 }

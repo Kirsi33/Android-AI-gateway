@@ -4,7 +4,8 @@ package dev.aigw.core.provider.trae
  * 上游模型目录。
  *
  * 优先向 `get_detail_param` 拉取；成功后缓存 [TTL_MILLIS]，失败做 [FAIL_TTL_MILLIS] 负缓存，
- * 避免每次进「模型」页都打上游。拉不到时回退 [FALLBACK]，UI 会提示是内置快照。
+ * 避免每次进「模型」页都打上游。拉不到时返回本次运行内缓存的旧目录（没有则空列表）并置
+ * [fromFallback]，绝不展示打包的硬编码清单。
  */
 class TraeModelCatalog(
     private val client: TraeChatClient,
@@ -14,7 +15,7 @@ class TraeModelCatalog(
     private var fetchedAt = 0L
     private var lastFailureAt = 0L
 
-    /** 当前展示的清单是否来自内置回退（而非上游实时拉取）。 */
+    /** 本次返回的清单是否不是来自本次成功实时拉取（即用了旧缓存或拉取失败）。 */
     var fromFallback: Boolean = false
         private set
 
@@ -23,7 +24,7 @@ class TraeModelCatalog(
         private set
 
     /**
-     * 取模型清单。没有可用账号时直接返回内置回退，不发请求。
+     * 取模型清单。没有可用账号时返回空列表，不发请求。
      */
     fun models(account: TraeAccount?): List<TraeModel> {
         val now = nowMillis()
@@ -39,7 +40,7 @@ class TraeModelCatalog(
         }
         if (lastFailureAt != 0L && now - lastFailureAt < FAIL_TTL_MILLIS) {
             fromFallback = true
-            return cached ?: FALLBACK
+            return cached ?: emptyList()
         }
 
         return try {
@@ -48,7 +49,7 @@ class TraeModelCatalog(
                 lastFailureAt = now
                 lastError = "上游返回空模型列表"
                 fromFallback = true
-                cached ?: FALLBACK
+                cached ?: emptyList()
             } else {
                 cached = fetched
                 fetchedAt = now
@@ -61,7 +62,7 @@ class TraeModelCatalog(
             lastFailureAt = now
             lastError = e.message.orEmpty()
             fromFallback = true
-            cached ?: FALLBACK
+            cached ?: emptyList()
         }
     }
 
@@ -85,35 +86,5 @@ class TraeModelCatalog(
         )
 
         fun isInternal(id: String): Boolean = id in INTERNAL_IDS
-
-        /**
-         * 内置回退清单：2026-08 从上游 `get_detail_param` 抓到的 config_name 快照，
-         * 已剔除内部子 agent 条目。仅在上游拉取失败时用于兜底，界面上会标注为「内置快照」。
-         */
-        val FALLBACK: List<TraeModel> = listOf(
-            "Doubao-Seed-2.1-Pro",
-            "Doubao-Seed-2.1-Turbo",
-            "Doubao-Seed-2.0-Code",
-            "seed-code-pro-0430",
-            "DeepSeek-V4-Pro",
-            "DeepSeek-V4-Flash",
-            "DeepSeek-V4-Flash-Official",
-            "glm-5.3",
-            "glm-5.2",
-            "glm-5-turbo",
-            "glm-5",
-            "kimi-k3",
-            "kimi-k2.7-code",
-            "kimi-k2.6",
-            "minimax-m3",
-            "qwen-3.7-plus",
-            "sagitta",
-            "aquila",
-            "custom_model_gemini",
-            "custom_model_kimi",
-            "custom_model_claude",
-            "custom_model_gpt-5",
-            "custom_model_deepseek_v4",
-        ).map { TraeModel(id = it, name = it) }
     }
 }

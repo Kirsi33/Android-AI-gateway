@@ -22,7 +22,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -66,59 +68,66 @@ fun ProviderDetailScreen(
         pendingCookieProvider = ""
     }
 
-    val actions = ProviderUiActions(
-        // 登录一律交给系统浏览器：本机 WebView 渲染异常（整页缩放错乱、输入框文字镜像），
-        // 网关会在本地临时监听回调端口接住登录结果。
-        onWebLogin = { id -> viewModel.beginBrowserLogin(id) },
-        onDeviceLogin = { id, region -> viewModel.beginDeviceLogin(id, region) },
-        onCookieLogin = { id, url, hosts, title ->
-            pendingCookieProvider = id
-            val intent = Intent(context, CookieLoginActivity::class.java).apply {
-                putExtra(CookieLoginActivity.EXTRA_START_URL, url)
-                putExtra(CookieLoginActivity.EXTRA_COOKIE_HOSTS, hosts.toTypedArray())
-                putExtra(CookieLoginActivity.EXTRA_TITLE, title)
-            }
-            cookieLogin.launch(intent)
-        },
-        onSmsLogin = { id, phone, code, ccode, onResult ->
-            if (code.isEmpty()) {
-                viewModel.sendSmsCode(id, phone, ccode, onResult)
-            } else {
-                viewModel.smsLogin(id, phone, code, ccode, onResult)
-            }
-        },
-        onImport = { id, raw -> viewModel.importCredentials(id, raw) },
-        onAddCustomAccount = { id, nickname, apiKey, models -> viewModel.addCustomAccount(id, nickname, apiKey, models) },
-        onRenameAccount = { id, uid, nickname -> viewModel.renameAccount(id, uid, nickname) },
-        accountApiKeyOf = { id, uid -> viewModel.accountApiKey(id, uid) },
-        customModelsOf = { id -> viewModel.customModels(id) },
-        customBaseUrlOf = { id -> viewModel.customBaseUrl(id) },
-        onFetchCustomModels = { baseUrl, apiKey, onResult ->
-            viewModel.fetchCustomModels(baseUrl, apiKey, onResult)
-        },
-        onRefreshCredits = { id, uid -> viewModel.refreshCredits(id, uid) },
-        onAction = { id, uid, action, payload -> viewModel.performAction(id, uid, action, payload) },
-        onCheckDeviceAuth = { id, region -> viewModel.checkDeviceAuth(id, region) },
-        onToggleAccount = { id, uid, enabled -> viewModel.setAccountEnabled(id, uid, enabled) },
-        onRemoveAccount = { id, uid -> viewModel.removeAccount(id, uid) },
-        onUpdateSecret = { id, uid, secret, notice ->
-            viewModel.updateAccountSecret(id, uid, secret)
-            viewModel.notice(notice)
-        },
-        deviceIdOf = { id, uid -> viewModel.deviceIdOf(id, uid) },
-        regionOf = { id, uid -> viewModel.accountRegion(id, uid) },
-        providerOptionOf = { id, key, fallback -> viewModel.providerOption(id, key, fallback) },
-        onUpdateProviderOption = { id, key, value -> viewModel.updateProviderOption(id, key, value) },
-        creditPacksOf = { id, uid ->
-            state.creditPacks["$id/$uid"].orEmpty()
-        },
-        onLoadCreditPacks = { id, uid -> viewModel.loadCreditPacks(id, uid) },
-        taskListOf = { id, uid -> state.taskLists["$id/$uid"] },
-        onLoadTaskList = { id, uid -> viewModel.loadTaskList(id, uid) },
-        onRegenerateDeviceId = { id, uid -> viewModel.regenerateDeviceId(id, uid) },
-        onSetDeviceId = { id, uid, value -> viewModel.setDeviceId(id, uid, value) },
-        onNotice = { viewModel.notice(it) },
-    )
+    // 缓存回调集合：30+ 个 lambda 每次重组重建会让账号卡片永远无法跳过重组。
+    // creditPacks/taskLists 随 state 变化，用 rememberUpdatedState 读取最新值。
+    val creditPacks = rememberUpdatedState(state.creditPacks)
+    val taskLists = rememberUpdatedState(state.taskLists)
+    val actions = remember(viewModel, providerId) {
+        ProviderUiActions(
+            // 登录一律交给系统浏览器：本机 WebView 渲染异常（整页缩放错乱、输入框文字镜像），
+            // 网关会在本地临时监听回调端口接住登录结果。
+            onWebLogin = { id -> viewModel.beginBrowserLogin(id) },
+            onDeviceLogin = { id, region -> viewModel.beginDeviceLogin(id, region) },
+            onCookieLogin = { id, url, hosts, title ->
+                pendingCookieProvider = id
+                val intent = Intent(context, CookieLoginActivity::class.java).apply {
+                    putExtra(CookieLoginActivity.EXTRA_START_URL, url)
+                    putExtra(CookieLoginActivity.EXTRA_COOKIE_HOSTS, hosts.toTypedArray())
+                    putExtra(CookieLoginActivity.EXTRA_TITLE, title)
+                }
+                cookieLogin.launch(intent)
+            },
+            onSmsLogin = { id, phone, code, ccode, onResult ->
+                if (code.isEmpty()) {
+                    viewModel.sendSmsCode(id, phone, ccode, onResult)
+                } else {
+                    viewModel.smsLogin(id, phone, code, ccode, onResult)
+                }
+            },
+            onImport = { id, raw -> viewModel.importCredentials(id, raw) },
+            onAddCustomAccount = { id, nickname, apiKey, models -> viewModel.addCustomAccount(id, nickname, apiKey, models) },
+            onRenameAccount = { id, uid, nickname -> viewModel.renameAccount(id, uid, nickname) },
+            accountApiKeyOf = { id, uid -> viewModel.accountApiKey(id, uid) },
+            customModelsOf = { id -> viewModel.customModels(id) },
+            customBaseUrlOf = { id -> viewModel.customBaseUrl(id) },
+            onFetchCustomModels = { baseUrl, apiKey, onResult ->
+                viewModel.fetchCustomModels(baseUrl, apiKey, onResult)
+            },
+            onRefreshCredits = { id, uid -> viewModel.refreshCredits(id, uid) },
+            onAction = { id, uid, action, payload -> viewModel.performAction(id, uid, action, payload) },
+            onCheckDeviceAuth = { id, region -> viewModel.checkDeviceAuth(id, region) },
+            onToggleAccount = { id, uid, enabled -> viewModel.setAccountEnabled(id, uid, enabled) },
+            onRemoveAccount = { id, uid -> viewModel.removeAccount(id, uid) },
+            onUpdateSecret = { id, uid, secret, notice ->
+                viewModel.updateAccountSecret(id, uid, secret)
+                viewModel.notice(notice)
+            },
+            deviceIdOf = { id, uid -> viewModel.deviceIdOf(id, uid) },
+            regionOf = { id, uid -> viewModel.accountRegion(id, uid) },
+            providerOptionOf = { id, key, fallback -> viewModel.providerOption(id, key, fallback) },
+            onUpdateProviderOption = { id, key, value -> viewModel.updateProviderOption(id, key, value) },
+            creditPacksOf = { id, uid ->
+                creditPacks.value["$id/$uid"].orEmpty()
+            },
+            onLoadCreditPacks = { id, uid -> viewModel.loadCreditPacks(id, uid) },
+            taskListOf = { id, uid -> taskLists.value["$id/$uid"] },
+            onLoadTaskList = { id, uid -> viewModel.loadTaskList(id, uid) },
+            onRegenerateDeviceId = { id, uid -> viewModel.regenerateDeviceId(id, uid) },
+            onSetDeviceId = { id, uid, value -> viewModel.setDeviceId(id, uid, value) },
+            onNotice = { viewModel.notice(it) },
+        )
+    }
+
 
     PageScaffold(
         title = info?.displayName ?: providerId,

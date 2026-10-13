@@ -6,6 +6,7 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.service.quicksettings.TileService
+import androidx.compose.runtime.Immutable
 import androidx.compose.ui.graphics.Color
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.ViewModel
@@ -25,6 +26,7 @@ import dev.aigw.core.gateway.CustomProviderConfig
 import dev.aigw.core.gateway.GatewayEngine
 import dev.aigw.core.gateway.GatewaySettings
 import dev.aigw.core.gateway.LoginOutcome
+import dev.aigw.core.gateway.ModelExposureSettings
 import dev.aigw.core.gateway.ModelsCatalog
 import dev.aigw.core.gateway.ProviderInfo
 import dev.aigw.core.gateway.ProviderModelsChunk
@@ -41,6 +43,7 @@ import dev.aigw.core.provider.QuotaPack
 import dev.aigw.core.provider.custom.CustomProvider
 import dev.aigw.core.provider.RoutedModel
 import dev.aigw.core.provider.codebuddy.CodeBuddyProvider
+import dev.aigw.core.provider.trae.TraeRegion
 import dev.aigw.core.provider.trae.TraeProvider
 import dev.aigw.core.store.KeyValueStore
 import dev.aigw.core.usage.CallRecord
@@ -49,6 +52,7 @@ import dev.aigw.core.usage.StorageAudit
 import dev.aigw.core.usage.StorageReport
 import dev.aigw.core.usage.UsageStats
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -60,6 +64,9 @@ import java.net.URL
 
 /** 验证码重发间隔（秒）：上游有频率限制，连点只会被拒。 */
 private const val SMS_RESEND_INTERVAL_MS = 60_000L
+
+/** 金色渐变落盘去抖：取色拖动每帧都调 setGoldColors，攒一小段再写加密存储。 */
+private const val GOLD_PERSIST_DEBOUNCE_MS = 300L
 
 /** 项目仓库地址（GitHub）。 */
 private const val PROJECT_URL = "https://github.com/x3284728970/Android-AI-gateway"
@@ -74,6 +81,10 @@ private const val UPDATE_UA = "ai-gateway-android"
 class AppearanceStore(private val store: KeyValueStore) {
     fun dynamicColor(): Boolean = store.read(KEY_DYNAMIC) == "1"
 
+    /**
+     * 落盘（同步写加密存储，必须在 IO 线程调用）：界面先更新内存状态，
+     * 这里只负责持久化。拖动取色每帧都会调，落盘时机由调用方去抖。
+     */
     fun setDynamicColor(enabled: Boolean) {
         store.write(KEY_DYNAMIC, if (enabled) "1" else "0")
     }
@@ -162,7 +173,7 @@ data class UpdateInfo(val version: String, val url: String, val notes: String)
 sealed interface ModelTestStatus {
     data object Testing : ModelTestStatus
     data class Success(val latencyMs: Long) : ModelTestStatus
-    data object Timeout : ModelTestStatus
+    data class Failed(val reason: String) : ModelTestStatus
 }
 
 /**
@@ -178,6 +189,13 @@ sealed interface ModelLoadState {
     data class Failed(val reason: String) : ModelLoadState
 }
 
+/**
+ * 界面状态的唯一快照。
+ *
+ * 标 [Immutable]：字段虽含 List/Map，但都是每次整体替换、不再就地修改，
+ * 让 Compose 能把接收它的页面当作稳定参数，字段未变时跳过重组。
+ */
+@Immutable
 data class AppUiState(
     val running: Boolean = false,
     val port: Int = GatewaySettings.DEFAULT_PORT,
@@ -241,6 +259,8 @@ data class AppUiState(
     val storage: StorageReport? = null,
     /** 安全防护与风控设置。 */
     val security: dev.aigw.core.security.SecuritySettings = dev.aigw.core.security.SecuritySettings(),
+    /** 模型开放名单：只对外暴露勾选的模型。 */
+    val modelExposure: dev.aigw.core.gateway.ModelExposureSettings = dev.aigw.core.gateway.ModelExposureSettings(),
     /** 出网取证记录列表。 */
     val evidences: List<dev.aigw.core.security.OutboundEvidence> = emptyList(),
     /** 当前生效的脱敏规则词汇数。 */
@@ -258,9 +278,6 @@ data class AppUiState(
     fun accountsOf(providerId: String): List<AccountStatus> = accounts.filter { it.providerId == providerId }
 
     fun providerOf(providerId: String): ProviderInfo? = providers.firstOrNull { it.id == providerId }
-
-    /** 至少有一个可用账号的供应商数量（首页展示「有几个能用」而不是供应商总数）。 */
-    val usableProviders: Int get() = providers.count { it.usableCount > 0 }
 }
 
 private class Snapshot(
@@ -283,6 +300,7 @@ private class Snapshot(
     val security: dev.aigw.core.security.SecuritySettings,
     val evidences: List<dev.aigw.core.security.OutboundEvidence>,
     val sanitizerRulesCount: Int,
+    val modelExposure: dev.aigw.core.gateway.ModelExposureSettings,
 )
 
 class AppViewModel(
@@ -319,12 +337,19 @@ class AppViewModel(
     /** 最近一次设备授权登录的区域，保证手动重试轮询与登录时打同一个端点。 */
     private val deviceRegions = HashMap<String, String>()
 
+    /** 金色渐变去抖落盘的挂起任务；每次取色取消上一轮，松手后才真正写盘。 */
+    private var persistAppearanceJob: Job? = null
+
     /** 账号集合签名：判断账号变化是否真的影响模型目录，避免刷新凭证也重复拉取。 */
     private var lastAccountSignature: String = ""
 
     /** 流式加载代次：连发多次刷新时，只有最新一轮的增量与终态能写入 state。 */
     @Volatile
     private var modelsGeneration = 0
+
+    /** 上次发起模型目录刷新的时刻；为 0 表示本次进程内还没拉过。 */
+    @Volatile
+    private var modelsFetchedAt = 0L
 
     init {
         // 登录在浏览器里完成、由网关的回调监听落池，这里接住通知刷新界面。
@@ -340,9 +365,9 @@ class AppViewModel(
                 refresh()
             }
         }
+        // 调用记录与统计改在引擎后台预载（冷启动不阻塞主线程），就绪后补一次刷新
+        engine.setStartupDataReadyListener { refresh() }
         refresh()
-        // 启动时在后台静默预拉取一次模型，进入模型页直接秒开（不弹「正在拉取」提示）
-        refreshModels(silent = true)
         // 自动检查更新：默认开启，每天最多一次，失败静默
         maybeAutoCheckUpdate()
     }
@@ -352,6 +377,7 @@ class AppViewModel(
 
     override fun onCleared() {
         engine.onAccountsChanged = null
+        engine.setStartupDataReadyListener(null)
     }
 
     // ------------------------------------------------------------------ 读取
@@ -379,6 +405,7 @@ class AppViewModel(
                     security = engine.securitySettings(),
                     evidences = engine.sanitizer.evidenceList(),
                     sanitizerRulesCount = engine.sanitizer.currentRulesCount(),
+                    modelExposure = engine.modelExposureSettings(),
                 )
             }
             _state.value = _state.value.copy(
@@ -401,6 +428,7 @@ class AppViewModel(
                 security = snapshot.security,
                 evidences = snapshot.evidences,
                 sanitizerRulesCount = snapshot.sanitizerRulesCount,
+                modelExposure = snapshot.modelExposure,
             )
         }
     }
@@ -416,7 +444,16 @@ class AppViewModel(
             val (calls, logs) = withContext(Dispatchers.IO) {
                 engine.callLogStore.list() to engine.requestLog.lines()
             }
-            _state.value = _state.value.copy(calls = calls, logs = logs)
+            val current = _state.value
+            // 记录页每 5 秒轮询一次：内容没变就不赋值。CallRecord 带大段请求/响应原文，
+            // 整体 equals 在主线程上是 O(总字符数) 的开销。
+            if (calls.size == current.calls.size && logs.size == current.logs.size &&
+                calls.firstOrNull()?.id == current.calls.firstOrNull()?.id &&
+                logs.firstOrNull()?.atMillis == current.logs.firstOrNull()?.atMillis
+            ) {
+                return@launch
+            }
+            _state.value = current.copy(calls = calls, logs = logs)
         }
     }
 
@@ -437,6 +474,7 @@ class AppViewModel(
 
     fun refreshModels(silent: Boolean = false) {
         val gen = ++modelsGeneration
+        modelsFetchedAt = System.currentTimeMillis()
         viewModelScope.launch {
             // 已有目录可展示时降级为静默：旧数据立即可见，新数据分批到货逐组替换，不弹全屏 busy
             val quiet = silent || _state.value.models.isNotEmpty()
@@ -474,6 +512,15 @@ class AppViewModel(
         }
     }
 
+    /**
+     * 进入模型页时首次拉取：本次进程内还没拉过才拉，之后进入不再自动重拉。
+     *
+     * 模型目录只在「首次进入模型页」与「手动刷新」时更新，避免每次切页都打上游。
+     */
+    fun ensureModelsLoaded() {
+        if (modelsFetchedAt == 0L) refreshModels()
+    }
+
     /** 流式增量：把一个供应商就绪的目录合并进 state（已在主线程串行执行，替换该供应商旧条目）。 */
     private fun applyModelsChunk(chunk: ProviderModelsChunk) {
         val current = _state.value
@@ -495,17 +542,45 @@ class AppViewModel(
         _state.value = _state.value.copy(modelTestLatencies = current)
 
         viewModelScope.launch {
-            val latency = withContext(Dispatchers.IO) {
+            val result = withContext(Dispatchers.IO) {
                 engine.probeModelLatency(routedModel.providerId, routedModel.model.id, routedModel.region)
             }
             val updated = _state.value.modelTestLatencies.toMutableMap()
-            if (latency > 0) {
-                updated[fullId] = ModelTestStatus.Success(latency)
+            updated[fullId] = if (result.latencyMs > 0) {
+                ModelTestStatus.Success(result.latencyMs)
             } else {
-                updated[fullId] = ModelTestStatus.Timeout
+                ModelTestStatus.Failed(result.error.ifEmpty { "连接失败" })
             }
             _state.value = _state.value.copy(modelTestLatencies = updated)
         }
+    }
+
+    // ------------------------------------------------------------------ 模型开放名单
+
+    fun modelExposure(): ModelExposureSettings = engine.modelExposureSettings()
+
+    fun updateModelExposure(updated: ModelExposureSettings) {
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) { engine.updateModelExposure(updated) }
+            _state.value = _state.value.copy(modelExposure = updated)
+        }
+    }
+
+    /** 单个模型勾选/取消勾选。 */
+    fun toggleModelExposed(fullId: String, checked: Boolean) {
+        val current = engine.modelExposureSettings()
+        val exposed = current.exposed.toMutableSet()
+        if (checked) exposed.add(fullId) else exposed.remove(fullId)
+        updateModelExposure(current.copy(exposed = exposed))
+    }
+
+    /** 按分组（routePrefix）批量勾选/取消勾选当前已加载的模型。 */
+    fun toggleGroupExposed(routePrefix: String, checked: Boolean) {
+        val current = engine.modelExposureSettings()
+        val exposed = current.exposed.toMutableSet()
+        val groupIds = _state.value.models.filter { it.routePrefix == routePrefix }.map { it.fullId }
+        if (checked) exposed.addAll(groupIds) else exposed.removeAll(groupIds.toSet())
+        updateModelExposure(current.copy(exposed = exposed))
     }
 
     fun consumeNotice() {
@@ -626,21 +701,21 @@ class AppViewModel(
     }
 
     fun setDynamicColor(enabled: Boolean) {
-        appearance.setDynamicColor(enabled)
         _state.value = _state.value.copy(dynamicColor = enabled)
+        viewModelScope.launch { withContext(Dispatchers.IO) { appearance.setDynamicColor(enabled) } }
     }
 
     /** 切换明暗模式（立即生效并落盘）。 */
     fun setThemeMode(mode: ThemeMode) {
-        appearance.setThemeMode(mode)
         _state.value = _state.value.copy(themeMode = mode)
+        viewModelScope.launch { withContext(Dispatchers.IO) { appearance.setThemeMode(mode) } }
     }
 
     /** 设置页面底色；[hex] 为 null 表示清除覆盖（恢复默认底色）。 */
     fun setBackgroundOverride(hex: String?) {
         if (hex == null) {
-            appearance.setBackgroundHex(null)
             _state.value = _state.value.copy(backgroundOverride = null)
+            viewModelScope.launch { withContext(Dispatchers.IO) { appearance.setBackgroundHex(null) } }
             return
         }
         val parsed = parseHexColor(hex)
@@ -648,11 +723,17 @@ class AppViewModel(
             notice("颜色代码需要是 #RRGGBB 格式")
             return
         }
-        appearance.setBackgroundHex(formatHex(parsed))
         _state.value = _state.value.copy(backgroundOverride = parsed)
+        val code = formatHex(parsed)
+        viewModelScope.launch { withContext(Dispatchers.IO) { appearance.setBackgroundHex(code) } }
     }
 
-    /** 设置金色渐变两端；任一非法则整组忽略并提示。 */
+    /**
+     * 设置金色渐变两端；任一非法则整组忽略并提示。
+     *
+     * 界面状态立即更新（取色拖动时每帧都会调用），落盘走 300ms 去抖：
+     * 加密存储的写入是同步阻塞的，逐帧落盘会让拖动明显掉帧。
+     */
     fun setGoldColors(startHex: String, endHex: String) {
         val start = parseHexColor(startHex)
         val end = parseHexColor(endHex)
@@ -660,21 +741,32 @@ class AppViewModel(
             notice("颜色代码需要是 #RRGGBB 格式")
             return
         }
-        appearance.setGoldStartHex(formatHex(start))
-        appearance.setGoldEndHex(formatHex(end))
         _state.value = _state.value.copy(goldStart = start, goldEnd = end)
+        val startCode = formatHex(start)
+        val endCode = formatHex(end)
+        persistAppearanceJob?.cancel()
+        persistAppearanceJob = viewModelScope.launch {
+            delay(GOLD_PERSIST_DEBOUNCE_MS)
+            withContext(Dispatchers.IO) {
+                appearance.setGoldStartHex(startCode)
+                appearance.setGoldEndHex(endCode)
+            }
+        }
     }
 
     /** 恢复默认外观（明暗模式、页面底色、金色渐变）。 */
     fun resetAppearance() {
-        appearance.reset()
+        persistAppearanceJob?.cancel()
         _state.value = _state.value.copy(
             themeMode = ThemeMode.System,
             backgroundOverride = null,
             goldStart = defaultAppColors.goldStart,
             goldEnd = defaultAppColors.goldEnd,
         )
-        notice("外观主题已恢复默认")
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) { appearance.reset() }
+            _state.value = _state.value.copy(notice = "外观主题已恢复默认")
+        }
     }
 
     fun providerSettings(providerId: String): ProviderSettings = engine.providerSettings(providerId)
@@ -696,7 +788,11 @@ class AppViewModel(
     fun beginDeviceLogin(providerId: String, region: String) {
         deviceRegions[providerId] = region
         val settings = providerSettings(providerId)
-        engine.updateProviderSettings(providerId, settings.copy(options = settings.options + ("region" to region)))
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                engine.updateProviderSettings(providerId, settings.copy(options = settings.options + ("region" to region)))
+            }
+        }
         beginBrowserLogin(providerId)
     }
 
@@ -1020,10 +1116,8 @@ class AppViewModel(
         val targets = engine.providers()
             .filter { ProviderCapability.CHECKIN in it.capabilities }
             .flatMap { info -> engine.accounts(info.id) }
-            .filter { account ->
-                account.providerId != CodeBuddyProvider.ID ||
-                    accountRegion(account.providerId, account.uid) != CodeBuddyProvider.REGION_GLOBAL
-            }
+            // 区域型供应商的国际版没有签到制度（Trae INTL / WorkBuddy global），跳过避免整批报错
+            .filter { account -> accountRegion(account.providerId, account.uid) != TraeRegion.INTL.id }
         if (targets.isEmpty()) throw IllegalStateException("还没有支持签到的账号")
 
         val results = targets.map { account ->
@@ -1096,14 +1190,20 @@ class AppViewModel(
         return provider.deviceIdOf(account)
     }
 
-    /** 账号所属区域（WorkBuddy 凭证 domain 在 workbuddy.ai = global，否则 cn）；无区域概念返回空串。 */
+    /**
+     * 账号所属区域：WorkBuddy（workbuddy.ai = global）与 Trae（trae.ai = global），无区域概念返回空串。
+     */
     fun accountRegion(providerId: String, uid: String): String {
-        if (providerId != CodeBuddyProvider.ID) return ""
+        if (providerId != CodeBuddyProvider.ID && providerId != TraeProvider.ID) return ""
         val account = engine.account(providerId, uid) ?: return ""
         val domain = runCatching {
             com.google.gson.JsonParser.parseString(account.secret).asJsonObject.get("domain")?.asString.orEmpty()
         }.getOrDefault("").lowercase()
-        return if (domain.endsWith("workbuddy.ai")) CodeBuddyProvider.REGION_GLOBAL else CodeBuddyProvider.REGION_CN
+        return when {
+            providerId == CodeBuddyProvider.ID ->
+                if (domain.endsWith("workbuddy.ai")) TraeRegion.INTL.id else CodeBuddyProvider.REGION_CN
+            else -> if (domain.endsWith("trae.ai")) TraeRegion.INTL.id else TraeRegion.CN.id
+        }
     }
 
     fun regenerateDeviceId(providerId: String, uid: String) = action {
@@ -1151,8 +1251,8 @@ class AppViewModel(
     fun proxySettings(): ProxySettings = engine.proxySettings()
 
     fun updateProxySettings(settings: ProxySettings) {
-        engine.updateProxySettings(settings)
         _state.value = _state.value.copy(proxy = settings)
+        viewModelScope.launch { withContext(Dispatchers.IO) { engine.updateProxySettings(settings) } }
     }
 
     // ------------------------------------------------------------------ 额度包
@@ -1187,30 +1287,30 @@ class AppViewModel(
         if (clamped != days) "保留天数需在 1~3650 之间，已按 $clamped 天保存" else "保留天数已设为 $clamped 天"
     }
 
-    fun purgeExpiredRecords() = action {
+    fun purgeExpiredRecords() = action(alsoRefreshStorage = true) {
         val removed = engine.purgeExpiredRecords()
         val days = engine.settings().logRetentionDays
         if (removed == 0) "没有超过 $days 天的记录可清理" else "已清理 $removed 条过期记录"
     }
 
-    fun truncateLongRecords() = action {
+    fun truncateLongRecords() = action(alsoRefreshStorage = true) {
         val (count, saved) = engine.truncateLongRecords()
         if (count == 0) "没有超长记录需要截断" else "已截断 $count 条记录，释放约 ${StorageAudit.formatSize(saved)}"
     }
 
     // ------------------------------------------------------------------ 记录
 
-    fun deleteCall(id: String) = action {
+    fun deleteCall(id: String) = action(alsoRefreshStorage = true) {
         engine.callLogStore.delete(id)
         "记录已删除"
     }
 
-    fun clearCalls() = action {
+    fun clearCalls() = action(alsoRefreshStorage = true) {
         engine.callLogStore.clear()
         "调用记录已清空"
     }
 
-    fun clearLogs() = action {
+    fun clearLogs() = action(alsoRefreshStorage = true) {
         engine.requestLog.clear()
         "请求日志已清空"
     }
@@ -1231,8 +1331,8 @@ class AppViewModel(
     }
 
     fun setAutoCheckUpdate(enabled: Boolean) {
-        updateStore.setAutoCheck(enabled)
         _state.value = _state.value.copy(autoCheckUpdate = enabled)
+        viewModelScope.launch { withContext(Dispatchers.IO) { updateStore.setAutoCheck(enabled) } }
     }
 
     fun dismissUpdate() {
@@ -1327,8 +1427,13 @@ class AppViewModel(
 
     // ------------------------------------------------------------------ 内部
 
-    /** 跑一个耗时操作，返回的字符串就是给用户的提示；抛异常则展示异常消息。 */
-    private fun action(block: () -> String) {
+    /**
+     * 执行一个操作并在完成后刷新界面。
+     *
+     * [alsoRefreshStorage] 只在操作会改变存储占用时开启：占用统计要扫全量存储键并逐个解密，
+     * 挂在每次点击上都太贵。
+     */
+    private fun action(alsoRefreshStorage: Boolean = false, block: () -> String) {
         viewModelScope.launch {
             val notice = withContext(Dispatchers.IO) {
                 try {
@@ -1339,8 +1444,7 @@ class AppViewModel(
             }
             _state.value = _state.value.copy(notice = notice)
             refresh()
-            // 清理/截断类操作会改变存储占用，顺带更新一次（低频，代价可接受）
-            refreshStorage()
+            if (alsoRefreshStorage) refreshStorage()
         }
     }
 }

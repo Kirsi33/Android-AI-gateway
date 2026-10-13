@@ -5,6 +5,7 @@ import dev.aigw.app.ui.providers.codebuddy.CodeBuddyUi
 import dev.aigw.app.ui.providers.custom.CustomUi
 import dev.aigw.app.ui.providers.loomy.LoomyUi
 import dev.aigw.app.ui.providers.longcat.LongCatUi
+import dev.aigw.app.ui.providers.raccoon.RaccoonUi
 import dev.aigw.app.ui.providers.trae.TraeUi
 
 /**
@@ -20,7 +21,8 @@ object ProviderUiRegistry {
         LoomyUi,
         CodeBuddyUi,
         AntigravityUi,
-        LongCatUi,
+LongCatUi,
+        RaccoonUi,
     ).associateBy { it.id }
 
     fun of(providerId: String): ProviderUi? = when {

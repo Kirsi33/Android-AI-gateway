@@ -14,12 +14,19 @@ data class GatewaySettings(
     val apiKey: String = "",
     /** 「无 Key 调用」开关：允许客户端不填 Key 直连。 */
     val allowNoKey: Boolean = true,
-    /** 是否同时监听局域网（关闭则只绑 127.0.0.1）。 */
-    val exposeLan: Boolean = true,
+    /**
+     * 是否同时监听局域网（关闭则只绑 127.0.0.1）。
+     *
+     * 默认 false（仅本机）：局域网暴露会把网关端口开给同网段所有设备，
+     * 而默认 allowNoKey=true 时任何设备都能直接调用，风险过大。
+     * [fromJson] 用 [boolOr] 读旧配置：已存过值的用户（无论 true/false）保持原值，
+     * 仅当字段缺失（老版本升级/首次运行）时才落到这个新默认。
+     */
+    val exposeLan: Boolean = false,
     /** 「只看可用模型」开关：隐藏上游的非对话内部条目。 */
     val onlyUsableModels: Boolean = false,
-    /** token 预刷新窗口。 */
-    val refreshSkewSeconds: Long = 24L * 3600,
+    /** token 预刷新窗口（秒）：临期多久内才刷新。 */
+    val refreshSkewSeconds: Long = 300L,
     /** 单次请求最多换号次数。 */
     val maxRotate: Int = 3,
     /** 详细日志：记录每次调用的请求/转发/发送/返回全链路原文，用于排查 503 类问题；会增加存储占用。 */
@@ -50,6 +57,14 @@ data class GatewaySettings(
         const val MIN_RETENTION_DAYS = 1
         const val MAX_RETENTION_DAYS = 3650
 
+        /**
+         * 预刷新窗口上限（秒）。
+         *
+         * 窗口被当成「临期多久内刷新」真实使用后，过大的值会让 CodeBuddy / Raccoon 等
+         * 每次请求都刷新，故存量配置里的 24h 也在读取时收敛到这个上限。
+         */
+        const val MAX_REFRESH_SKEW_SECONDS = 3600L
+
         fun fromJson(raw: String): GatewaySettings {
             val obj = runCatching { JsonParser.parseString(raw).asJsonObject }.getOrNull()
                 ?: return GatewaySettings()
@@ -60,7 +75,7 @@ data class GatewaySettings(
                 allowNoKey = obj.boolOr("allowNoKey", defaults.allowNoKey),
                 exposeLan = obj.boolOr("exposeLan", defaults.exposeLan),
                 onlyUsableModels = obj.boolOr("onlyUsableModels", defaults.onlyUsableModels),
-                refreshSkewSeconds = obj.longOr("refreshSkewSeconds", defaults.refreshSkewSeconds),
+                refreshSkewSeconds = clampRefreshSkew(obj.longOr("refreshSkewSeconds", defaults.refreshSkewSeconds)),
                 maxRotate = obj.intOr("maxRotate", defaults.maxRotate),
                 verboseLogging = obj.boolOr("verboseLogging", defaults.verboseLogging),
                 defaultProvider = obj.strOr("defaultProvider", defaults.defaultProvider),
@@ -70,6 +85,9 @@ data class GatewaySettings(
 
         /** 保留天数超出范围时夹回合法区间，避免 0 天把记录全删光或天文数字永不清理。 */
         fun clampRetentionDays(days: Int): Int = days.coerceIn(MIN_RETENTION_DAYS, MAX_RETENTION_DAYS)
+
+        /** 预刷新窗口夹回 [0, MAX_REFRESH_SKEW_SECONDS]，避免负值或超大值造成刷新风暴。 */
+        fun clampRefreshSkew(seconds: Long): Long = seconds.coerceIn(0L, MAX_REFRESH_SKEW_SECONDS)
     }
 }
 

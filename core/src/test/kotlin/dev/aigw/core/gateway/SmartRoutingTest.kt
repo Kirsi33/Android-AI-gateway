@@ -24,6 +24,25 @@ class SmartRoutingTest {
         override fun openChat(account: ProviderAccount, openAiBody: String): ChatCall = throw UnsupportedOperationException()
     }
 
+    /**
+     * 区域型供应商替身：内置 CodeBuddyProvider 已不再回退内置快照，拉不到真实目录就为空，
+     * 无法在无网的单测里产生模型；这里用固定目录锁定「按区域拆成多组」的行为。
+     */
+    private inner class RegionStubProvider(
+        override val id: String,
+        private val regions: List<String>,
+    ) : Provider, dev.aigw.core.provider.RegionAwareSupport {
+        override val displayName = id
+        override val authKind = AuthKind.NONE
+        override fun listModels(account: ProviderAccount?) =
+            ProviderModelCatalogView(listOf(dev.aigw.core.provider.ProviderModel("glm-5.2", "GLM-5.2")), false, "")
+        override fun resolveModel(requested: String) = requested
+        override fun classify(status: Int, body: String) = UpstreamError(ErrorKind.CLIENT, body)
+        override fun openChat(account: ProviderAccount, openAiBody: String): ChatCall = throw UnsupportedOperationException()
+        override fun regionOf(account: ProviderAccount) = regions.first()
+        override fun regions() = regions
+    }
+
     @Test
     fun `带别名前缀能正确路由且不区分大小写`() {
         val engine = GatewayEngine(InMemoryKeyValueStore())
@@ -40,21 +59,10 @@ class SmartRoutingTest {
     @Test
     fun `WorkBuddy 区域前缀能正确识别区域约束并在模型列表拆为两组`() {
         val engine = GatewayEngine(InMemoryKeyValueStore())
-        // 自动注册的内置供应商包括 CodeBuddyProvider（已实现 RegionAwareSupport）。
-        // 模型目录**只在有账号时才拉取**（无账号不列模型，避免把内置快照当可用模型），
-        // 所以这里两侧各放一个账号，才能验证前缀拆成国内/国际两组。
-        engine.pool.upsert(
-            ProviderAccount(
-                "codebuddy", "cn-user", "国内账号",
-                """{"domain":"www.codebuddy.cn","accessToken":"t","uid":"cn-user"}""",
-            ),
-        )
-        engine.pool.upsert(
-            ProviderAccount(
-                "codebuddy", "intl-user", "国际账号",
-                """{"domain":"www.codebuddy.ai","accessToken":"t","uid":"intl-user"}""",
-            ),
-        )
+        // 内置 CodeBuddyProvider 已实现 RegionAwareSupport；这里用替身覆盖同名 id，
+        // 因为模型目录只在登录后拉取，无内置快照后单测里拿不到真实目录。
+        engine.registry.register(RegionStubProvider("codebuddy", listOf("cn", "global")))
+
         // 路由解析支持 codebuddy-cn 与 codebuddy-global，且带出正确的 region 约束
         val routeCn = engine.resolveRoute("codebuddy-cn/deepseek-v3")
         assertEquals("codebuddy", routeCn?.providerId)
@@ -70,7 +78,7 @@ class SmartRoutingTest {
         assertEquals("cn", engine.resolveRoute("workbuddy-cn/deepseek-v3")?.region)
         assertEquals("global", engine.resolveRoute("workbuddy-global/deepseek-v3")?.region)
 
-        // 模型列表里针对 CodeBuddy 拆出两个独立前缀组
+        // 模型列表里针对区域型供应商拆出两个独立前缀组
         val models = engine.models().filter { it.providerId == "codebuddy" }
         val prefixes = models.map { it.routePrefix }.distinct()
         assertTrue(prefixes.contains("codebuddy-cn"), "应包含国内组前缀：$prefixes")

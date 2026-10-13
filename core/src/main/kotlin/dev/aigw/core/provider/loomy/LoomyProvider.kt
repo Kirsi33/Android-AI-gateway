@@ -306,8 +306,7 @@ class LoomyProvider(
         const val ACTION_COMPLETE_TASK = "complete_task"
         const val ACTION_COMPLETE_ALL_TASKS = "complete_all_tasks"
 
-        /** 中国大陆手机号，发短信前先校验。 */
-        /** 中国大陆手机号：11 位、1 开头。 */
+/** 中国大陆手机号：11 位、1 开头，发短信前先校验。 */
         private val CN_PHONE = Regex("1[3-9]\\d{9}")
 
         /** 其它地区比较宽松：4–15 位纯数字（国际号码标准上限是 15 位）。 */

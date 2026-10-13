@@ -1,28 +1,44 @@
 package dev.aigw.app.ui.providers.trae
 
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.SmartToy
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon as MaterialIcon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.google.gson.JsonObject
 import dev.aigw.app.ui.ChoiceChip
 import dev.aigw.app.ui.OutlineActionButton
 import dev.aigw.app.ui.SectionCard
 import dev.aigw.app.ui.SectionLabel
+import dev.aigw.app.ui.accountStatusText
 import dev.aigw.app.ui.providers.ProviderUi
 import dev.aigw.app.ui.providers.ProviderUiActions
 import dev.aigw.core.pool.AccountStatus
@@ -32,7 +48,10 @@ object TraeUi : ProviderUi {
 
     override val id: String = "trae"
 
-    override fun description(): String = "网页登录导入，走 SOLO 免费通道"
+    // 国内 / 国际是两套独立账号：账号列表由本组件按滑块区域过滤后自行渲染
+    override val managesOwnAccounts: Boolean get() = true
+
+    override fun description(): String = "网页登录导入，走 SOLO 免费通道（国内/国际）"
 
     @Composable
     override fun Icon(modifier: Modifier) {
@@ -48,15 +67,44 @@ object TraeUi : ProviderUi {
     override fun LoginEntry(accounts: List<AccountStatus>, actions: ProviderUiActions) {
         var expanded by remember { mutableStateOf(false) }
         var raw by remember { mutableStateOf("") }
+        // 滑块状态持久化在供应商设置里（region=cn/global）；引擎开登录页时按它选 host
+        var global by rememberSaveable {
+            mutableStateOf(actions.providerOptionOf(id, "region", "cn") == "global")
+        }
 
         Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
             SectionCard(enterIndex = 0) {
-                SectionLabel("登录")
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        MaterialIcon(
+                            Icons.Filled.Language,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(20.dp),
+                        )
+                        SectionLabel("服务区域")
+                    }
+                    RegionSelector(
+                        isGlobal = global,
+                        onSelectGlobal = { isGlobal ->
+                            global = isGlobal
+                            actions.onUpdateProviderOption(id, "region", if (isGlobal) "global" else "cn")
+                        },
+                    )
+                }
+                SectionLabel(if (global) "登录 · 国际版 trae.ai" else "登录 · 国内版 trae.cn")
                 Button(
                     onClick = { actions.onWebLogin(id) },
                     modifier = Modifier.fillMaxWidth(),
                 ) {
-                    Text("在浏览器中打开 Trae 登录页")
+                    Text(if (global) "在浏览器中打开 Trae 国际版登录页" else "在浏览器中打开 Trae 登录页")
                 }
                 OutlineActionButton(
                     text = if (expanded) "收起粘贴导入" else "粘贴凭证 JSON 导入",
@@ -82,6 +130,106 @@ object TraeUi : ProviderUi {
                     }
                 }
             }
+            if (accounts.isNotEmpty()) {
+                AccountRegionSection(global, accounts, actions)
+            }
+        }
+    }
+
+    /** 按当前滑块区域过滤账号：国内版只列 trae.cn 账号，国际版只列 trae.ai 账号。 */
+    @Composable
+    private fun AccountRegionSection(global: Boolean, accounts: List<AccountStatus>, actions: ProviderUiActions) {
+        val current = if (global) "global" else "cn"
+        val scoped = remember(accounts, current) { accounts.filter { actions.regionOf(id, it.uid) == current } }
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            if (scoped.isEmpty()) {
+                SectionCard(enterIndex = 1) {
+                    SectionLabel("账号")
+                    Text(
+                        text = if (global) "还没有国际版账号，先登录" else "还没有国内版账号，先登录",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                return
+            }
+            SectionCard(enterIndex = 1) {
+                SectionLabel("账号 · ${scoped.size} 个")
+                for (account in scoped) {
+                    AccountBlock(account, actions)
+                }
+                OutlineActionButton("刷新额度") { actions.onRefreshCredits(id, null) }
+            }
+        }
+    }
+
+    @Composable
+    private fun AccountBlock(status: AccountStatus, actions: ProviderUiActions) {
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        text = status.nickname.ifEmpty { status.uid },
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Text(
+                        text = accountStatusText(status),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Switch(
+                    checked = status.enabled,
+                    onCheckedChange = { actions.onToggleAccount(id, status.uid, it) },
+                )
+            }
+            AccountExtra(status, actions)
+            Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                ChoiceChip("删除账号", false) { actions.onRemoveAccount(id, status.uid) }
+            }
+        }
+    }
+
+    /** 国内/国外分段滑块（与 CodeBuddy 同款）。 */
+    @Composable
+    private fun RegionSelector(
+        isGlobal: Boolean,
+        onSelectGlobal: (Boolean) -> Unit,
+    ) {
+        Surface(
+            shape = CircleShape,
+            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
+            modifier = Modifier.clip(CircleShape),
+        ) {
+            Row(
+                modifier = Modifier.padding(2.dp),
+                horizontalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                listOf("国内", "国外").forEachIndexed { index, label ->
+                    val selected = (index == 1) == isGlobal
+                    val animProgress by animateFloatAsState(
+                        targetValue = if (selected) 1f else 0f,
+                        animationSpec = spring(dampingRatio = 0.72f, stiffness = 600f),
+                        label = "traeRegion$index",
+                    )
+                    Box(
+                        modifier = Modifier
+                            .clip(CircleShape)
+                            .background(MaterialTheme.colorScheme.primary.copy(alpha = animProgress))
+                            .clickable { onSelectGlobal(index == 1) }
+                            .padding(horizontal = 12.dp, vertical = 4.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            text = label,
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                            color = if (selected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
         }
     }
 
@@ -103,9 +251,12 @@ object TraeUi : ProviderUi {
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                ChoiceChip("签到", false) {
-                    actions.onAction(id, status.uid, ACTION_CHECKIN, JsonObject())
+            // 国际版没有签到制度，只给国内账号渲染签到入口（设备指纹校验也只对国内有效）
+            if (actions.regionOf(id, status.uid) != "global") {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    ChoiceChip("签到", false) {
+                        actions.onAction(id, status.uid, ACTION_CHECKIN, JsonObject())
+                    }
                 }
             }
             Text("设备指纹", style = MaterialTheme.typography.titleSmall)

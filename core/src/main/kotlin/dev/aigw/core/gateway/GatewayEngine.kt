@@ -25,6 +25,7 @@ import dev.aigw.core.provider.WebLoginSupport
 import dev.aigw.core.provider.WebLoginTicket
 import dev.aigw.core.provider.antigravity.AntigravityProvider
 import dev.aigw.core.provider.custom.CustomProvider
+import dev.aigw.core.provider.raccoon.RaccoonProvider
 import dev.aigw.core.provider.trae.TraeProvider
 import dev.aigw.core.store.KeyValueStore
 import dev.aigw.core.usage.CallLogStore
@@ -118,6 +119,9 @@ data class Route(val providerId: String, val model: String, val region: String? 
  */
 data class BrowserLoginTicket(val loginUrl: String, val pollState: String = "")
 
+/** 模型探测结果：延迟（毫秒）与失败原因。 */
+data class ProbeResult(val latencyMs: Long, val error: String = "")
+
 /** 局域网地址来源。Android 侧用系统 API 提供，命令行/测试用默认实现。 */
 fun interface LanAddressProvider {
     fun lanAddresses(): List<String>
@@ -132,10 +136,15 @@ class GatewayEngine(
     private val nowMillis: () -> Long = System::currentTimeMillis,
     private val lanAddressProvider: LanAddressProvider = DefaultLanAddressProvider,
     private val onLog: (String) -> Unit = {},
+    /**
+     * 调用记录是否在构造时同步载入。一次性 CLI 工具需要同步（命令立即读数据）；
+     * App 传 false，预载与过期清理改在后台线程执行，冷启动不再阻塞主线程。
+     */
+    preloadCallLogs: Boolean = true,
 ) {
     val settingsRepository = SettingsRepository(store)
     val pool = AccountPool(store, nowMillis)
-    val callLogStore = CallLogStore(store)
+    val callLogStore = CallLogStore(store, preloadOnConstruction = preloadCallLogs)
     val requestLog = RequestLog(store, nowMillis = nowMillis)
     val registry = ProviderRegistry()
 
@@ -221,12 +230,20 @@ class GatewayEngine(
     @Volatile
     private var proxy: ProxySettings = ProxySettings.fromJson(store.read(ProxySettings.STORE_KEY))
 
-    /** 模型开放名单：`/v1/models` 是否只返回模型页里勾选的模型。 */
+    /** 模型开放名单：独立于 [settings] 存储与保存入口，勾选模型不触发 provider 重载。 */
+
     @Volatile
     private var modelExposure: ModelExposureSettings = ModelExposureSettings.load(store)
 
     /** 当前正在监听的登录回调服务（同一时间只允许一个登录流程）。 */
     private var callbackServer: LoopbackCallbackServer? = null
+
+    /** 首屏数据（调用记录与统计、过期清理）是否已在后台就绪。 */
+    @Volatile
+    private var startupDataReady = false
+
+    @Volatile
+    private var startupDataListener: (() -> Unit)? = null
 
     init {
         registerBuiltinProviders(this)
@@ -234,7 +251,30 @@ class GatewayEngine(
         installProxy()
         sanitizer.reloadPipeline(securitySettings.extraWords)
         lastAutoPurgeDay = nowMillis() / DAY_MILLIS
-        runCatching { purgeExpiredRecords() }
+        if (preloadCallLogs) {
+            runCatching { purgeExpiredRecords() }
+        } else {
+            // 调用记录预载与过期清理要扫全部 logs/calls/ 键并逐个解密，
+            // App 冷启动时丢到后台执行，不让主线程等它；完成后通知 UI 补一次刷新。
+            ioExecutor().execute {
+                runCatching {
+                    callLogStore.load()
+                    purgeExpiredRecords()
+                }
+                startupDataReady = true
+                startupDataListener?.invoke()
+            }
+        }
+    }
+
+    /**
+     * 注册首屏数据（调用记录/统计）就绪回调。
+     *
+     * 这些数据在后台线程预载，冷启动时可能晚于 UI 首帧；注册时若已就绪会立即触发一次。
+     */
+    fun setStartupDataReadyListener(listener: (() -> Unit)?) {
+        startupDataListener = listener
+        if (startupDataReady) listener?.invoke()
     }
 
     internal fun now(): Long = nowMillis()
@@ -279,9 +319,26 @@ class GatewayEngine(
     fun metricsOf(providerId: String): dev.aigw.core.failover.ProviderMetricsTracker =
         providerMetrics.computeIfAbsent(providerId) { dev.aigw.core.failover.ProviderMetricsTracker() }
 
-    /** 导出全部供应商的健康观测指标快照 */
-    fun providerMetricsSnapshot(): Map<String, Map<String, Any>> =
-        providerMetrics.mapValues { it.value.snapshot() }
+    // ------------------------------------------------------------------ 模型开放名单
+
+    fun modelExposureSettings(): ModelExposureSettings = modelExposure
+
+    /** 更新开放名单并落盘；独立入口，不调用 reconfigureProviders。 */
+    fun updateModelExposure(updated: ModelExposureSettings) {
+        modelExposure = updated
+        store.write(ModelExposureSettings.STORE_KEY, updated.toJson().toString())
+        log("模型开放名单已更新（过滤=${if (updated.filterEnabled) "开启" else "关闭"}，已勾选=${updated.exposed.size}）")
+    }
+
+    /** [filterEnabled] 为 false 时原样返回，否则只保留在开放名单中的模型。 */
+    private fun filterExposed(models: List<RoutedModel>): List<RoutedModel> =
+        if (!modelExposure.filterEnabled) models else models.filter { modelExposure.allows(it.fullId) }
+
+    /**
+     * 对外暴露的模型目录：模型页 UI 用 `modelsStreaming`（不过滤，展示全量，供勾选）；
+     * HTTP `/v1/models` 用本方法（按开放名单过滤）。
+     */
+    fun exposedModels(): List<RoutedModel> = filterExposed(models())
 
     // ------------------------------------------------------------------ 代理
 
@@ -441,6 +498,10 @@ class GatewayEngine(
      * 不同步的话保存完进详情页会看不到刚填的 key。
      */
     fun syncCustomAccounts(config: CustomProviderConfig) {
+        // 空表保护：自定义供应商的 API Key 实际由「添加账号」单独维护，配置里的 apiKeys
+        // 通常恒为空（编辑基本信息时也不填）。若不拦截，wanted 为空会走到下面的删除分支，
+        // 把该供应商的账号全部删光。空表时绝不动账号池。
+        if (config.apiKeys.isEmpty()) return
         val providerId = config.providerId
         val wanted = config.apiKeys.map { CustomProvider.uidOf(it) }
         val existing = accounts(providerId).map { it.uid }
@@ -490,12 +551,17 @@ class GatewayEngine(
     fun refreshCreditsSoon(providerId: String, uid: String) {
         val key = "$providerId/$uid"
         val now = nowMillis()
-        // 占坑式节流：首次或距上次超过间隔的线程 replace 成功才触发刷新，
-        // 同账号并发对话只放行一个，其余直接放弃（下一轮对话还会再试）。
-        val acquired = if (lastAutoCreditRefresh.containsKey(key)) {
-            lastAutoCreditRefresh.replace(key, lastAutoCreditRefresh[key] ?: 0L, now)
-        } else {
+        // 距上次不足最小间隔就直接跳过（连发对话时最多每 10s 补刷一次）。
+        // 注意：判断必须用「读到的值」而不是当前值做 CAS 期望——
+        // 原先的 replace(key, lastAutoCreditRefresh[key] ?: 0L, now) 期望值即当前值，
+        // CAS 恒成功，节流形同虚设。
+        val prev = lastAutoCreditRefresh[key]
+        if (prev != null && now - prev < AUTO_CREDIT_REFRESH_MIN_INTERVAL_MS) return
+        // 占坑式节流：同账号并发对话只放行一个，其余直接放弃（下一轮对话还会再试）。
+        val acquired = if (prev == null) {
             lastAutoCreditRefresh.putIfAbsent(key, now) == null
+        } else {
+            lastAutoCreditRefresh.replace(key, prev, now)
         }
         if (acquired) creditRefresher.execute { runCatching { refreshCredits(providerId, uid) } }
     }
@@ -589,10 +655,15 @@ class GatewayEngine(
         stopCallbackServer()
         val provider = registry.get(providerId) ?: throw IllegalStateException("未知供应商：$providerId")
         return when {
-            provider is WebLoginSupport && providerId == TraeProvider.ID -> {
-                val callbackUrl = "http://127.0.0.1:$TRAE_CALLBACK_PORT$TRAE_CALLBACK_PATH"
-                val ticket = provider.beginWebLogin(callbackUrl)
-                startCallbackServer(TRAE_CALLBACK_PORT, TRAE_CALLBACK_PATH) { url ->
+            provider is WebLoginSupport && (providerId == TraeProvider.ID || providerId == RaccoonProvider.ID) -> {
+                val (port, path) = if (providerId == RaccoonProvider.ID) {
+                    RACCOON_CALLBACK_PORT to RACCOON_CALLBACK_PATH
+                } else {
+                    TRAE_CALLBACK_PORT to TRAE_CALLBACK_PATH
+                }
+                val callbackUrl = "http://127.0.0.1:$port$path"
+                val ticket = provider.beginWebLogin(callbackUrl, providerSettings(providerId).option("region", ""))
+                startCallbackServer(port, path) { url ->
                     val outcome = completeWebLogin(providerId, url)
                     resultPage(outcome.ok, outcome.nickname.ifEmpty { outcome.uid }, outcome.error)
                 }
@@ -658,10 +729,10 @@ class GatewayEngine(
         runCatching { server.stop() }
     }
 
-    fun beginWebLogin(providerId: String, callbackUrl: String): WebLoginTicket {
+    fun beginWebLogin(providerId: String, callbackUrl: String, region: String = ""): WebLoginTicket {
         val support = registry.get(providerId) as? WebLoginSupport
             ?: throw IllegalStateException("该供应商不支持网页登录")
-        return support.beginWebLogin(callbackUrl)
+        return support.beginWebLogin(callbackUrl, region)
     }
 
     fun completeWebLogin(providerId: String, callbackUrl: String): LoginOutcome {
@@ -779,7 +850,7 @@ class GatewayEngine(
         if (enabledProviders.isEmpty()) return ModelsCatalog(emptyList())
 
         val futures = enabledProviders.map { provider ->
-            ioPool.submit<ProviderModelsChunk> {
+            provider.id to ioPool.submit<ProviderModelsChunk> {
                 val chunk = fetchProviderModels(provider)
                 onChunk(chunk)
                 chunk
@@ -788,9 +859,16 @@ class GatewayEngine(
 
         val aggregated = ArrayList<RoutedModel>()
         val failures = LinkedHashMap<String, String>()
-        for (future in futures) {
+        for ((providerId, future) in futures) {
             val chunk = try {
-                future.get()
+                // 各 Provider 的 READ_TIMEOUT 长达 300s，/v1/models 阻塞版不能无限等，
+                // 超时后取消该任务并按该供应商拉取失败处理。
+                future.get(MODELS_FETCH_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+            } catch (e: java.util.concurrent.TimeoutException) {
+                future.cancel(true)
+                logWarn("拉取模型目录超时（$providerId，${MODELS_FETCH_TIMEOUT_SECONDS}s）")
+                failures[providerId] = "拉取模型目录超时"
+                continue
             } catch (_: Exception) {
                 continue
             }
@@ -847,8 +925,8 @@ class GatewayEngine(
                     models.add(RoutedModel(provider.id, provider.displayName, model))
                 }
             }
-            // 供应商自报错误只在拿不到任何模型时才算失败；带内置快照的回退
-            // （如 CodeBuddy 无账号时显示 FALLBACK_MODELS）不是故障，报红反而吓人
+            // 供应商自报错误只在拿不到任何模型时才算失败；没有内置快照兜底后，
+            // 无账号/拉取失败是否报红由各家 listModels 的 error 决定
             ProviderModelsChunk(provider.id, models, if (models.isEmpty()) view.error.ifEmpty { null } else null)
         } catch (e: Exception) {
             logWarn("拉取模型目录失败（${provider.id}）：${e.message}")
@@ -1047,9 +1125,11 @@ class GatewayEngine(
      *
      * 发送极轻量的探针请求，耗时低于 5000ms 返回正整数，超时或连接失败返回 -1L。
      */
-    fun probeModelLatency(providerId: String, modelId: String, region: String? = null): Long {
-        val provider = registry.get(providerId) ?: return -1L
-        val account = pickAccount(providerId, region = region) ?: return -1L
+    fun probeModelLatency(providerId: String, modelId: String, region: String? = null): ProbeResult {
+        val provider = registry.get(providerId)
+            ?: return ProbeResult(-1L, "未知供应商 $providerId")
+        val account = pickAccount(providerId, region = region)
+            ?: return ProbeResult(-1L, "没有可用账号")
         val resolvedModel = provider.resolveModel(modelId)
         val probeBody = JsonObject().apply {
             addProperty("model", resolvedModel)
@@ -1066,15 +1146,19 @@ class GatewayEngine(
         val start = System.currentTimeMillis()
         val call = try {
             provider.openChat(account, probeBody)
-        } catch (_: Exception) {
-            return -1L
+        } catch (e: Exception) {
+            val msg = e.message ?: "连接失败"
+            logWarn("探测 $providerId/$resolvedModel 失败：$msg")
+            return ProbeResult(-1L, msg)
         }
 
         try {
             if (call.status in 200..299 && call.failure == null) {
-                return (System.currentTimeMillis() - start).coerceAtLeast(1L)
+                return ProbeResult((System.currentTimeMillis() - start).coerceAtLeast(1L), "")
             }
-            return -1L
+            val reason = call.failure?.message ?: call.errorBody.ifEmpty { "HTTP ${call.status}" }
+            logWarn("探测 $providerId/$resolvedModel 失败（HTTP ${call.status}）：${reason.take(300)}")
+            return ProbeResult(-1L, "HTTP ${call.status}：${reason.take(300)}")
         } finally {
             call.close()
         }
@@ -1108,7 +1192,8 @@ class GatewayEngine(
             lower.startsWith("spark") || lower.contains("星火") -> "loomy"
             lower.startsWith("longcat") || lower.contains("龙猫") -> "longcat"
             lower.startsWith("deepseek") || lower.startsWith("kimi") || lower.startsWith("minimax") || lower.startsWith("glm") || lower.startsWith("qwen") -> {
-                listOf("codebuddy", "trae").firstOrNull { pool.size(it) > 0 }
+                // 只认已启用且有账号的供应商，避免推导到一个被用户关掉的供应商
+                listOf("codebuddy", "trae").firstOrNull { providerSettings(it).enabled && pool.size(it) > 0 }
             }
             else -> null
         }
@@ -1186,6 +1271,9 @@ class GatewayEngine(
         /** 「截断超长记录内容」默认截到 4K 字符：足够看清请求，又不至于让存储爆掉。 */
         const val DEFAULT_TRUNCATE_CHARS = 4_000
 
+        /** `/v1/models` 单个供应商拉取模型目录的超时（秒）：上游 READ_TIMEOUT 300s 不能无限等。 */
+        const val MODELS_FETCH_TIMEOUT_SECONDS = 20L
+
         const val CUSTOM_PREFIX = "custom:"
 
         /** 自动补刷额度的同账号最小间隔：对话连发时不打爆上游积分接口。 */
@@ -1194,6 +1282,10 @@ class GatewayEngine(
         /** Trae 登录回调用的本地端口（避开 Antigravity 的 51121）。 */
         const val TRAE_CALLBACK_PORT = 51120
         const val TRAE_CALLBACK_PATH = "/authorize"
+
+        /** 小浣熊（商汤）登录回调用的本地端口。 */
+        const val RACCOON_CALLBACK_PORT = 51122
+        const val RACCOON_CALLBACK_PATH = "/callback"
 
         /** 登录回调监听的存活上限。 */
         const val CALLBACK_TIMEOUT_MS = 5L * 60 * 1000

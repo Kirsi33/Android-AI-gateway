@@ -3,7 +3,8 @@ package dev.aigw.core.provider.loomy
 /**
  * 模型目录：从 `GET /api/v1/models` 拉取（需要 session）。
  *
- * 拉不到时回退到内置快照，并如实标注来源，不假装是上游数据。
+ * 拉不到时返回本次运行内缓存的旧列表（没有则空列表），并置 [fromFallback] 与 [lastError]，
+ * 不展示打包的硬编码快照。
  */
 class LoomyModelCatalog(
     private val apiBase: String = LoomyConstants.API_BASE,
@@ -31,13 +32,14 @@ class LoomyModelCatalog(
     /**
      * 取模型列表。
      *
-     * [session] 为空（没有可用账号）时直接用内置快照，不发请求。
+     * [session] 为空（没有可用账号）时返回空列表，不发请求，也不算失败——
+     * 登录前本就不该有模型，报错只会在模型页吓人。
      */
     fun models(session: String?): List<LoomyModel> {
         if (session.isNullOrEmpty()) {
-            fromFallback = true
-            lastError = "没有可用账号，无法拉取模型列表"
-            return SNAPSHOT
+            fromFallback = false
+            lastError = ""
+            return emptyList()
         }
         val now = nowMillis()
         val fresh = cached != null && cachedSession == session && now - cachedAt < ttlMillis
@@ -48,7 +50,7 @@ class LoomyModelCatalog(
             if (list.isEmpty()) {
                 fromFallback = true
                 lastError = "上游返回了空的模型列表"
-                SNAPSHOT
+                cached ?: emptyList()
             } else {
                 cached = list
                 cachedAt = now
@@ -60,11 +62,11 @@ class LoomyModelCatalog(
         } catch (e: LoomyApiException) {
             fromFallback = true
             lastError = e.message ?: "拉取模型列表失败"
-            SNAPSHOT
+            cached ?: emptyList()
         } catch (e: Exception) {
             fromFallback = true
             lastError = e.message ?: "拉取模型列表失败"
-            SNAPSHOT
+            cached ?: emptyList()
         }
     }
 
@@ -101,22 +103,6 @@ class LoomyModelCatalog(
             )
         }
         return result
-    }
-
-    companion object {
-        /**
-         * 内置快照。
-         *
-         * 来源：Loomy 官方文档「模型」页列出的默认模型（MiniMax-M2.5 / doubao-seed-2.0-pro /
-         * DeepSeek-v3.2 / qwen3.5-plus）。**上游真正的模型 id 以 `/api/v1/models` 为准**，
-         * 这里只是没账号或拉取失败时的占位，可能过期。
-         */
-        val SNAPSHOT: List<LoomyModel> = listOf(
-            LoomyModel(id = "MiniMax-M2.5", name = "MiniMax-M2.5"),
-            LoomyModel(id = "doubao-seed-2.0-pro", name = "豆包 Seed 2.0 Pro"),
-            LoomyModel(id = "DeepSeek-v3.2", name = "DeepSeek v3.2"),
-            LoomyModel(id = "qwen3.5-plus", name = "通义千问 3.5 Plus"),
-        )
     }
 }
 

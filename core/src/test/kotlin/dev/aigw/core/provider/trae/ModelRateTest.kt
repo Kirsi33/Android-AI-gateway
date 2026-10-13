@@ -126,18 +126,4 @@ class ModelRateTest {
         assertEquals("0.08×", ModelRates.rateOf("qwen3.8-flash")!!.baseLabel())
         assertNull(ModelRates.rateOf("glm-5")!!.discountLabel(), "GLM-5 无官方折扣数据")
     }
-
-    @Test
-    fun `内置回退清单里的模型尽量都有倍率`() {
-        val missing = TraeModelCatalog.FALLBACK
-            .map { it.id }
-            .filterNot { TraeModelCatalog.isInternal(it) }
-            .filterNot { it.startsWith("custom_model_") }
-            .filter { ModelRates.rateOf(it) == null }
-        // 允许少量确实没有公开数据的模型；数量增长说明该补表了
-        assertTrue(
-            missing.size <= 5,
-            "未收录倍率的模型过多（${missing.size} 个）：$missing",
-        )
-    }
 }

@@ -91,7 +91,8 @@ class ModelsStreamingTest {
             listOf("fast/f1", "fast/f2", "slow/slow-1"),
             result.models.filter { it.providerId == "fast" || it.providerId == "slow" }.map { it.fullId }.sorted(),
         )
-        assertTrue(result.failures.isEmpty())
+        // 内置供应商在无账号时可能自报失败，与本次关注的两家无关
+        assertTrue(result.failures.keys.none { it == "fast" || it == "slow" }, result.failures.toString())
     }
 
     @Test

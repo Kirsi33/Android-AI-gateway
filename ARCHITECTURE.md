@@ -47,11 +47,12 @@
 │  codebuddy:   腾讯 OpenAI 兼容（强制 stream）       │
 │  antigravity: Gemini 风格 → OpenAI（双向翻译）      │
 │  loomy:       近乎直通（HTTP 200 + 业务码陷阱）      │
+│  raccoon:     小浣熊（OpenAI 结构包在 data 里）       │
 │  custom:*:    纯直通                              │
 └───────────────┬─────────────────────────────────┘
                 ▼
         [ 上游 API ]
-   Google（走代理）/ 腾讯、字节、讯飞（国内直连）
+   Google（走代理）/ 腾讯、字节、讯飞、商汤（国内直连）
 ```
 
 **核心不变量（所有代码都必须遵守）**：
@@ -77,6 +78,7 @@
 | `gateway/ProviderBootstrap.kt` | 内置 Provider 登记处 | 新增供应商在此加一行 |
 | `gateway/LoopbackCallbackServer.kt` | OAuth 登录回调监听（Trae 51120 / Antigravity 51121） | 临时端口，用完即释放 |
 | `gateway/OpenAiApi.kt` | OpenAI 报文拼装（error/modelList） | |
+| `failover/` | 容灾调度：`FailoverConfig`（候选/重试/熔断参数；`FailoverCandidate.weight`/`timeoutMs` **未生效**，仅配置兼容）、`FailoverDecision`（错误→重试/换家/终止）、`ProviderCircuitBreaker`（连续失败熔断）、`ProviderMetricsTracker`（健康指标，仅观测） | 熔断只计上游侧错误，客户端 400 不计 |
 | `pool/AccountPool.kt` | 账号池：选号（余额最高者）、硬禁用（disabled）、持久化；不做本地冷却，上游错误由换号/Failover 应对 | 状态持久化在 `pool/state/<providerId>.json` |
 | `protocol/OpenAiGemini.kt` | OpenAI⇄Gemini 双向转换（Antigravity 专用）：严格 user/model 角色交替、tool 聚合、thinking、safetySettings | **上游强制要求 contents 角色交替**，连续同 role 会 400 |
 | `provider/Provider.kt` | Provider 接口 + AuthKind 枚举 | 抽象边界，勿随意扩接口 |
@@ -86,15 +88,19 @@
 | `provider/codebuddy/` | 腾讯 WorkBuddy（国内 copilot.tencent.com / 国际 workbuddy.ai）| 上游拒绝非流式，必须 stream:true |
 | `provider/trae/` | 字节 Trae SOLO 通道（最重的协议转换）| |
 | `provider/loomy/` | 讯飞 Loomy（HTTP 200 + 业务码陷阱）| |
+| `provider/raccoon/` | 商汤小浣熊（`xiaohuanxiong.com`，web 通道，网页回调登录）| OpenAI 结构包在 `data` 里、`delta` 是字符串；字段用标准名（v2 是 LiteLLM 层，`max_new_tokens` 会被 500 拒）；有积分余额接口 |
 | `provider/custom/` | 任意 OpenAI 兼容中转站 | 一个 key = 一个账号 |
 | `store/KeyValueStore.kt` | 存储抽象（App 侧用 EncryptedSharedPreferences 实现） | |
+| `security/` | `SecuritySettings`（脱敏/限速开关）、`RequestSanitizer`（system 提示词零宽字符脱敏 + 出网取证）、`AccountRateLimiter`（账号级最小间隔 + 抖动） | 只改 system 消息，不碰 user 输入 |
+| `usage/` | `CallLogStore`（调用记录，每条一键）、`RequestLog`（环形运行日志）、`StorageAudit`（按前缀统计占用） | 记录有容量淘汰与保留天数清理 |
+| `util/` | `CappedStringBuilder`（边收边截）、`CountFormat`、`JsonAccess`、`TimeWindow` | |
 
 ### app/（Android 壳）
 
 | 文件 | 职责 |
 |---|---|
 | `AiGatewayApp.kt` | Application：构造引擎（单例）+ 通知渠道 |
-| `service/GatewayService.kt` | 前台服务：`startForeground` 必须在 `onStartCommand` 第一行（系统超时 5s 强杀），START_STICKY 自重建，WakeLock+WifiLock |
+| `service/GatewayService.kt` | 前台服务：`startForeground` 必须在 `onStartCommand` 第一行（系统超时 5s 强杀），START_NOT_STICKY 不自重建（自重建是灰色软件检测特征），WakeLock+WifiLock |
 | `service/GatewayTileService.kt` | 控制中心磁贴开关 |
 | `data/EncryptedKeyValueStore.kt` | 写操作用 `commit()`（同步）而非 `apply()`——换 token 后必须立刻可读 |
 | `ui/ModelsScreen.kt` | 模型列表：点击复制、Q弹测速按钮 |
@@ -113,7 +119,7 @@
 | `modelsLoading` | 是否有一轮流式加载在进行 |
 | `modelLoadStates: Map<String, ModelLoadState>` | 每个供应商的进度：`Loading` / `Done(count)` / `Failed(reason)`；发起时先置全部参与供应商为 Loading |
 | `models` | 各供应商就绪即增量合并（同供应商旧条目被替换）；一轮结束时整体覆盖为最终聚合 |
-| `modelsError` | 整体异常 + 各失败供应商汇总（`供应商：原因`）；带内置快照的回退不算失败 |
+| `modelsError` | 整体异常 + 各失败供应商汇总（`供应商：原因`）；无账号时不报错，拉取失败即算失败 |
 
 可做的动画：按 `modelLoadStates` 画每供应商骨架屏、`Done` 后逐组点亮、`Failed` 组内错误态；
 `ModelsScreen` 现在的空态「还没有模型」在 `modelsLoading` 时应替换为骨架屏。
@@ -137,11 +143,12 @@ call/...                           # 调用日志
 
 | Provider | id | 区域 | 登录方式 | 上游 | 协议陷阱 |
 |---|---|---|---|---|---|
-| Trae | `trae` | `cn` / `global` | 内嵌网页（回调 51120） | 国内 `api.trae.com.cn` / 国际 `api.trae.ai` | SOLO 私有 SSE；content 必须是 `[{type:text}]` 数组；tool 参数是字符串；流内 `notify_usage` 上报计费 |
+| Trae | `trae` | `cn` / `global` | 内嵌网页（回调 51120） | 国内 `trae-api-cn.mchost.guru` / 国际 `api.trae.ai` | SOLO 私有 SSE；content 必须是 `[{type:text}]` 数组；tool 参数是字符串；流内 `notify_usage` 上报计费 |
 | WorkBuddy | `codebuddy` | `cn` / `global` | 内嵌网页（state 轮询） | 国内 `copilot.tencent.com` / 国际 `workbuddy.ai` | 上游拒绝非流式（必须 stream:true）；tool_choice 只认字符串；签到/成长中心仅国内版 |
 | Antigravity | `antigravity` | — | 内嵌网页（OAuth loopback 51121） | `cloudcode-pa.googleapis.com` | Gemini 风格：role 用 user/model；schema 不支持 const/$ref；contents 必须严格交替；tool 参数名是 parametersJsonSchema；response.result 必须是字符串 |
 | Loomy | `loomy` | — | 手机短信（**支持国家码**） | `xfinfr.com` | 鉴权失败是 **HTTP 200 + 业务码**，不是 4xx |
 | LongCat | `longcat` | `cn` / `global` | 内嵌网页 / 免登录 | `longcat.chat` | 上游**没有 model 字段**，靠 `agentId`+`reasonEnabled`+`searchEnabled`；思考模式下 `content` 里混有套话与答案，须用 `finish.finalContentX` 定稿 |
+| 小浣熊 | `raccoon` | — | 网页回调（`/code/authorize` → `authorization_code`） | `xiaohuanxiong.com`（web 通道） | 登录 URL **不能带 `login_source=desktop`**（否则走 `office-raccoon://` 分支跳不回来）；对话走 v2（LiteLLM 层）：字段用标准名（`max_new_tokens` 会被 500 拒）、`delta` 是**字符串**不是对象；有签到/积分接口 |
 | 自定义 | `custom:<key>` | — | API Key | 用户填的 baseUrl | 无 |
 
 ### 区域命名约定
@@ -163,9 +170,6 @@ call/...                           # 调用日志
 
 - 模型**只在有账号时向上游拉取**；没有账号返回空列表且**不算失败**
   （`GatewayEngine` 把 `models.isEmpty() && error 非空` 当 failure，所以「没账号」时 error 必须为空串）。
-- WorkBuddy 的内置兜底清单**国内与国际是两份**（`core/src/main/resources/codebuddy-models-{cn,intl}.json`），
-  来自官方 CLI（`@tencent-ai/codebuddy-code`）的 `product.internal.json` / `product.json`。
-  同名模型两边倍率不同（`deepseek-v4.1-flash` 国内 `x0.03`、国际 `x0.00`），**不能混用**。
 - 倍率通过 `ProviderModel.extra["rate"]` 传给 UI；没有公开数据的模型**不填**，界面留空而不是编造。
 - Trae 的倍率取自本地参考表 `ModelRates`（上游 `get_detail_param` 不返回价格字段）。
 
@@ -175,15 +179,18 @@ call/...                           # 调用日志
 
 这是本项目踩坑最深的地方，**0.1.40→0.1.57 的「登录频繁失效」全是违反以下原则造成的**：
 
-### 正确策略（0.1.58 现状）
+### 正确策略（2.2.1 现状）
 1. **Provider 内部绝不主动刷新 Token**。`openChat`/`listModels`/`creditInfo` 只调 `parse(account)` 取当前凭证。
-2. **刷新唯一入口**：网关在每次请求前调 `provider.refreshAccount(account, settings.refreshSkewSeconds)`，而 `refreshAccount` 内部判断：只在 token 临期 5 分钟内（`REQUEST_SAFETY_WINDOW_SECONDS`）才真正调 OAuth。刷新频率天然 ≈ 1小时1次。
+2. **刷新唯一入口**：网关在每次请求前调 `provider.refreshAccount(account, settings.refreshSkewSeconds)`，而 `refreshAccount` 内部判断：只在 token 临期 5 分钟内（`REQUEST_SAFETY_WINDOW_SECONDS`）才真正调 OAuth。刷新频率天然 ≈ 1小时1次。生效窗口 = `min(skewSeconds, 5min)`，故即使全局 `refreshSkewSeconds` 被配大也不会退化成每次请求都刷。
 3. **刷新成功必须落盘**：`refreshAccount` 内通过 `hooks.onAccountUpdated(toProviderAccount(refreshed, account))` 回存——Google 会轮换 refresh_token，不回存旧值作废后就是永久 invalid_grant。
 4. **UID 稳定性**：`toProviderAccount(refreshed, existing)` 必须沿用既有账号的 uid，否则账号池键漂移 = 账号"消失"。
 5. **classify 语义**：401/403 → `SESSION_DEAD`（硬禁用，提示重新登录）。**不要**降级成软重试——那会让账号很快回来再次触发刷新，形成刷新风暴加速风控。
+6. **并发去重**：临期判断在锁外，故锁内必须复查「刚被别的线程刷出的凭证」（`lastRefreshed`，按 uid 缓存）并直接复用，否则同一窗口内 N 个在途请求会打出 N 次 OAuth。命中缓存必须返回新凭证而非 null，否则调用方拿旧 token 直接 401。重新登录（`exchangeCode`）要清该 uid 的缓存与冷却，防止旧凭证被回写。
+7. **失败冷却**：刷新失败后 60s（`REFRESH_COOLDOWN_SECONDS`，按 uid）内不再重打 OAuth，避免 token 被吊销后按请求频率轰炸端点。
 
 ### 为什么（根因链条）
 Google 对同一个 refresh_token 的高频 token 换新有风控。0.1.53~0.1.57 曾在每次对话前主动刷新 + 401 后"自愈重试"再刷 + 401 降级短冷却回来再刷——三次叠加让一个 token 几分钟内被换新十几次，Google 直接吊销。表现就是「反复需要重新登录」和后续的 503。
+2.2.1 又发现两处残留放大器：`refreshAccount` 的临期判断在锁外、锁内不复查最新凭证（并发 N 请求 = N 次 OAuth），以及刷新失败无退避（token 被吊销后 OAuth 频率 = 请求频率）。两者均已按上面第 6/7 条堵住。
 
 ### 铁律
 > 任何「让 Antigravity 更不容易掉线」的改动，如果最终效果是**增加了对 `oauth2.googleapis.com/token` 的调用频率**，那它一定是错的，无论它看起来多有道理。
@@ -214,6 +221,14 @@ Google 对同一个 refresh_token 的高频 token 换新有风控。0.1.53~0.1.5
 ### 讯飞 Loomy
 - **鉴权失败是 HTTP 200 + 业务码**（JSON 里 code 字段），不是 4xx。不做业务码判定会把错误 JSON 当正常回复透传。
 
+### 商汤小浣熊（raccoon）
+- 登录是网页回调：`/code/authorize?appname=Raccoon&redirect=<回调>`，回调带 `authorization_code`，再 `POST /api/web/auth/v1/login_with_authorization_code` 换 `access_token`(JWT)/`refresh_token`。
+- ⚠️ **不要带 `login_source=desktop`**：授权页在 `login_source=desktop` 时走 `office-raccoon://auth/callback?code=…` 自定义 scheme 分支（手机上没有 App 能接，表现为「点授权跳首页、登录不回来」）；不传时才会把 `?authorization_code=…` 回推到 `redirect`（`window.open(redirect+code)`）。`redirect` 不传时兜底跳官网首页，这正是 bug 现象。
+- 每日签到领积分：`POST /api/web/desktop/v1/login/points/grant`（空 body）；余额 `GET /api/web/points/v1/balance`（字段 `available_points`）。
+- 对话端点 `POST /api/web/llm/v2/chat/completions`（v2 是 LiteLLM 的 OpenAI 兼容层，字段名用标准 `max_tokens`；**改成 `max_new_tokens` 会被上游 500 拒**）。响应**真正的 OpenAI 结构被包在 `data` 里**（外层 `{"status":{"code":..},"data":{...}}`），且 **`delta` 是字符串**（正文片段）不是对象，需逐行翻译回标准 OpenAI SSE；请求体补 `n=1`、`stop="<|endofmessage|>"`。
+- 鉴权 `Authorization: Bearer <access_token>`；需带桌面 Web 客户端 UA + `Accept-Language: zh-Hans`；有组织时带 `X-Org-Code`。
+- 旧主机 `raccoon.sensetime.com` / `code.sensetime.com` 已解析不了，现主机是 `xiaohuanxiong.com`。
+
 ### 直通层通用
 - SSE 事件必须以空行（`\n\n`）结尾；上游格式不严谨时网关统一规范化。
 - HTTP 200 + 空 body ≠ 成功。空回复必须报 `upstream_empty` 错误，否则客户端表现为「输出完成但零内容」。
@@ -225,7 +240,7 @@ Google 对同一个 refresh_token 的高频 token 换新有风控。0.1.53~0.1.5
 
 1. **修 bug 前先回答**：这个 bug 在 0.1.39（最后一个全绿版本）存在吗？
    - 不存在 → 是 0.1.39 之后某次改动引入的。**先 git diff 找到引入点，恢复原行为，再考虑要不要保留新特性**。不要在引入 bug 的代码上继续叠补丁。
-2. **任何触碰 `refreshAccount`/`ensureValidCredential`/`classify` 的改动**：先重读本文档第 5 节。Antigravity 的凭证策略已被验证过一次错误方向，不要用「看起来更健壮」的理由再踩一遍。
+2. **任何触碰 `refreshAccount`/`classify` 的改动**：先重读本文档第 5 节。Antigravity 的凭证策略已被验证过一次错误方向，不要用「看起来更健壮」的理由再踩一遍。
 3. **新增供应商**：只需 ①core 加 `provider/<id>/` 实现 `Provider` 接口，②`ProviderBootstrap` 加一行，③app 加 `ProviderUi` 实现并在 `ProviderUiRegistry` 登记。框架自动获得账号池、Failover、代理分流、日志、保活。
 4. **测试要求**：`:core:test` 全绿才能出包。协议相关改动必须先加失败用例再修（复现→修→锁住）。
 5. **构建三坑**（aarch64 PRoot 容器）：JDK 必须 17；必须 `LD_PRELOAD=/opt/android-sdk/lib/libdelfix.so`；aapt2/zipalign 必须用 aarch64 静态版（备份在 `~/.aicode/backup/`）。详见全局记忆 `android-build-arm64-proot`。

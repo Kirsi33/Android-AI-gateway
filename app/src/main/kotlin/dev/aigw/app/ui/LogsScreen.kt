@@ -160,7 +160,9 @@ fun LogsScreen(state: AppUiState, viewModel: AppViewModel) {
                         }
                     }
                 } else {
-                    itemsIndexed(state.logs) { _, line ->
+                    // key 用单调自增的 seq：时间戳+内容可能重复（同一秒内多条相同日志），
+                    // 重复 key 会让 LazyColumn 直接崩溃。
+                    itemsIndexed(state.logs, key = { _, line -> line.seq }) { _, line ->
                         SectionCard {
                             Text(
                                 text = line.render(),

@@ -214,7 +214,7 @@ private fun AppRoot(viewModel: AppViewModel, state: AppUiState) {
                         onClick = {
                             subPage = null
                             tab = item
-                            if (item == Tab.Models) viewModel.refreshModels()
+                            if (item == Tab.Models) viewModel.ensureModelsLoaded()
                         },
                         icon = { Icon(item.icon, contentDescription = item.label) },
                         label = { Text(item.label) },
@@ -287,7 +287,7 @@ private fun AppRoot(viewModel: AppViewModel, state: AppUiState) {
                     onTab = { newTab ->
                         subPage = null
                         tab = newTab
-                        if (newTab == Tab.Models) viewModel.refreshModels()
+                        if (newTab == Tab.Models) viewModel.ensureModelsLoaded()
                     },
                     onSubPage = { subPage = it },
                 )

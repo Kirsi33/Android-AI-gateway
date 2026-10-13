@@ -1,5 +1,6 @@
 package dev.aigw.core.gateway
 
+import com.google.gson.JsonArray
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import dev.aigw.core.store.KeyValueStore
@@ -7,28 +8,22 @@ import dev.aigw.core.util.arrayOrNull
 import dev.aigw.core.util.boolOrNull
 
 /**
- * 模型开放名单：决定外部客户端（agent）从 `/v1/models` 能拉到哪些模型。
+ * 「模型开放名单」：勾选的模型才对外（`/v1/models`）暴露。
  *
- * 模型页里能看到全量目录并逐个勾选；只有勾选的模型才对外开放。
- * - [filterEnabled] = false：不过滤，`/v1/models` 返回全量（默认，兼容旧行为）。
- * - [filterEnabled] = true：只返回 [exposed] 里出现过的 `fullId`（`provider/模型名`）。
+ * 独立存储、独立保存入口，**不挂到 [GatewaySettings]**——否则每次勾选都会走
+ * `updateSettings` → `reconfigureProviders` 全量重载 provider。
  *
- * 独立存储、独立保存入口：不挂在 [GatewaySettings] 上，
- * 避免每次勾选都触发引擎的 provider 重载（updateSettings 会 reconfigureProviders）。
+ * [filterEnabled] 为 false（默认）时保持现状，对外返回全量模型。
  */
 data class ModelExposureSettings(
-    /** 是否启用「只开放勾选的模型」。 */
     val filterEnabled: Boolean = false,
-    /** 对外开放的模型 fullId 集合（`provider/模型名`，与模型页展示一致）。 */
     val exposed: Set<String> = emptySet(),
 ) {
     fun allows(fullId: String): Boolean = exposed.contains(fullId)
 
     fun toJson(): JsonObject = JsonObject().apply {
         addProperty("filterEnabled", filterEnabled)
-        val arr = com.google.gson.JsonArray()
-        for (id in exposed) arr.add(id)
-        add("exposed", arr)
+        add("exposed", JsonArray().apply { exposed.forEach { add(it) } })
     }
 
     companion object {
@@ -37,18 +32,21 @@ data class ModelExposureSettings(
         fun fromJson(raw: String): ModelExposureSettings {
             val obj = runCatching { JsonParser.parseString(raw).asJsonObject }.getOrNull()
                 ?: return ModelExposureSettings()
-            val ids = LinkedHashSet<String>()
-            obj.arrayOrNull("exposed")?.forEach { e ->
-                val s = (e as? com.google.gson.JsonPrimitive)?.takeIf { it.isString }?.asString
-                if (!s.isNullOrBlank()) ids.add(s)
+            val exposed = LinkedHashSet<String>()
+            obj.arrayOrNull("exposed")?.forEach { element ->
+                // 只收字符串元素，忽略数字/对象/null 与空串
+                if (element.isJsonPrimitive && element.asJsonPrimitive.isString) {
+                    val id = element.asString
+                    if (id.isNotEmpty()) exposed.add(id)
+                }
             }
             return ModelExposureSettings(
                 filterEnabled = obj.boolOrNull("filterEnabled") ?: false,
-                exposed = ids,
+                exposed = exposed,
             )
         }
 
         fun load(store: KeyValueStore): ModelExposureSettings =
-            runCatching { fromJson(store.read(STORE_KEY) ?: "") }.getOrDefault(ModelExposureSettings())
+            fromJson(store.read(STORE_KEY).orEmpty())
     }
 }
