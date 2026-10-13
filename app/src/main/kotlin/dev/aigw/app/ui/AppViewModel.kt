@@ -1031,6 +1031,14 @@ class AppViewModel(
         if (enabled) "已启用该账号" else "已停用该账号"
     }
 
+    /** 调整账号使用优先级（↑/↓）：靠前的先用，同级按余额。 */
+    fun moveAccountPriority(providerId: String, uid: String, up: Boolean) {
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) { engine.moveAccountPriority(providerId, uid, up) }
+            refresh()
+        }
+    }
+
     fun removeAccount(providerId: String, uid: String) = action {
         if (!engine.removeAccount(providerId, uid)) throw IllegalStateException("账号不存在")
         "账号已删除"
