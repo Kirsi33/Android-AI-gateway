@@ -1156,19 +1156,3 @@ internal fun jwtClaim(accessToken: String, vararg keys: String): String {
     return obj.firstString(*keys)
 }
 
-/** 按顺序取第一个能解析成数字的字段（用于 credits / reward_credit 这类可能是字符串的字段）。 */
-internal fun JsonObject.firstNumber(vararg keys: String): Double? {
-    for (key in keys) {
-        val value = get(key) ?: continue
-        if (value.isJsonNull) continue
-        if (value.isJsonPrimitive) {
-            val prim = value.asJsonPrimitive
-            if (prim.isNumber) return prim.asDouble
-            prim.asString.trim().toDoubleOrNull()?.let { return it }
-        }
-    }
-    return null
-}
-
-/** 生成一个小写 UUIDv4（幂等键用，每次请求都要全新）。 */
-internal fun uuid4(): String = java.util.UUID.randomUUID().toString()
