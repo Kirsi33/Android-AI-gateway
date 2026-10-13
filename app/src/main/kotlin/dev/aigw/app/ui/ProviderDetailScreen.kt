@@ -107,6 +107,7 @@ fun ProviderDetailScreen(
             onAction = { id, uid, action, payload -> viewModel.performAction(id, uid, action, payload) },
             onCheckDeviceAuth = { id, region -> viewModel.checkDeviceAuth(id, region) },
             onToggleAccount = { id, uid, enabled -> viewModel.setAccountEnabled(id, uid, enabled) },
+            onMoveAccountPriority = { id, uid, up -> viewModel.moveAccountPriority(id, uid, up) },
             onRemoveAccount = { id, uid -> viewModel.removeAccount(id, uid) },
             onUpdateSecret = { id, uid, secret, notice ->
                 viewModel.updateAccountSecret(id, uid, secret)
@@ -203,6 +204,10 @@ private fun AccountRow(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
+            AccountPriorityArrows(
+                priority = account.priority,
+                onMove = { up -> actions.onMoveAccountPriority(account.providerId, account.uid, up) },
+            )
             Switch(
                 checked = account.enabled,
                 onCheckedChange = { actions.onToggleAccount(account.providerId, account.uid, it) },
