@@ -49,6 +49,8 @@ class ProviderUiActions(
     /** 重新检查设备授权状态（浏览器里已登录但轮询错过时手动重试）；region 与登录时一致。 */
     val onCheckDeviceAuth: (providerId: String, region: String) -> Unit = { _, _ -> },
     val onToggleAccount: (providerId: String, uid: String, enabled: Boolean) -> Unit = { _, _, _ -> },
+    /** 调整账号使用优先级（↑/↓）：靠前的先用，同级按余额。 */
+    val onMoveAccountPriority: (providerId: String, uid: String, up: Boolean) -> Unit = { _, _, _ -> },
     val onRemoveAccount: (providerId: String, uid: String) -> Unit = { _, _ -> },
     /** 账号凭证级修改（如 Trae 的设备指纹）：直接替换 secret。 */
     val onUpdateSecret: (providerId: String, uid: String, secret: String, notice: String) -> Unit =
