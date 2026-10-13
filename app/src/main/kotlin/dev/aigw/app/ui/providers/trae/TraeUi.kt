@@ -34,6 +34,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.google.gson.JsonObject
+import dev.aigw.app.ui.AccountPriorityArrows
 import dev.aigw.app.ui.ChoiceChip
 import dev.aigw.app.ui.OutlineActionButton
 import dev.aigw.app.ui.SectionCard
@@ -179,6 +180,10 @@ object TraeUi : ProviderUi {
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
+                AccountPriorityArrows(
+                    priority = status.priority,
+                    onMove = { up -> actions.onMoveAccountPriority(id, status.uid, up) },
+                )
                 Switch(
                     checked = status.enabled,
                     onCheckedChange = { actions.onToggleAccount(id, status.uid, it) },
