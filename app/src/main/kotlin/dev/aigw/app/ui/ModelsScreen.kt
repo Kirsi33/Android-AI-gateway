@@ -43,12 +43,12 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.compose.runtime.toMutableStateList
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -70,16 +70,16 @@ fun ModelsScreen(state: AppUiState, viewModel: AppViewModel) {
     // 按 routePrefix 分组：区域型供应商（如 WorkBuddy 国内与国外）各成一个分组
     val grouped = remember(state.models) { state.models.groupBy { it.routePrefix } }
     val exposure = state.modelExposure
-    // 折叠状态：记「被折叠」的分组（默认全展开）。用 rememberSaveable 让旋转屏幕后保持。
-    val collapsed = rememberSaveable(
-        saver = androidx.compose.runtime.saveable.listSaver(
-            save = { it.toList() },
-            restore = { it.toMutableStateList() },
-        ),
-    ) { mutableStateListOf<String>() }
-    // 折叠集合的稳定快照：读取必须发生在组合作用域（LazyListScope 不是组合作用域、不会订阅），
-    // 这样点击折叠才会重建列表、模型行即时收起。
-    val collapsedNow = collapsed.toSet()
+    // 折叠状态：记「被折叠」的分组（默认全展开）。
+    //
+    // 用不可变 Set + rememberSaveable，而不是 SnapshotStateList：
+    // 后者在保存时机（onPause / 进程回收）被 SaveableStateRegistry 读取时，
+    // 若正好与 LazyColumn 的组合读快照交叠，会抛「Reading a state that was created
+    // after the snapshot was taken」——折叠的分组越多越容易撞上，表现为点折叠直接闪退。
+    // 换成纯值 Set 后 save/restore 不碰快照，问题消失；读取仍在组合作用域，
+    // 折叠变化会正常触发列表重建。
+    var collapsed by rememberSaveable { mutableStateOf(emptySet<String>()) }
+    val collapsedNow = collapsed
 
 
     // 刷新按钮旋转动效：仅在加载中才创建无限过渡，停止后不空转每帧插值
@@ -202,14 +202,7 @@ fun ModelsScreen(state: AppUiState, viewModel: AppViewModel) {
                     }
                 }
             } else {
-                // 已加载的模型按组展示。
-                //
-                // 性能注意：折叠状态不要在这里读——状态一变整页都会重组，
-                // 模型多的时候点一下要卡好几帧。这里把「这一组是否折叠」的判断
-                // 下沉到 [ModelGroupSection] 内部，由它自己订阅状态，
-                // 这样点击只重组那一个分组。
-                for ((routePrefix, models) in grouped) {
-                // 已加载的模型按组展示；点击分组标题折叠/展开该组
+                // 已加载的模型按组展示；点击分组标题折叠/展开该组。
                 for ((routePrefix, models) in grouped) {
                     val isCollapsed = routePrefix in collapsedNow
                     val title = models.firstOrNull()?.providerName ?: routePrefix
@@ -221,8 +214,11 @@ fun ModelsScreen(state: AppUiState, viewModel: AppViewModel) {
                                 .clip(MaterialTheme.shapes.large)
                                 .background(MaterialTheme.colorScheme.surface)
                                 .clickable {
-                                    if (routePrefix in collapsed) collapsed.remove(routePrefix)
-                                    else collapsed.add(routePrefix)
+                                    collapsed = if (routePrefix in collapsed) {
+                                        collapsed - routePrefix
+                                    } else {
+                                        collapsed + routePrefix
+                                    }
                                 }
                                 .padding(start = 14.dp, end = 14.dp, top = 12.dp, bottom = 12.dp),
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -279,8 +275,6 @@ fun ModelsScreen(state: AppUiState, viewModel: AppViewModel) {
                             onTest = { viewModel.testModel(model) },
                         )
                     }
-                }
-
                 }
 
                 // 若已有部分模型展示，而剩余供应商仍在加载中，在下方继续展示该供应商的骨架占位
