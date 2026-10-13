@@ -124,17 +124,13 @@ fun ModelsScreen(state: AppUiState, viewModel: AppViewModel) {
             actions = {
                 // 「只看可用模型」：隐藏上游的非对话内部条目（如 Trae 的内部 config）
                 val only = state.settings.onlyUsableModels
-                Text(
-                    if (only) "只看可用" else "全部模型",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = if (only) MaterialTheme.colorScheme.primary
-                    else MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier
-                        .clip(MaterialTheme.shapes.small)
-                        .clickable {
-                            viewModel.updateSettings(state.settings.copy(onlyUsableModels = !only))
-                        }
-                        .padding(horizontal = 8.dp, vertical = 6.dp),
+                HeaderPillToggle(
+                    label = "全部模型",
+                    labelOn = "只看可用",
+                    enabled = only,
+                    onClick = {
+                        viewModel.updateSettings(state.settings.copy(onlyUsableModels = !only))
+                    },
                 )
                 ExposureToggle(
                     enabled = exposure.filterEnabled,
@@ -300,12 +296,15 @@ fun ModelsScreen(state: AppUiState, viewModel: AppViewModel) {
 }
 
 /**
- * 「开放名单」开关：点击切换是否只对外暴露勾选的模型。
- *
- * 开启时用主色胶囊 + 填充圆点区分，关闭时用描边中性样式。
+ * 页头胶囊开关（「开放名单」「只看可用」共用）：开启时主色胶囊 + 填充圆点，关闭时描边中性。
  */
 @Composable
-private fun ExposureToggle(enabled: Boolean, onClick: () -> Unit) {
+private fun HeaderPillToggle(
+    label: String,
+    enabled: Boolean,
+    onClick: () -> Unit,
+    labelOn: String = "$label 开",
+) {
     Row(
         modifier = Modifier
             .clip(CircleShape)
@@ -333,7 +332,7 @@ private fun ExposureToggle(enabled: Boolean, onClick: () -> Unit) {
                 ),
         )
         Text(
-            text = if (enabled) "开放名单 开" else "开放名单",
+            text = if (enabled) labelOn else label,
             style = MaterialTheme.typography.labelSmall,
             fontWeight = FontWeight.SemiBold,
             color = if (enabled) MaterialTheme.colorScheme.onPrimaryContainer
@@ -341,6 +340,11 @@ private fun ExposureToggle(enabled: Boolean, onClick: () -> Unit) {
         )
     }
 }
+
+/** 「开放名单」开关：复用同一胶囊样式。 */
+@Composable
+private fun ExposureToggle(enabled: Boolean, onClick: () -> Unit) =
+    HeaderPillToggle(label = "开放名单", enabled = enabled, onClick = onClick)
 
 /** 单个模型行：左侧模型 id 与信息（点击复制），中部测速状态，右侧测速按钮。 */
 @Composable
