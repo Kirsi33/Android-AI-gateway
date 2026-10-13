@@ -39,6 +39,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import dev.aigw.app.ui.AccountPriorityArrows
 import dev.aigw.app.ui.ChoiceChip
 import dev.aigw.app.ui.EmptyHint
 import dev.aigw.app.ui.OutlineActionButton
@@ -312,6 +313,10 @@ class CustomUi(override val id: String) : ProviderUi {
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
+                AccountPriorityArrows(
+                    priority = account.priority,
+                    onMove = { up -> actions.onMoveAccountPriority(id, account.uid, up) },
+                )
                 Icon(
                     if (expanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
                     contentDescription = if (expanded) "收起" else "展开",
