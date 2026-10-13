@@ -259,8 +259,6 @@ data class AppUiState(
     val storage: StorageReport? = null,
     /** 安全防护与风控设置。 */
     val security: dev.aigw.core.security.SecuritySettings = dev.aigw.core.security.SecuritySettings(),
-    /** 模型开放名单：只对外暴露勾选的模型。 */
-    val modelExposure: dev.aigw.core.gateway.ModelExposureSettings = dev.aigw.core.gateway.ModelExposureSettings(),
     /** 出网取证记录列表。 */
     val evidences: List<dev.aigw.core.security.OutboundEvidence> = emptyList(),
     /** 当前生效的脱敏规则词汇数。 */
@@ -641,44 +639,6 @@ class AppViewModel(
             withContext(Dispatchers.IO) { engine.updateSettings(updated) }
             refresh()
         }
-    }
-
-    // ------------------------------------------------------------------ 模型开放名单
-
-    /** 当前开放名单（`/v1/models` 只返回勾选的模型；filterEnabled=false 时不过滤）。 */
-    fun modelExposure(): dev.aigw.core.gateway.ModelExposureSettings =
-        engine.modelExposureSettings()
-
-    /**
-     * 更新开放名单。注意不走 [updateSettings]：那会触发 provider 全量重载，
-     * 勾选一个模型就重建所有上游客户端太重了；这里只落盘一次。
-     */
-    fun updateModelExposure(updated: dev.aigw.core.gateway.ModelExposureSettings) {
-        viewModelScope.launch {
-            withContext(Dispatchers.IO) { engine.updateModelExposure(updated) }
-            // 引擎字段不是 Compose 状态，落盘后同步镜像进 UI 状态驱动重组
-            _state.value = _state.value.copy(modelExposure = updated)
-        }
-    }
-
-    /** 勾选/取消单个模型；开启过滤但名单为空时自动把该模型设为已开放（避免勾了没效果）。 */
-    fun toggleModelExposed(fullId: String, checked: Boolean) {
-        val cur = engine.modelExposureSettings()
-        val ids = cur.exposed.toMutableSet()
-        if (checked) ids.add(fullId) else ids.remove(fullId)
-        updateModelExposure(cur.copy(exposed = ids))
-    }
-
-    /** 整组勾选/取消。 */
-    fun toggleGroupExposed(routePrefix: String, checked: Boolean) {
-        val cur = engine.modelExposureSettings()
-        val ids = cur.exposed.toMutableSet()
-        if (checked) {
-            _state.value.models.filter { it.routePrefix == routePrefix }.forEach { ids.add(it.fullId) }
-        } else {
-            _state.value.models.filter { it.routePrefix == routePrefix }.forEach { ids.remove(it.fullId) }
-        }
-        updateModelExposure(cur.copy(exposed = ids))
     }
 
     fun updateSecuritySettings(updated: dev.aigw.core.security.SecuritySettings) {
