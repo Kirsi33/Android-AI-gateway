@@ -228,34 +228,70 @@ class CookieLoginActivity : Activity() {
 
     private fun collectAndFinish(fromAuto: Boolean) = collectAndFinish(pendingHosts, fromAuto)
 
+    /**
+     * 读取登录态并回传。
+     *
+     * 除了 Cookie，还会把 **localStorage / sessionStorage 里的键值**一起拼进来：
+     * 现在的网站多半是 SPA，登录 token 存在 Web Storage 而不是 Cookie，
+     * 只读 Cookie 会出现「页面明明登录了、宿主却什么都没读到」。
+     * 拼接后的整串交给各供应商自己的正则去挑（Today 是 32 位 hex，LongCat 是 passport_token_key）。
+     */
     private fun collectAndFinish(hosts: Array<String>, fromAuto: Boolean) {
         val manager = CookieManager.getInstance()
         manager.flush()
-        val builder = StringBuilder()
+        val cookies = StringBuilder()
         for (host in hosts) {
             val cookie = manager.getCookie(host).orEmpty()
             if (cookie.isNotBlank()) {
-                if (builder.isNotEmpty()) builder.append("; ")
-                builder.append(cookie)
+                if (cookies.isNotEmpty()) cookies.append("; ")
+                cookies.append(cookie)
             }
         }
-        if (builder.isEmpty()) {
+        val view = web
+        if (view == null) {
+            deliver(cookies.toString(), fromAuto)
+            return
+        }
+        // evaluateJavascript 是异步的，必须在回调里收尾
+        runCatching {
+            view.evaluateJavascript(STORAGE_PROBE_JS) { raw ->
+                val storage = decodeJsString(raw)
+                val merged = when {
+                    cookies.isEmpty() -> storage
+                    storage.isEmpty() -> cookies.toString()
+                    else -> "$cookies; $storage"
+                }
+                deliver(merged, fromAuto)
+            }
+        }.onFailure { deliver(cookies.toString(), fromAuto) }
+    }
+
+    /** 把读到的登录态交回宿主；拿不到时给出可操作的提示而不是静默返回。 */
+    private fun deliver(raw: String, fromAuto: Boolean) {
+        if (raw.isBlank()) {
             if (!fromAuto) {
                 Toast.makeText(this, "还没读到登录信息，请先在页面里完成登录", Toast.LENGTH_LONG).show()
                 return
             }
-            // 自动确认命中但读不到 Cookie：多半是登录还没真正落盘（或域名配错了）。
-            // 这里必须复位并给出可见提示，否则界面会永久停在「正在保存…」，
-            // 用户既不知道发生了什么，也没有第二次机会。
+            // 自动确认命中但读不到任何登录态：多半是登录还没真正落盘（或域名配错了）。
+            // 必须复位并给出可见提示，否则界面会永久停在「正在保存…」。
             autoConfirmed = false
             status?.text = "没读到登录信息，请确认已登录成功，再点右上角「完成」"
             return
         }
         setResult(
             RESULT_OK,
-            Intent().putExtra(EXTRA_RESULT_COOKIE, builder.toString()),
+            Intent().putExtra(EXTRA_RESULT_COOKIE, raw),
         )
         finish()
+    }
+
+    /** WebView 的 evaluateJavascript 会把结果当 JSON 字面量返回（带引号、可能有 \u 转义）。 */
+    private fun decodeJsString(raw: String?): String {
+        if (raw.isNullOrBlank() || raw == "null") return ""
+        return runCatching {
+            com.google.gson.JsonParser.parseString(raw).asString
+        }.getOrDefault("")
     }
 
     override fun onBackPressed() {
@@ -309,6 +345,26 @@ class CookieLoginActivity : Activity() {
 
         /** 自动确认后等多久再收尾，给 Set-Cookie 落盘留时间。 */
         private const val AUTO_CONFIRM_DELAY_MS = 600L
+
+        /**
+         * 读取 Web Storage 的探针。
+         *
+         * 只收 500 字符以内的值：token 都很短，超长的是缓存正文，拼进来没意义还会把
+         * 供应商那边的正则拖慢。整体用 try 包住——某些页面禁用了 storage，抛异常会让
+         * evaluateJavascript 直接不回调。
+         */
+        private const val STORAGE_PROBE_JS = """
+            (function(){try{
+              var out=[];
+              try{
+                for(var i=0;i<localStorage.length;i++){var k=localStorage.key(i);var v=localStorage.getItem(k);if(v&&v.length<500){out.push(k+'='+v);}}
+              }catch(e){}
+              try{
+                for(var j=0;j<sessionStorage.length;j++){var k2=sessionStorage.key(j);var v2=sessionStorage.getItem(k2);if(v2&&v2.length<500){out.push(k2+'='+v2);}}
+              }catch(e){}
+              return out.join(';');
+            }catch(e){return '';}})()
+        """
         const val REQUEST_CODE = 8803
 
         /** 主题属性解析失败时的中性灰：比「一片全黑/全白」更容易看出是降级了。 */

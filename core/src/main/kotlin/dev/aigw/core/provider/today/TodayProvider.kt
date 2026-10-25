@@ -16,6 +16,7 @@ import dev.aigw.core.provider.ProviderCapability
 import dev.aigw.core.provider.ProviderModel
 import dev.aigw.core.provider.ProviderModelCatalogView
 import dev.aigw.core.provider.StreamFailureChatCall
+import dev.aigw.core.provider.SmsLoginSupport
 import dev.aigw.core.provider.StreamingChatCall
 import dev.aigw.core.provider.UpstreamError
 import dev.aigw.core.provider.isStreamingBody
@@ -54,7 +55,9 @@ import java.util.concurrent.atomic.AtomicBoolean
  */
 class TodayProvider(
     private val nowMillis: () -> Long = System::currentTimeMillis,
-) : Provider {
+) : Provider, SmsLoginSupport {
+
+    private val authClient = TodayAuthClient()
 
     override val id: String = ID
     override val displayName: String = "Today"
@@ -68,6 +71,50 @@ class TodayProvider(
 
     /** 账号当前选中的上游模型选项；切模型要 PUT 一次，能缓存就别重复发。 */
     private val selectedOption = ConcurrentHashMap<String, String>()
+
+    // ------------------------------------------------------------------ 短信登录
+
+    /**
+     * 发验证码。[ccode] 是国家码（不带 `+`），上游按它路由短信通道。
+     */
+    override fun sendSmsCode(phone: String, ccode: String): String =
+        authClient.sendOtp(normalizePhone(phone, ccode))
+
+    /**
+     * 验证码换账号。
+     *
+     * [msgid] 上游不需要（Today 的 verify 只认手机号 + 验证码），忽略即可。
+     */
+    override fun loginBySmsCode(
+        phone: String,
+        code: String,
+        msgid: String,
+        ccode: String,
+    ): ProviderAccount {
+        val account = authClient.verify(normalizePhone(phone, ccode), code.trim())
+        return ProviderAccount(
+            providerId = ID,
+            uid = account.effectiveUid(),
+            nickname = account.effectiveNickname(),
+            secret = account.toJsonString(),
+        )
+    }
+
+    /**
+     * 把用户输入拼成上游要的 E.164（带 `+`）。
+     *
+     * 实测 Today 只对**大陆手机号（+86）**下码，所以 [ccode] 基本恒为 86；
+     * 这里仍按国家码拼接，是为了不在 provider 层写死一个业务假设。
+     *
+     * 用户可能填 `138...`、`+86138...`、`86138...` 三种；已经带 `+` 的原样用，
+     * 其余按「去掉前导 0 再拼国家码」处理——`0138...` 这种写法也能救回来。
+     */
+    private fun normalizePhone(phone: String, ccode: String): String {
+        val trimmed = phone.trim()
+        if (trimmed.startsWith("+")) return trimmed
+        val digits = trimmed.filter(Char::isDigit).trimStart('0')
+        return if (digits.isEmpty()) trimmed else "+$ccode$digits"
+    }
 
     // ------------------------------------------------------------------ 模型
 

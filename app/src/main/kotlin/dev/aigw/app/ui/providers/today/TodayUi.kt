@@ -8,6 +8,12 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Today
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.ui.text.input.KeyboardType
+import kotlinx.coroutines.delay
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -58,71 +64,107 @@ object TodayUi : ProviderUi {
 
     @Composable
     override fun LoginEntry(accounts: List<AccountStatus>, actions: ProviderUiActions) {
-        AddAccountSection(actions)
-        for (account in accounts) {
-            AccountCard(account, actions)
-        }
-    }
-
-    @Composable
-    private fun AddAccountSection(actions: ProviderUiActions) {
-        var expanded by rememberSaveable { mutableStateOf(false) }
+        var phone by remember { mutableStateOf("") }
+        var code by remember { mutableStateOf("") }
+        var countdown by remember { mutableStateOf(0) }
+        var manual by rememberSaveable { mutableStateOf(false) }
         var token by remember { mutableStateOf("") }
 
+        // 发送后 60 秒内不允许重发：上游有频率限制，连点只会被拒
+        LaunchedEffect(countdown) {
+            if (countdown > 0) {
+                delay(1_000)
+                countdown -= 1
+            }
+        }
+
         SectionCard {
-            if (!expanded) {
-                Button(
-                    onClick = {
-                        // 内嵌网页登录：打开 todayai.cn，登录完从 Cookie 里抠 token
-                        actions.onCookieLogin(
-                            id,
-                            "https://todayai.cn/",
-                            listOf("https://todayai.cn/", "https://www.todayai.cn/"),
-                            "登录 Today",
-                        )
-                    },
-                    modifier = Modifier.fillMaxWidth(),
-                ) { Text("网页登录") }
+            SectionLabel("短信登录")
+            Text(
+                // 实测只有大陆号能收到码；这里写清楚，免得用户拿海外号反复试
+                text = "用大陆手机号（+86）收验证码登录，与官方 App 同一个账号体系。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            OutlinedTextField(
+                value = phone,
+                onValueChange = { input -> phone = input.filter { it.isDigit() || it == '+' }.take(15) },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                label = { Text("手机号") },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
+            )
+            OutlinedTextField(
+                value = code,
+                onValueChange = { input -> code = input.filter(Char::isDigit).take(6) },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                label = { Text("验证码") },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 OutlinedButton(
-                    onClick = { expanded = true },
-                    modifier = Modifier.fillMaxWidth(),
-                ) { Text("手动输入 token") }
-                Text(
-                    "网页登录失败时，可在浏览器登录后从开发者工具（Application → Cookies）" +
-                        "复制 32 位的 session token，或用抓包工具取。",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                return@SectionCard
+                    onClick = {
+                        // 先开倒计时，按钮立刻有反馈；发送失败再恢复可点
+                        countdown = RESEND_SECONDS
+                        actions.onSmsLogin(id, phone.trim(), "", CCODE) { error ->
+                            if (error.isNotEmpty()) countdown = 0
+                        }
+                    },
+                    enabled = phone.isNotBlank() && countdown == 0,
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text(if (countdown > 0) "${countdown} 秒后重发" else "发送验证码")
+                }
+                Button(
+                    onClick = { actions.onSmsLogin(id, phone.trim(), code.trim(), CCODE) { } },
+                    enabled = phone.isNotBlank() && code.isNotBlank(),
+                    modifier = Modifier.weight(1f),
+                ) { Text("登录") }
             }
 
-            SectionLabel("Session Token")
-            OutlinedTextField(
-                value = token,
-                onValueChange = { token = it },
-                label = { Text("32 位 token") },
-                minLines = 2,
-                maxLines = 4,
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+            OutlinedButton(
+                onClick = { manual = !manual },
                 modifier = Modifier.fillMaxWidth(),
-            )
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
+            ) { Text(if (manual) "收起手动输入" else "手动粘贴 token") }
+            if (manual) {
+                OutlinedTextField(
+                    value = token,
+                    onValueChange = { token = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    minLines = 2,
+                    maxLines = 4,
+                    label = { Text("32 位 session token") },
+                )
                 Button(
                     onClick = {
                         actions.onImport(id, """{"token":${quote(token.trim())}}""")
                         token = ""
-                        expanded = false
+                        manual = false
                     },
                     enabled = token.isNotBlank(),
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier.fillMaxWidth(),
                 ) { Text("导入") }
-                OutlinedButton(
-                    onClick = { expanded = false },
-                    modifier = Modifier.weight(1f),
-                ) { Text("取消") }
             }
+
+            OutlinedButton(
+                onClick = {
+                    // 网页登录作为兜底：短信通道不可用时才走这条路
+                    actions.onCookieLogin(
+                        id,
+                        "https://todayai.cn/",
+                        listOf("https://todayai.cn/", "https://www.todayai.cn/"),
+                        "登录 Today",
+                    )
+                },
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text("网页登录（备用）") }
+        }
+
+        for (account in accounts) {
+            AccountCard(account, actions)
         }
     }
 
@@ -162,6 +204,12 @@ object TodayUi : ProviderUi {
             )
         }
     }
+
+    /** 重发倒计时秒数：与上游短信频率限制对齐。 */
+    private const val RESEND_SECONDS = 60
+
+    /** Today 只对大陆号码下码，所以界面上不提供国家码选择。 */
+    private const val CCODE = "86"
 
     /** 极简 JSON 字符串转义（token 里一般不会有特殊字符，但粘贴的可能是整段文本）。 */
     private fun quote(value: String): String {
