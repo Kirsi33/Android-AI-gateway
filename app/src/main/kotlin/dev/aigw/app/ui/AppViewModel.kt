@@ -56,6 +56,7 @@ import dev.aigw.core.update.UpdateRepository
 import dev.aigw.core.update.UpdateSources
 import dev.aigw.core.usage.CallRecord
 import dev.aigw.core.usage.LogLine
+import dev.aigw.core.usage.StorageAudit
 import dev.aigw.core.usage.StorageReport
 import dev.aigw.core.usage.UsageStats
 import kotlinx.coroutines.Dispatchers
@@ -1155,6 +1156,22 @@ class AppViewModel(
         viewModelScope.launch {
             withContext(Dispatchers.IO) { engine.moveAccountPriority(providerId, uid, up) }
             refresh()
+        }
+    }
+
+    /** 按保留天数清理过期记录。 */
+    fun purgeExpiredRecords() = action {
+        val removed = engine.purgeExpiredRecords()
+        "已清理 $removed 条过期记录"
+    }
+
+    /** 截断超长记录内容（保留统计口径，只砍正文）。 */
+    fun truncateLongRecords() = action {
+        val (count, saved) = engine.truncateLongRecords()
+        if (count == 0) {
+            "没有超长记录需要截断"
+        } else {
+            "已截断 $count 条记录，释放约 ${StorageAudit.formatSize(saved)}"
         }
     }
 

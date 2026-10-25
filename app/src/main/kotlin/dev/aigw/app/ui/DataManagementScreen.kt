@@ -76,42 +76,6 @@ fun DataManagementScreen(state: AppUiState, viewModel: AppViewModel, onBack: () 
     }
 }
 
-/**
- * 保留天数输入。
- *
- * 失焦或回车才提交，避免边输入边保存把「30」中间的「3」当成 30 天。越界值由 core 夹回，
- * 这里只做即时提示。
- */
-@Composable
-private fun RetentionField(current: Int, onCommit: (Int) -> Unit) {
-    var text by remember(current) { mutableStateOf(current.toString()) }
-    val parsed = text.toIntOrNull()
-    val valid = parsed != null && parsed in GatewaySettings.MIN_RETENTION_DAYS..GatewaySettings.MAX_RETENTION_DAYS
-    val changed = parsed != null && parsed != current
-
-    Text(
-        text = "保留天数（${GatewaySettings.MIN_RETENTION_DAYS}-${GatewaySettings.MAX_RETENTION_DAYS}）",
-        style = MaterialTheme.typography.bodyMedium,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-    )
-    OutlinedTextField(
-        value = text,
-        onValueChange = { input -> text = input.filter(Char::isDigit).take(4) },
-        modifier = Modifier.fillMaxWidth(),
-        singleLine = true,
-        isError = text.isNotEmpty() && !valid,
-        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-        supportingText = {
-            when {
-                text.isEmpty() -> Text("不能为空")
-                !valid -> Text("需在 ${GatewaySettings.MIN_RETENTION_DAYS}-${GatewaySettings.MAX_RETENTION_DAYS} 之间")
-            }
-        },
-    )
-    if (changed) {
-        OutlineActionButton("保存保留天数") { onCommit(parsed) }
-    }
-}
 
 /** 存储占用明细：按前缀归类，占用从大到小。 */
 @Composable

@@ -347,7 +347,7 @@ private fun ExposureToggle(enabled: Boolean, onClick: () -> Unit) {
             )
             .border(
                 width = 1.dp,
-                color = if (enabled)rrangeialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline,
+                color = if (enabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline,
                 shape = CircleShape,
             )
             .bouncyClick(onClick = onClick)
@@ -366,6 +366,50 @@ private fun ExposureToggle(enabled: Boolean, onClick: () -> Unit) {
         )
         Text(
             text = if (enabled) "开放名单 开" else "开放名单",
+            style = MaterialTheme.typography.labelSmall,
+            fontWeight = FontWeight.SemiBold,
+            color = if (enabled) MaterialTheme.colorScheme.onPrimaryContainer
+            else MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+/**
+ * 「只看可用」开关：隐藏上游的非对话内部条目（如 Trae 的内部 config 模型）。
+ *
+ * 上游早就有 `GatewaySettings.onlyUsableModels` 这个开关并在模型推导时过滤，
+ * 只是一直没有界面入口——补上，免得用户以为列表里那些怪条目是能用的模型。
+ */
+@Composable
+private fun OnlyUsableToggle(enabled: Boolean, onClick: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .clip(CircleShape)
+            .background(
+                if (enabled) MaterialTheme.colorScheme.primaryContainer
+                else MaterialTheme.colorScheme.surface,
+            )
+            .border(
+                width = 1.dp,
+                color = if (enabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline,
+                shape = CircleShape,
+            )
+            .bouncyClick(onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 5.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(5.dp),
+    ) {
+        Box(
+            modifier = Modifier
+                .size(7.dp)
+                .clip(CircleShape)
+                .background(
+                    if (enabled) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
+                ),
+        )
+        Text(
+            text = if (enabled) "只看可用" else "全部模型",
             style = MaterialTheme.typography.labelSmall,
             fontWeight = FontWeight.SemiBold,
             color = if (enabled) MaterialTheme.colorScheme.onPrimaryContainer
@@ -543,21 +587,6 @@ private fun ModelSkeletonCard(
                     )
                     Box(
                         modifier = Modifier
-                            .fillMaxWidth(0.35f)
-                            .height(12.dp)
-                            .shimmer(shimmerProgress, RoundedCornerShape(3.dp)),
-                    )
-                }
-                Box(
-                    modifier = Modifier
-                        .size(width = 46.dp, height = 26.dp)
-                        .shimmer(shimmerProgress, MaterialTheme.shapes.small),
-                )
-            }
-        }
-    }
-}
-     modifier = Modifier
                             .fillMaxWidth(0.35f)
                             .height(12.dp)
                             .shimmer(shimmerProgress, RoundedCornerShape(3.dp)),

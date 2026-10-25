@@ -601,6 +601,20 @@ class GatewayEngine(
         log("${if (enabled) "启用" else "停用"}账号：$providerId/$uid")
     }
 
+    /**
+     * 把每条记录的正文截断到 [maxChars] 以内，返回「截断条数 to 释放字符数」。
+     *
+     * 调用记录里最占地方的是请求/响应原文；长期挂机后这些历史正文会让存储线性膨胀，
+     * 而旧记录平时又不会再被读，截断比整条删更划算（统计口径不变）。
+     */
+    fun truncateLongRecords(maxChars: Int = DEFAULT_TRUNCATE_CHARS): Pair<Int, Long> {
+        val (count, saved) = callLogStore.truncateFields(maxChars)
+        if (count > 0) {
+            log("截断了 $count 条记录的长内容，释放约 ${StorageAudit.formatSize(saved)}")
+        }
+        return count to saved
+    }
+
     /** 调整账号使用优先级（↑/↓）：排在前面的先用，同级仍按余额。 */
     fun moveAccountPriority(providerId: String, uid: String, up: Boolean): Boolean {
         val moved = pool.movePriority(providerId, uid, up)
@@ -1608,6 +1622,14 @@ class GatewayEngine(
 
     private companion object {
         const val DAY_MILLIS = 24L * 3600 * 1000
+
+        /**
+         * 截断超长记录时的正文上限。
+         *
+         * 取 32K：比加密存储的摘要上限（8K）宽，留出「想回看一点原文」的余地，
+         * 又能把动辄上百 K 的 SSE 原文压到不占地步。
+         */
+        const val DEFAULT_TRUNCATE_CHARS = 32 * 1024
 
         /** 详细日志单条上限：环形日志每条都全量展示，太长会淹没其它日志。 */
         const val VERBOSE_LINE_LIMIT = 1500
