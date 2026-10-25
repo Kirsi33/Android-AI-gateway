@@ -39,6 +39,45 @@ class AccountPoolTest {
     }
 
     @Test
+    fun `优先级高的账号先被选中，即使余额更低`() {
+        val pool = newPool()
+        pool.upsert(account("a"))
+        pool.upsert(account("b"))
+        pool.updateCredits(TRAE, "a", 900)
+        pool.updateCredits(TRAE, "b", 10)
+        // 默认同级按余额：a 先用
+        assertEquals("a", pool.pick(TRAE)?.uid)
+        // 把 b 提上来（同级时抬一档），b 应当先用，哪怕余额少得多
+        assertTrue(pool.movePriority(TRAE, "b", up = true))
+        assertEquals("b", pool.pick(TRAE)?.uid)
+    }
+
+    @Test
+    fun `优先级调整在边界与未知账号上返回 false`() {
+        val pool = newPool()
+        pool.upsert(account("a"))
+        // 只有一个账号：上移越界
+        assertFalse(pool.movePriority(TRAE, "a", up = true))
+        assertFalse(pool.movePriority(TRAE, "a", up = false))
+        assertFalse(pool.movePriority(TRAE, "nope", up = true))
+    }
+
+    @Test
+    fun `优先级会落盘并在重建后恢复`() {
+        val store = InMemoryKeyValueStore()
+        val pool = newPool(store)
+        pool.upsert(account("a"))
+        pool.upsert(account("b"))
+        pool.updateCredits(TRAE, "a", 900)
+        pool.updateCredits(TRAE, "b", 10)
+        assertTrue(pool.movePriority(TRAE, "b", up = true))
+
+        val reopened = newPool(store)
+        assertEquals("b", reopened.pick(TRAE)?.uid, "重建后优先级应仍然生效")
+        assertTrue((reopened.status(TRAE, "b")?.priority ?: 0) > 0, "优先级要能被界面读到")
+    }
+
+    @Test
     fun `可以排除已试过的账号`() {
         val pool = newPool()
         pool.upsert(account("a"))

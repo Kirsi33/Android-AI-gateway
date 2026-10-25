@@ -135,7 +135,8 @@ object LoomyUi : ProviderUi {
 
     @Composable
     override fun AccountExtra(status: AccountStatus, actions: ProviderUiActions) {
-        var invite by remember(status.uid) { mutableStateOf("") }
+        // 预填一个可用邀请码：邀请码是双向的（双方都得积分），预填省得用户自己去复制
+        var invite by remember(status.uid) { mutableStateOf(DEFAULT_INVITE_CODE) }
         var code by remember(status.uid) { mutableStateOf("") }
 
         Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -154,6 +155,11 @@ object LoomyUi : ProviderUi {
                 singleLine = true,
                 label = { Text("兑换邀请码") },
             )
+            Text(
+                text = "已预填邀请码，也可以换成别人的",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
             Button(
                 onClick = {
                     val value = invite.trim()
@@ -163,7 +169,8 @@ object LoomyUi : ProviderUi {
                         LoomyProvider.ACTION_REDEEM_INVITE,
                         JsonObject().apply { addProperty("inviteCode", value) },
                     )
-                    invite = ""
+                    // 重置为默认值而不是清空：下次打开仍是预填状态
+                    invite = DEFAULT_INVITE_CODE
                 },
                 enabled = invite.isNotBlank(),
                 modifier = Modifier.fillMaxWidth(),
@@ -201,3 +208,11 @@ object LoomyUi : ProviderUi {
         }
     }
 }
+
+/**
+ * 默认预填的 Loomy 邀请码。
+ *
+ * 邀请码是双向的：填了双方都得积分。这里预填的只是一个默认值，用户随时可以换成别人的。
+ * 想清空默认值就把这里置成空串。
+ */
+private const val DEFAULT_INVITE_CODE = "R3HFVJ"

@@ -15,6 +15,11 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.foundation.layout.size
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -46,6 +51,57 @@ fun AccountTitleColumn(
             text = accountStatusText(account),
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+/**
+ * 账号优先级控制：`优先` 徽章 + ↑↓ 调整顺序。
+ *
+ * 优先级是「手动覆盖」：只有用户显式调过（priority > 0）才显示徽章，
+ * 默认 0 的账号按余额排队，界面上不制造噪音。
+ */
+@Composable
+fun AccountPriorityArrows(
+    account: AccountStatus,
+    providerId: String,
+    actions: ProviderUiActions,
+    modifier: Modifier = Modifier,
+) {
+    Row(modifier, verticalAlignment = Alignment.CenterVertically) {
+        if (account.priority > 0) {
+            Box(
+                modifier = Modifier
+                    .clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.7f))
+                    .padding(horizontal = 6.dp, vertical = 1.dp),
+            ) {
+                Text(
+                    text = "优先",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                )
+            }
+        }
+        Icon(
+            Icons.Filled.KeyboardArrowUp,
+            contentDescription = "提高优先级",
+            tint = MaterialTheme.colorScheme.primary,
+            modifier = Modifier
+                .clip(CircleShape)
+                .clickable { actions.onMoveAccountPriority(providerId, account.uid, true) }
+                .padding(2.dp)
+                .size(20.dp),
+        )
+        Icon(
+            Icons.Filled.KeyboardArrowDown,
+            contentDescription = "降低优先级",
+            tint = MaterialTheme.colorScheme.primary,
+            modifier = Modifier
+                .clip(CircleShape)
+                .clickable { actions.onMoveAccountPriority(providerId, account.uid, false) }
+                .padding(2.dp)
+                .size(20.dp),
         )
     }
 }
@@ -146,11 +202,18 @@ fun AccountCardShell(
         AccountTitleRow(
             account = account,
             trailing = trailing ?: {
-                AccountEnableSwitch(
-                    account = account,
-                    providerId = providerId,
-                    actions = actions,
-                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    AccountPriorityArrows(
+                        account = account,
+                        providerId = providerId,
+                        actions = actions,
+                    )
+                    AccountEnableSwitch(
+                        account = account,
+                        providerId = providerId,
+                        actions = actions,
+                    )
+                }
             },
         )
         extra()
