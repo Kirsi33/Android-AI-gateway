@@ -84,11 +84,24 @@ class CookieLoginActivity : Activity() {
             setTextColor(themeColor(android.R.attr.textColorPrimary))
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
+        // 显式关闭入口：这个页面盖住了 App，用户不知道「怎么退出去」，
+        // 而 Android 13+ 的预测性返回不保证走 onBackPressed，只靠返回键会让人以为登录丢了。
+        val close = TextView(this).apply {
+            text = "关闭"
+            textSize = 13f
+            setTextColor(themeColor(android.R.attr.textColorSecondary))
+            setPadding(0, dp(8), dp(14), dp(8))
+            setOnClickListener {
+                setResult(RESULT_CANCELED)
+                finish()
+            }
+        }
         val done = Button(this).apply {
             text = "完成"
             textSize = 14f
             setOnClickListener { collectAndFinish(cookieHosts) }
         }
+        bar.addView(close)
         bar.addView(label)
         bar.addView(done)
 

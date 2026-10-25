@@ -72,6 +72,18 @@ class CustomUi(override val id: String) : ProviderUi {
     @Composable
     override fun LoginEntry(accounts: List<AccountStatus>, actions: ProviderUiActions) {
         AddAccountSection(accounts, actions)
+        if (accounts.isEmpty()) {
+            // 空列表原来渲染零个节点，整页只剩一个表单，用户看不出「这里该有账号」
+            SectionCard(enterIndex = 1) {
+                SectionLabel("账号")
+                Text(
+                    text = "还没有自定义账号。在上面填地址与 Key，点「添加账号」即可接入任意 OpenAI 兼容接口；" +
+                        "同一地址可以加多个 Key，请求会按账号池轮换。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
         PagedAccountList(accounts, keyOf = { it.uid }) { _, account ->
             AccountDetailCard(account, actions)
         }

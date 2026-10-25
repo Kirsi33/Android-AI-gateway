@@ -177,6 +177,8 @@ fun ModelsScreen(state: AppUiState, viewModel: AppViewModel) {
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.error,
                     )
+                    // 页头的刷新是图标，报错时不一定能被发现；这里给一个明确的重试入口
+                    OutlineActionButton("重新拉取") { viewModel.refreshModels(forceRefresh = true) }
                 }
             }
         }

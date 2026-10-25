@@ -68,7 +68,7 @@ fun DataManagementScreen(state: AppUiState, viewModel: AppViewModel, onBack: () 
         SectionCard(enterIndex = 1) {
             OutlineActionButton("查看存储占用明细") { showDetail = !showDetail }
             if (showDetail) {
-                StorageDetail(state)
+                StorageDetail(state, viewModel)
             }
             OutlineActionButton("截断超长记录内容") { viewModel.truncateLongRecords() }
             OutlineActionButton("清理过期记录") { viewModel.purgeExpiredRecords() }
@@ -79,11 +79,13 @@ fun DataManagementScreen(state: AppUiState, viewModel: AppViewModel, onBack: () 
 
 /** 存储占用明细：按前缀归类，占用从大到小。 */
 @Composable
-private fun StorageDetail(state: AppUiState) {
+private fun StorageDetail(state: AppUiState, viewModel: AppViewModel) {
     val report = state.storage
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         if (report == null) {
-            EmptyHint("暂无法统计", "稍后再试。")
+            EmptyHint("暂无法统计", "存储扫描要解密全部键值，代价较高；点下面重试。")
+            // 空态要给下一步：原来只有一句「稍后再试」，用户不知道点哪
+            OutlineActionButton("重新统计") { viewModel.refreshStorage() }
         } else {
             report.entries.forEach { entry ->
                 Row(verticalAlignment = Alignment.CenterVertically) {

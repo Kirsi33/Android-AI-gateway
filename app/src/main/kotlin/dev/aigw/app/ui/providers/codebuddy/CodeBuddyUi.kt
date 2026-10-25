@@ -157,6 +157,9 @@ object CodeBuddyUi : ProviderUi {
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                    OutlineActionButton(if (global) "去登录国际版" else "去登录国内版") {
+                        actions.onWebLogin(id, current)
+                    }
                 }
                 return
             }

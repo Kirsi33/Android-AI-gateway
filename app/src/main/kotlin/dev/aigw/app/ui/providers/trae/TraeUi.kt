@@ -151,6 +151,10 @@ object TraeUi : ProviderUi {
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                    // 空态必须给出下一步：原来只有一行灰字，用户得自己去别的卡片里找登录按钮
+                    OutlineActionButton(if (global) "去登录国际版" else "去登录国内版") {
+                        actions.onWebLogin(id, current)
+                    }
                 }
                 return
             }

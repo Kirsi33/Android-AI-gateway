@@ -154,7 +154,11 @@ fun ProviderCreditsScreen(
                     SectionLabel("积分明细")
                     when {
                         bills == null -> PointsBillsHint("正在加载积分明细…")
-                        bills.error.isNotEmpty() -> PointsBillsHint("加载失败：${bills.error}", error = true)
+                        bills.error.isNotEmpty() -> PointsBillsHint(
+                            text = "加载失败：${bills.error}",
+                            error = true,
+                            onRetry = { viewModel.loadPointsBills(providerId, account.uid) },
+                        )
                         bills.bills.isEmpty() -> PointsBillsHint("暂无积分明细")
                         else -> for (bill in bills.bills) PointsBillRow(bill)
                     }

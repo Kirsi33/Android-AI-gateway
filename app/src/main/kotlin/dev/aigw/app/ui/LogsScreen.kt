@@ -229,8 +229,22 @@ fun LogsScreen(state: AppUiState, viewModel: AppViewModel) {
                     }
                 } else {
                     items(calls, key = { it.id }) { record ->
+                        var confirmDelete by remember { mutableStateOf(false) }
                         SectionCard {
-                            CallRow(record, onClick = { detail = record }, onLongClick = { viewModel.deleteCall(record.id) })
+                            CallRow(
+                                record,
+                                onClick = { detail = record },
+                                // 长按只开确认框：删的是一条带完整原文的记录，误触代价太高
+                                onLongClick = { confirmDelete = true },
+                            )
+                        }
+                        if (confirmDelete) {
+                            ConfirmDestructiveDialog(
+                                title = "删除这条调用记录？",
+                                body = "${record.model} · ${statusLabel(record.status)}，删除后不可恢复。",
+                                onConfirm = { viewModel.deleteCall(record.id) },
+                                onDismiss = { confirmDelete = false },
+                            )
                         }
                     }
                 }

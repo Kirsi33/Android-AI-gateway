@@ -611,10 +611,20 @@ fun PointsBillRow(bill: dev.aigw.core.provider.PointsBill, modifier: Modifier = 
 
 /** 流水区块的提示行（加载中 / 失败 / 空）；[error] 为 true 时用错误色。 */
 @Composable
-fun PointsBillsHint(text: String, error: Boolean = false) {
-    Text(
-        text = text,
-        style = MaterialTheme.typography.bodySmall,
-        color = if (error) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
-    )
+fun PointsBillsHint(
+    text: String,
+    error: Boolean = false,
+    /** 失败态传入重试动作；有它才会渲染「重试」按钮——加载失败不该只留一行红字。 */
+    onRetry: (() -> Unit)? = null,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text(
+            text = text,
+            style = MaterialTheme.typography.bodySmall,
+            color = if (error) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        if (error && onRetry != null) {
+            OutlineActionButton(text = "重试", onClick = onRetry)
+        }
+    }
 }
