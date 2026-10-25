@@ -1,11 +1,13 @@
 package dev.aigw.app.ui.providers
 
+import java.util.concurrent.ConcurrentHashMap
 import dev.aigw.app.ui.providers.antigravity.AntigravityUi
 import dev.aigw.app.ui.providers.codebuddy.CodeBuddyUi
 import dev.aigw.app.ui.providers.custom.CustomUi
 import dev.aigw.app.ui.providers.loomy.LoomyUi
 import dev.aigw.app.ui.providers.longcat.LongCatUi
 import dev.aigw.app.ui.providers.raccoon.RaccoonUi
+import dev.aigw.app.ui.providers.today.TodayUi
 import dev.aigw.app.ui.providers.trae.TraeUi
 
 /**
@@ -19,16 +21,19 @@ object ProviderUiRegistry {
     private val builtin: Map<String, ProviderUi> = listOf(
         TraeUi,
         LoomyUi,
+        LongCatUi,
+        TodayUi,
         CodeBuddyUi,
         AntigravityUi,
-LongCatUi,
         RaccoonUi,
     ).associateBy { it.id }
 
+    private val customCache = ConcurrentHashMap<String, ProviderUi>()
+
     fun of(providerId: String): ProviderUi? = when {
         builtin.containsKey(providerId) -> builtin[providerId]
-        // 每个自定义供应商一个实例：组件需要知道自己绑定的 providerId
-        providerId.startsWith(CUSTOM_PREFIX) -> CustomUi(providerId)
+        // 每个自定义供应商一个实例：组件需要知道自己绑定的 providerId，缓存实例避免重复创建导致 Compose 无法跳过重组
+        providerId.startsWith(CUSTOM_PREFIX) -> customCache.computeIfAbsent(providerId) { CustomUi(it) }
         else -> null
     }
 

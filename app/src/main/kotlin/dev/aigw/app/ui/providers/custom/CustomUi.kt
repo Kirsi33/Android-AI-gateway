@@ -26,7 +26,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -39,10 +38,13 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import dev.aigw.app.ui.AccountPriorityArrows
+import dev.aigw.app.ui.AccountDeleteChipRow
+import dev.aigw.app.ui.AccountEnableSwitch
+import dev.aigw.app.ui.AccountTitleRow
 import dev.aigw.app.ui.ChoiceChip
 import dev.aigw.app.ui.EmptyHint
 import dev.aigw.app.ui.OutlineActionButton
+import dev.aigw.app.ui.PagedAccountList
 import dev.aigw.app.ui.SectionCard
 import dev.aigw.app.ui.SectionLabel
 import dev.aigw.app.ui.accountStatusText
@@ -70,7 +72,7 @@ class CustomUi(override val id: String) : ProviderUi {
     @Composable
     override fun LoginEntry(accounts: List<AccountStatus>, actions: ProviderUiActions) {
         AddAccountSection(accounts, actions)
-        for (account in accounts) {
+        PagedAccountList(accounts, keyOf = { it.uid }) { _, account ->
             AccountDetailCard(account, actions)
         }
     }
@@ -138,9 +140,18 @@ class CustomUi(override val id: String) : ProviderUi {
                 currentModels = models,
                 onDismiss = { fetchedModels = null },
                 onConfirm = { selected ->
+                    // 远端已下架的本地旧模型不再保留；有移除时提示数量，否则沿用原文案
+                    val previous = models.lines().map { it.trim() }.filter { it.isNotEmpty() }
+                    val removed = previous.count { it !in fetched }
                     models = selected.sorted().joinToString("\n")
                     fetchedModels = null
-                    actions.onNotice("已选择 ${selected.size} 个模型")
+                    actions.onNotice(
+                        if (removed == 0) {
+                            "已选择 ${selected.size} 个模型"
+                        } else {
+                            "已选择 ${selected.size} 个模型，移除 $removed 个远端已下架的模型"
+                        },
+                    )
                 },
             )
         }
@@ -221,13 +232,14 @@ class CustomUi(override val id: String) : ProviderUi {
         onDismiss: () -> Unit,
         onConfirm: (List<String>) -> Unit,
     ) {
+        // 以云端结果为准建键：本地已保存且仍在云端的才预勾选，远端已下架的不会被保留
         val selected = remember(fetched) {
-            val initial = currentModels.lines().map { it.trim() }.filter { it.isNotEmpty() }.toSet()
-            mutableStateMapOf<String, Boolean>().apply { initial.forEach { put(it, true) } }
+            val previous = currentModels.lines().map { it.trim() }.filter { it.isNotEmpty() }.toSet()
+            mutableStateMapOf<String, Boolean>().apply { fetched.forEach { put(it, previous.contains(it)) } }
         }
         var search by remember { mutableStateOf("") }
         val selectedCount = selected.values.count { it }
-        val filtered = fetched.filter { it.contains(search, ignoreCase = true) }
+        val filtered = remember(fetched, search) { fetched.filter { it.contains(search, ignoreCase = true) } }
         ModalBottomSheet(onDismissRequest = onDismiss) {
             Column(
                 modifier = Modifier
@@ -295,34 +307,17 @@ class CustomUi(override val id: String) : ProviderUi {
     private fun AccountDetailCard(account: AccountStatus, actions: ProviderUiActions) {
         var expanded by rememberSaveable(account.uid) { mutableStateOf(false) }
         SectionCard(modifier = Modifier.animateContentSize()) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable { expanded = !expanded },
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column(Modifier.weight(1f)) {
-                    Text(
-                        text = account.nickname.ifEmpty { account.uid },
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.SemiBold,
+            AccountTitleRow(
+                account = account,
+                modifier = Modifier.clickable { expanded = !expanded },
+                trailing = {
+                    Icon(
+                        if (expanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+                        contentDescription = if (expanded) "收起" else "展开",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
-                    Text(
-                        text = accountStatusText(account),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                AccountPriorityArrows(
-                    priority = account.priority,
-                    onMove = { up -> actions.onMoveAccountPriority(id, account.uid, up) },
-                )
-                Icon(
-                    if (expanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
-                    contentDescription = if (expanded) "收起" else "展开",
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
+                },
+            )
             if (expanded) {
                 AccountDetailBody(account, actions)
             }
@@ -350,9 +345,10 @@ class CustomUi(override val id: String) : ProviderUi {
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text("启用", modifier = Modifier.weight(1f))
-                Switch(
-                    checked = account.enabled,
-                    onCheckedChange = { actions.onToggleAccount(id, account.uid, it) },
+                AccountEnableSwitch(
+                    account = account,
+                    providerId = id,
+                    actions = actions,
                 )
             }
             Text(
@@ -367,9 +363,7 @@ class CustomUi(override val id: String) : ProviderUi {
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                ChoiceChip("删除账号", false) { actions.onRemoveAccount(id, account.uid) }
-            }
+            AccountDeleteChipRow(onRemove = { actions.onRemoveAccount(id, account.uid) })
         }
     }
 }

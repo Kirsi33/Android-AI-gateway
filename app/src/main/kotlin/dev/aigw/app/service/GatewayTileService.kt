@@ -1,6 +1,7 @@
 package dev.aigw.app.service
 
 import android.content.Intent
+import android.os.Build
 import android.service.quicksettings.Tile
 import android.service.quicksettings.TileService
 import androidx.core.content.ContextCompat
@@ -47,11 +48,18 @@ class GatewayTileService : TileService() {
         val tile = qsTile ?: return
         val running = runCatching { gatewayEngine.isRunning() }.getOrDefault(false)
         tile.state = if (running) Tile.STATE_ACTIVE else Tile.STATE_INACTIVE
-        if (running) {
+        // Tile.subtitle 是 API 29 才有的方法，minSdk 是 26：低版本上直接调用会 NoSuchMethodError。
+        // 低版本改用 label 表达同一信息。
+        val subtitle = if (running) {
             val port = runCatching { gatewayEngine.settings().port }.getOrDefault(0)
-            tile.subtitle = if (port > 0) "端口 $port" else null
+            if (port > 0) "端口 $port" else null
         } else {
-            tile.subtitle = null
+            null
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            tile.subtitle = subtitle
+        } else {
+            tile.label = if (subtitle != null) "AI 网关 · $subtitle" else "AI 网关"
         }
         tile.updateTile()
     }

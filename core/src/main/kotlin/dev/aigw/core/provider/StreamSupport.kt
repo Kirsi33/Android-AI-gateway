@@ -12,6 +12,9 @@ import dev.aigw.core.util.stringOrNull
 import java.io.InputStream
 import java.nio.charset.StandardCharsets
 
+/** OpenAI SSE 的流终止帧，所有供应商翻译器共用同一份字面量。 */
+const val SSE_DONE = "data: [DONE]\n\n"
+
 /**
  * 逐行转换的 SSE 流：把 [source] 每读一行交给 [transform]，
  * 产出的文本按字节写给下游（transform 负责拼好 `data: ...\n\n` 这类帧）。
@@ -214,6 +217,6 @@ object OpenAiSseAggregator {
                 obj.objOrNull("usage")?.let { add("usage", it) }
             }
         }
-        return "data: $chunk\n\ndata: [DONE]\n\n"
+        return "data: $chunk\n\n" + SSE_DONE
     }
 }

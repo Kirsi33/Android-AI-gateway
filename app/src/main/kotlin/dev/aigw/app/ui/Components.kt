@@ -25,23 +25,25 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.KeyboardArrowDown
-import androidx.compose.material.icons.filled.KeyboardArrowUp
-import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.aigw.app.ui.theme.LocalAppColors
@@ -163,15 +165,100 @@ fun SectionCard(
     }
 }
 
+/**
+ * 账号分页：把超长账号列表切成每页固定条数，避免一次性组合全部卡片。
+ *
+ * 页码用不可变 Int 保存（不要用 SnapshotStateList 等快照类型做 rememberSaveable，
+ * 本工程已因此类快照在保存时机被读取而闪退过）。
+ *
+ * [itemContent] 的第一个参数是**页内序号**（当前页从 0 起，而非全局序号）：
+ * 直接喂给 `staggeredAppear` 这类按序号线性递增延迟的动效，翻到任意一页都从零开始错峰，
+ * 不会因全局序号过大导致末页卡片等上好几秒才出现。
+ */
+@Composable
+fun <T> PagedAccountList(
+    items: List<T>,
+    modifier: Modifier = Modifier,
+    pageSize: Int = 30,
+    keyOf: (T) -> String,
+    itemContent: @Composable (pageIndex: Int, item: T) -> Unit,
+) {
+    var page by rememberSaveable { mutableStateOf(0) }
+    val pageCount = if (items.isEmpty()) 1 else (items.size + pageSize - 1) / pageSize
+    // 列表变短（删账号、切区域）后旧页码可能越界：本帧先夹取显示，再由 effect 写回，
+    // 否则列表重新变长时会突然跳回那个已失效的大页码。
+    val currentPage = page.coerceIn(0, pageCount - 1)
+    LaunchedEffect(pageCount) {
+        if (page != currentPage) page = currentPage
+    }
+    val visible = items.drop(currentPage * pageSize).take(pageSize)
+
+    Column(
+        modifier = modifier,
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        visible.forEachIndexed { pageIndex, item ->
+            // 以 uid 建键：卡片内部的展开/编辑状态跟着账号走，而不是跟着列表位置走
+            key(keyOf(item)) {
+                itemContent(pageIndex, item)
+            }
+        }
+        // 只有一个页时不渲染分页条，保持既有单页外观，避免视觉噪音
+        if (items.size > pageSize) {
+            PagerBar(currentPage, pageCount, items.size) { page = it }
+        }
+    }
+}
+
+/** 账号列表底部分页条：上一页 / 页码信息 / 下一页，边界处按钮禁用。 */
+@Composable
+private fun PagerBar(
+    page: Int,
+    pageCount: Int,
+    total: Int,
+    onSelect: (Int) -> Unit,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        PagerChip("上一页", enabled = page > 0) { onSelect(page - 1) }
+        Text(
+            text = "第 ${page + 1} / $pageCount 页 · 共 $total 个",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.weight(1f),
+        )
+        PagerChip("下一页", enabled = page < pageCount - 1) { onSelect(page + 1) }
+    }
+}
+
+/** 分页条上的胶囊按钮：沿用 ChoiceChip 的描边胶囊样式，禁用时整体降透明度。 */
+@Composable
+private fun PagerChip(text: String, enabled: Boolean, onClick: () -> Unit) {
+    val content = if (enabled) {
+        MaterialTheme.colorScheme.onSurface
+    } else {
+        MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+    }
+    Text(
+        text = text,
+        style = MaterialTheme.typography.labelLarge,
+        color = content,
+        modifier = Modifier
+            .clip(CircleShape)
+            .border(1.dp, content, CircleShape)
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(horizontal = 14.dp, vertical = 8.dp),
+    )
+}
+
 /** 「运行中 / 已停止」状态胶囊：白底描边 + 圆点（运行中金色带浅光环）。 */
 @Composable
 fun StatusChip(running: Boolean) {
     val gold = LocalAppColors.current.goldStart
-    val content by animateColorAsState(
-        targetValue = MaterialTheme.colorScheme.onSurface,
-        animationSpec = tween(200),
-        label = "chipContent",
-    )
     Row(
         modifier = Modifier
             .clip(CircleShape)
@@ -200,7 +287,7 @@ fun StatusChip(running: Boolean) {
         Text(
             text = if (running) "运行中" else "已停止",
             style = MaterialTheme.typography.labelMedium,
-            color = content,
+            color = MaterialTheme.colorScheme.onSurface,
         )
     }
 }
@@ -290,7 +377,7 @@ fun BackButton(onBack: () -> Unit) {
     )
 }
 
-/** 全宽描边按钮（「数据管理」的清理动作）。onClick 放最后以支持尾随 lambda。 */
+/** 全宽描边按钮。onClick 放最后以支持尾随 lambda。 */
 @Composable
 fun OutlineActionButton(
     text: String,
@@ -309,46 +396,6 @@ fun OutlineActionButton(
             .clickable(onClick = onClick)
             .padding(vertical = 14.dp),
     )
-}
-
-/** 带图标的功能行（「我的」页的功能列表）。 */
-@Composable
-fun NavRow(
-    icon: ImageVector,
-    title: String,
-    subtitle: String,
-    onClick: () -> Unit,
-) {
-    val gold = LocalAppColors.current.goldStart
-    Row(
-        modifier = Modifier.fillMaxWidth().pressScale().clickable(onClick = onClick).padding(vertical = 4.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(14.dp),
-    ) {
-        Box(
-            modifier = Modifier
-                .size(44.dp)
-                .clip(RoundedCornerShape(12.dp))
-                .background(MaterialTheme.colorScheme.surfaceVariant)
-                .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(12.dp)),
-            contentAlignment = Alignment.Center,
-        ) {
-            Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.onSurface, modifier = Modifier.size(22.dp))
-        }
-        Column(Modifier.weight(1f)) {
-            Text(title, style = MaterialTheme.typography.titleMedium)
-            Text(
-                subtitle,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-        Icon(
-            Icons.AutoMirrored.Filled.KeyboardArrowRight,
-            contentDescription = null,
-            tint = gold,
-        )
-    }
 }
 
 @Composable
@@ -444,11 +491,20 @@ fun QuotaPackBar(pack: dev.aigw.core.provider.QuotaPack) {
     }
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Row(Modifier.fillMaxWidth()) {
-            Text(
-                text = if (pack.group.isEmpty()) pack.name else "${pack.name}（${pack.group}）",
-                style = MaterialTheme.typography.bodySmall,
-                modifier = Modifier.weight(1f),
-            )
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(
+                    text = if (pack.group.isEmpty()) pack.name else "${pack.name}（${pack.group}）",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                // 模型专属配额（如 Gemini 4 Argon 周额度）：不标出来就会被误当成账号总额度
+                if (pack.scope.isNotEmpty()) {
+                    Text(
+                        text = pack.scope,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = gold,
+                    )
+                }
+            }
             Text(
                 text = expireText,
                 style = MaterialTheme.typography.bodySmall,
@@ -504,47 +560,61 @@ fun QuotaPackBar(pack: dev.aigw.core.provider.QuotaPack) {
     }
 }
 
-/** 账号优先级控制：「优先」徽章 + ↑↓ 调整顺序（靠前的先用）。 */
+/**
+ * 一笔积分/额度流水：左侧事件名与时间，右侧带符号的变动值。
+ *
+ * 供应商无关：小浣熊的积分明细与「额度中心」的流水共用这一处渲染。
+ */
 @Composable
-fun AccountPriorityArrows(
-    priority: Int,
-    onMove: (up: Boolean) -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    Row(modifier, verticalAlignment = Alignment.CenterVertically) {
-        if (priority > 0) {
-            Box(
-                modifier = Modifier
-                    .clip(CircleShape)
-                    .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.7f))
-                    .padding(horizontal = 6.dp, vertical = 1.dp),
-            ) {
+fun PointsBillRow(bill: dev.aigw.core.provider.PointsBill, modifier: Modifier = Modifier) {
+    val time = remember(bill.createdAtMillis) {
+        if (bill.createdAtMillis > 0) {
+            java.text.DateFormat.getDateTimeInstance(
+                java.text.DateFormat.SHORT,
+                java.text.DateFormat.SHORT,
+            ).format(java.util.Date(bill.createdAtMillis))
+        } else {
+            ""
+        }
+    }
+    Row(
+        modifier = modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(
+                text = bill.title,
+                style = MaterialTheme.typography.bodySmall,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (time.isNotEmpty()) {
                 Text(
-                    text = "优先",
+                    text = time,
                     style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
         }
-        Icon(
-            Icons.Filled.KeyboardArrowUp,
-            contentDescription = "提高优先级",
-            tint = MaterialTheme.colorScheme.primary,
-            modifier = Modifier
-                .clip(CircleShape)
-                .clickable { onMove(true) }
-                .padding(2.dp)
-                .size(20.dp),
-        )
-        Icon(
-            Icons.Filled.KeyboardArrowDown,
-            contentDescription = "降低优先级",
-            tint = MaterialTheme.colorScheme.primary,
-            modifier = Modifier
-                .clip(CircleShape)
-                .clickable { onMove(false) }
-                .padding(2.dp)
-                .size(20.dp),
+        Text(
+            text = if (bill.points > 0) "+${bill.points}" else bill.points.toString(),
+            style = MaterialTheme.typography.bodySmall,
+            color = when {
+                bill.points > 0 -> MaterialTheme.colorScheme.tertiary
+                bill.points < 0 -> MaterialTheme.colorScheme.error
+                else -> MaterialTheme.colorScheme.onSurfaceVariant
+            },
         )
     }
+}
+
+/** 流水区块的提示行（加载中 / 失败 / 空）；[error] 为 true 时用错误色。 */
+@Composable
+fun PointsBillsHint(text: String, error: Boolean = false) {
+    Text(
+        text = text,
+        style = MaterialTheme.typography.bodySmall,
+        color = if (error) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+    )
 }

@@ -1,4 +1,8 @@
-# 网关助手
+# AI 聚合网关
+
+> ## ⚠️ 已更新至 v2.13.1 版本的用户需点击项目仓库下载更新，因为应用内更新有 bug
+>
+> v2.13.1 及应用内更新功能的早期版本：下载完成后点击「安装」不会跳转到系统安装器（缺少 `REQUEST_INSTALL_PACKAGES` 声明），因此**不要使用应用内更新**，请直接到 [Releases](https://github.com/xibai6668/Android-AI-gateway/releases/latest) 下载 APK 手动安装。该问题已在后续版本修复。
 
 Android 上运行的本地 AI 模型聚合网关：把多家私有 AI 服务账号统一翻译成 OpenAI 兼容接口，暴露在 `http://127.0.0.1:8790/v1`。
 
@@ -16,6 +20,7 @@ Android 上运行的本地 AI 模型聚合网关：把多家私有 AI 服务账�
 - [快速开始](#快速开始)
 - [架构总览](#架构总览)
 - [模块结构](#模块结构)
+- [数据存储](#数据存储)
 - [构建与发版](#构建与发版)
 - [接口与鉴权](#接口与鉴权)
 - [供应商](#供应商)
@@ -28,11 +33,9 @@ Android 上运行的本地 AI 模型聚合网关：把多家私有 AI 服务账�
 ## 特性
 
 - **OpenAI 兼容网关**：`/v1/chat/completions` + `/v1/models`，流式 SSE / 非流式 / 多模态识图。
-- **六家内置供应商**：Trae、WorkBuddy、Antigravity、Loomy、小浣熊（商汤）、龙猫（LongCat），以及任意自定义 OpenAI 兼容中转站。
+- **五家内置供应商**：Trae、WorkBuddy、Antigravity、Loomy、小浣熊（商汤），以及任意自定义 OpenAI 兼容中转站。
 - **同款模型 Failover**：首选供应商失败或无可用账号时，自动切换到拥有同款模型的其他供应商。
 - **智能路由**：`供应商/模型` 前缀路由（含 `trae-cn/`、`codebuddy-global/` 这类区域前缀与 `google/`、`agy/` 等别名），兼支持无前缀的模型名自动推导。
-- **内嵌网页登录**：登录页在 App 内打开、不跳系统浏览器，兼容旧机器 WebView；回调链接 / Cookie 自动导入。
-- **模型倍率**：国内 / 国际分开维护，显示每个模型的计费倍率与能力标记（思考 / 联网 / 识图 / 工具）。
 - **账号管理**：同一供应商多账号按余额选号、失败自动换号、额度查询与额度包明细、跨供应商容灾、批量签到与任务中心。
 - **模型开放名单**：只把勾选的模型暴露给 `/v1/models`，其余模型对客户端隐藏。
 - **用量与日志**：调用记录（请求/转发/返回全链路）、今日与累计用量趋势、运行日志、按前缀统计存储占用与保留期自动清理。
@@ -44,9 +47,9 @@ Android 上运行的本地 AI 模型聚合网关：把多家私有 AI 服务账�
 
 ## 快速开始
 
-1. 到 [Releases](https://github.com/x3284728970/Android-AI-gateway/releases) 下载最新的 `ai-gateway-<版本>-release.apk` 安装。
+1. 到 [Releases](https://github.com/xibai6668/Android-AI-gateway/releases) 下载最新的 `ai-gateway-<版本>-release.apk` 安装。
 2. 打开 App，首页点「启动网关服务」；首页显示「运行中」即表示端口已在监听。
-3. 到「供应商」页登录要用的账号（Trae / WorkBuddy / Antigravity / Loomy / 小浣熊 / 龙猫），或添加自定义 OpenAI 兼容中转站。
+3. 到「供应商」页登录要用的账号（Trae / WorkBuddy / Antigravity / Loomy / 小浣熊），或添加自定义 OpenAI 兼容中转站。
 4. 客户端里填接入信息：
    - Base URL：手机本机填 `http://127.0.0.1:8790/v1`；局域网内其它设备填首页复制的局域网地址（需先在「接入设置」里打开「同时监听局域网」）。
    - 模型：可填 `供应商/模型`（如 `antigravity/gemini-3.8-flash-high`），也可直接填模型名由网关推导。
@@ -85,7 +88,26 @@ Provider 实现       上游私有协议 ⇄ OpenAI 协议（双向转换封死�
 | `:cli` | 纯 JVM 命令行 | 在本机直接起网关做端到端联调，或不打开 App 也能导入账号 / 签到 / 查用量与日志；可执行名 `aigw` |
 | `:app` | Android 应用 | Compose UI、前台服务与保活、加密存储实现、控制中心磁贴 |
 
-供应商协议实现位于 `core/src/main/kotlin/dev/aigw/core/provider/`，每家的私有协议细节都封装在各自子包内（`trae/`、`codebuddy/`、`antigravity/`、`loomy/`、`raccoon/`、`longcat/`、`custom/`），互不干扰。
+供应商协议实现位于 `core/src/main/kotlin/dev/aigw/core/provider/`，每家的私有协议细节都封装在各自子包内（`trae/`、`codebuddy/`、`antigravity/`、`loomy/`、`raccoon/`、`custom/`），互不干扰。
+
+---
+
+## 数据存储
+
+账号凭证与状态**按账号独立存储**（v2.4.0 起）：
+
+```
+account/<供应商>/<账号>            # 账号凭证（ProviderAccount.toJson）
+pool/state/<供应商>/<账号>.json    # 账号状态（额度 / 启用 / 禁用 / 原因）
+settings/...                      # 网关、代理、安全、供应商与自定义供应商等设置
+logs/calls/<id>                   # 调用记录，每条一个键
+logs/requests.json                # 运行日志（环形缓冲）
+usage/...                         # 用量统计
+```
+
+- **一个账号一个状态文件**：改某个账号（刷新额度、启用/停用）只重写它自己的键，不再整包重写该供应商的全部账号。
+- **旧数据自动迁移**：v2.4.0 之前的状态是「一个供应商一个文件」（`pool/state/<供应商>.json`，内含该供应商全部账号）。新版首次读取时惰性迁移——迁一个账号即从旧文件摘除，旧文件清空后删除；迁移可重复执行，不会回退或丢状态，无需手工处理。
+- Android 端凭证经 Android Keystore 加密后存入应用私有目录；命令行端（`aigw`）以明文存于 `--data` 目录（默认 `~/.aigw`）。
 
 ---
 
@@ -102,8 +124,6 @@ Provider 实现       上游私有协议 ⇄ OpenAI 协议（双向转换封死�
 - 产物：`app/build/outputs/apk/debug/app-debug.apk`（包名 `dev.aigw.app.debug`）。
 - 版本号硬编码在 `app/build.gradle.kts`（`versionCode` / `versionName`）；改后必须重新构建。
 - 本地**不产 release 包**：release 仅由云端 GitHub Actions 手动触发构建并发版，日常 push 不产生任何云端构建。
-
-> **Fork 构建提醒**：云端工作流需要 4 个仓库 Secret：`KEYSTORE_BASE64` / `KEYSTORE_PASSWORD` / `KEY_ALIAS` / `KEY_PASSWORD`。
 
 命令行联调（`:cli`，无需 Android 设备）：
 
@@ -148,7 +168,6 @@ curl http://127.0.0.1:8790/v1/chat/completions \
 | `antigravity` | Antigravity（Google） | `cloudcode-pa.googleapis.com` | Gemini 风格协议；凭证策略有铁律，见 ARCHITECTURE.md 第 5 节 |
 | `loomy` | Loomy（讯飞） | `xfinfr.com` | 鉴权失败为 HTTP 200 + 业务码，而非 4xx |
 | `raccoon` | 小浣熊（商汤） | `xiaohuanxiong.com` | OpenAI 结构被包在 `data` 里；字段用标准名（v2 LiteLLM 层不认 `max_new_tokens`） |
-| `longcat` | 龙猫（美团） | `longcat.chat` | 上游没有 `model` 字段，靠 `agentId` + `reasonEnabled` + `searchEnabled` 路由；思考模式正文用 `finish.finalContentX` 定稿 |
 | `custom:<key>` | 自定义 | 用户填写的 baseUrl | 任意 OpenAI 兼容中转站，一个 key = 一个账号 |
 
 ---
@@ -165,7 +184,7 @@ curl http://127.0.0.1:8790/v1/chat/completions \
 
 ### 仅供学习与交流
 
-本项目是一个用于学习 HTTP 反向代理、SSE 流式透传、多上游协议适配与 Android 应用（Jetpack Compose）打包等技术主题的实践项目，**仅供个人学习与研究使用**。它不是官方产品，与腾讯公司及 WorkBuddy、商汤及小浣熊、字节跳动及 Trae、科大讯飞及 Loomy、美团及 LongCat、Google 及 Antigravity 均无任何关联，未获得其授权、认可或赞助。
+本项目是一个用于学习 HTTP 反向代理、SSE 流式透传、多上游协议适配与 Android 应用（Jetpack Compose）打包等技术主题的实践项目，**仅供个人学习与研究使用**。它不是官方产品，与腾讯公司及 WorkBuddy、商汤及小浣熊、字节跳动及 Trae、科大讯飞及 Loomy、Google 及 Antigravity 均无任何关联，未获得其授权、认可或赞助。
 
 ### 关于反向代理行为
 

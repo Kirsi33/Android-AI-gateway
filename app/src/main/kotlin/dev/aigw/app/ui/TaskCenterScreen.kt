@@ -21,11 +21,14 @@ import androidx.compose.ui.unit.dp
  */
 @Composable
 fun TaskCenterScreen(state: AppUiState, viewModel: AppViewModel, onBack: () -> Unit) {
+    BatchOutcomeHost(state.batchOutcome) { viewModel.dismissBatchOutcome() }
     PageScaffold(
         title = "任务中心",
         subtitle = "签到与额度",
         leading = { BackButton(onBack) },
     ) {
+        BatchProgressHost(state.batchProgress)
+
         SectionCard(enterIndex = 0) {
             SectionLabel("批量操作")
             Row(

@@ -6,6 +6,7 @@ import com.google.gson.JsonObject
 import dev.aigw.core.gateway.ProviderSettings
 import dev.aigw.core.pool.AccountStatus
 import dev.aigw.core.provider.ProviderTaskListView
+import dev.aigw.core.provider.PointsBillListView
 import dev.aigw.core.provider.QuotaPack
 
 /**
@@ -15,16 +16,21 @@ import dev.aigw.core.provider.QuotaPack
  * 因此新增/替换一个供应商的实现不会牵动页面骨架与其它供应商。
  */
 class ProviderUiActions(
-    /** 拉起 WebView 登录（Trae 回调型 / Antigravity OAuth）。 */
-    val onWebLogin: (providerId: String) -> Unit = {},
     /**
-     * 内嵌网页登录（LongCat 这类「凭证就是浏览器 Cookie」的上游）：
-     * 打开 [startUrl]，用户登录完成后由宿主读取 [cookieHosts] 下的 Cookie，
-     * 再通过 [onImport] 以 `{"cookie":"..."}` 的形式导入。
+     * 拉起浏览器登录（Trae 回调型 / Antigravity OAuth / 小浣熊）。
+     *
+     * region 由组件按滑块传入：供应商设置是异步写入的，登录流程不能把正确性押在它上面
+     * （区域型供应商会按它选登录端点）。无区域概念时传空串。
      */
-    val onCookieLogin: (providerId: String, startUrl: String, cookieHosts: List<String>, title: String) -> Unit =
+    val onWebLogin: (providerId: String, region: String) -> Unit = { _, _ -> },
+    /**
+     * 内嵌网页登录：打开 [url]，用户登录完成后读取 [hosts] 的 Cookie 交回。
+     *
+     * 与 [onWebLogin] 的分工：这个在 **App 内**用 WebView 完成，不跳系统浏览器、
+     * 也不需要网关在本地开回调端口。适合「凭证就是 Cookie」的上游（LongCat / Today）。
+     */
+    val onCookieLogin: (providerId: String, url: String, hosts: List<String>, title: String) -> Unit =
         { _, _, _, _ -> },
-
     /** 设备授权登录（WorkBuddy）：拉起 WebView 并开始轮询；region 由组件按滑块传入。 */
     val onDeviceLogin: (providerId: String, region: String) -> Unit = { _, _ -> },
     /** 读供应商私有设置项（同步，取引擎内存值）。 */
@@ -46,11 +52,7 @@ class ProviderUiActions(
     val onRefreshCredits: (providerId: String, uid: String?) -> Unit = { _, _ -> },
     /** 执行供应商专属动作（签到、兑换码等）。 */
     val onAction: (providerId: String, uid: String, action: String, payload: JsonObject) -> Unit = { _, _, _, _ -> },
-    /** 重新检查设备授权状态（浏览器里已登录但轮询错过时手动重试）；region 与登录时一致。 */
-    val onCheckDeviceAuth: (providerId: String, region: String) -> Unit = { _, _ -> },
     val onToggleAccount: (providerId: String, uid: String, enabled: Boolean) -> Unit = { _, _, _ -> },
-    /** 调整账号使用优先级（↑/↓）：靠前的先用，同级按余额。 */
-    val onMoveAccountPriority: (providerId: String, uid: String, up: Boolean) -> Unit = { _, _, _ -> },
     val onRemoveAccount: (providerId: String, uid: String) -> Unit = { _, _ -> },
     /** 账号凭证级修改（如 Trae 的设备指纹）：直接替换 secret。 */
     val onUpdateSecret: (providerId: String, uid: String, secret: String, notice: String) -> Unit =
@@ -67,6 +69,10 @@ class ProviderUiActions(
     val taskListOf: (providerId: String, uid: String) -> ProviderTaskListView? = { _, _ -> null },
     /** 异步拉取账号的成长任务明细（打上游，结果回到 [taskListOf]）。 */
     val onLoadTaskList: (providerId: String, uid: String) -> Unit = { _, _ -> },
+    /** 读已拉取的积分流水明细（键 `providerId/uid`；需要拉取时调 [onLoadPointsBills]）。 */
+    val pointsBillsOf: (providerId: String, uid: String) -> PointsBillListView? = { _, _ -> null },
+    /** 异步拉取账号的积分流水明细（打上游，结果回到 [pointsBillsOf]）。 */
+    val onLoadPointsBills: (providerId: String, uid: String) -> Unit = { _, _ -> },
     /** 重新生成一套设备指纹（仅 Trae 用）。 */
     val onRegenerateDeviceId: (providerId: String, uid: String) -> Unit = { _, _ -> },
     /** 手动填入设备指纹（仅 Trae 用）。 */

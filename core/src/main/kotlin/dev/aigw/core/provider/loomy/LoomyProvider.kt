@@ -2,7 +2,6 @@ package dev.aigw.core.provider.loomy
 
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
-import dev.aigw.core.provider.ACTION_TASKS
 import dev.aigw.core.provider.AggregatedChatCall
 import dev.aigw.core.provider.AuthKind
 import dev.aigw.core.provider.ChatCall
@@ -13,6 +12,7 @@ import dev.aigw.core.provider.isStreamingBody
 import dev.aigw.core.provider.OpenAiSseAggregator
 import dev.aigw.core.provider.Provider
 import dev.aigw.core.provider.ProviderAccount
+import dev.aigw.core.provider.ProviderHooks
 import dev.aigw.core.provider.ProviderActionResult
 import dev.aigw.core.provider.ProviderCapability
 import dev.aigw.core.provider.ProviderModel
@@ -35,6 +35,7 @@ class LoomyProvider(
     private val defaultModel: () -> String,
     private val nowMillis: () -> Long = System::currentTimeMillis,
     private val pointsClient: LoomyPointsClient = LoomyPointsClient(),
+    private val hooks: ProviderHooks = ProviderHooks(),
 ) : Provider, SmsLoginSupport {
 
     override val id: String = ID
@@ -71,6 +72,10 @@ class LoomyProvider(
         )
     }
 
+    override fun invalidateModelCache() {
+        catalog.invalidate()
+    }
+
     override fun resolveModel(requested: String): String {
         val model = requested.trim()
         if (model.isEmpty() || model == "auto") return defaultModel()
@@ -88,11 +93,15 @@ class LoomyProvider(
         val streaming = isStreamingBody(openAiBody)
 
         val call = try {
-            chatClient.openStream(loomy, openAiBody)
+            chatClient.openStream(loomy, if (streaming) withIncludeUsage(openAiBody) else openAiBody)
         } catch (e: LoomyApiException) {
             return FailedChatCall(e.status, e.body)
         }
-        if (call.status !in 200..299) return FailedChatCall(call.status, call.errorBody)
+        if (call.status !in 200..299) {
+            // 失败原文只进日志：调用记录里只留截断的错误体，排查 409 这类无描述状态码全靠这一行。
+            hooks.onLog("Loomy 对话失败（HTTP ${call.status}）：${call.errorBody.take(500)}")
+            return FailedChatCall(call.status, call.errorBody)
+        }
 
         // 上游回 JSON：可能是正常非流式响应，也可能是「HTTP 200 + 业务错误码」
         if (!call.isEventStream) {
@@ -230,9 +239,7 @@ class LoomyProvider(
                     }
                 }
 
-                // 同时认标准名 ACTION_TASKS 与历史名 complete_all_tasks：
-                // 早先 UI 与实现各用了一套名字，导致点「一键做任务」报「该供应商不支持 tasks」。
-                ACTION_TASKS, ACTION_COMPLETE_ALL_TASKS -> {
+                ACTION_COMPLETE_ALL_TASKS -> {
                     val pending = taskClient.tasks(loomy.session).tasks.filter { !it.completed }
                     if (pending.isEmpty()) return ProviderActionResult.success("所有任务都已完成")
                     val lines = pending.map { task ->
@@ -306,7 +313,7 @@ class LoomyProvider(
         const val ACTION_COMPLETE_TASK = "complete_task"
         const val ACTION_COMPLETE_ALL_TASKS = "complete_all_tasks"
 
-/** 中国大陆手机号：11 位、1 开头，发短信前先校验。 */
+        /** 中国大陆手机号：11 位、1 开头。 */
         private val CN_PHONE = Regex("1[3-9]\\d{9}")
 
         /** 其它地区比较宽松：4–15 位纯数字（国际号码标准上限是 15 位）。 */

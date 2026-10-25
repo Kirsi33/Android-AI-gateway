@@ -21,7 +21,8 @@ data class TraeAccount(
     val machineId: String,
     val deviceId: String,
     val domain: String = TraeConstants.REGION_CN,
-    val apiHost: String = TraeConstants.OAUTH_HOST,
+    /** 鉴权 host；空串时由 [TraeAuthClient] 按区域补上该区域的 OAuth host。 */
+    val apiHost: String = "",
 ) {
     fun needsRefresh(withinSeconds: Long, nowSeconds: Long): Boolean =
         expiresAt <= 0L || nowSeconds + withinSeconds >= expiresAt
@@ -79,7 +80,7 @@ data class TraeAccount(
                 machineId = auth.str("machineId"),
                 deviceId = auth.str("deviceId"),
                 domain = auth.str("domain").ifEmpty { TraeConstants.REGION_CN },
-                apiHost = auth.str("apiHost").ifEmpty { TraeConstants.OAUTH_HOST },
+                apiHost = auth.str("apiHost"),
             )
         }
     }

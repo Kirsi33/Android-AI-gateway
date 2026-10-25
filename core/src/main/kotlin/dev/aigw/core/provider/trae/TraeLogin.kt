@@ -1,6 +1,7 @@
 package dev.aigw.core.provider.trae
 
 import dev.aigw.core.util.long
+import dev.aigw.core.util.randomHex
 import dev.aigw.core.util.str
 import java.net.URLDecoder
 import java.net.URLEncoder
@@ -26,12 +27,6 @@ data class CallbackAccount(
 object TraeLogin {
 
     private val random = SecureRandom()
-
-    fun randomHex(byteCount: Int): String {
-        val bytes = ByteArray(byteCount)
-        random.nextBytes(bytes)
-        return bytes.joinToString("") { "%02x".format(it) }
-    }
 
     /**
      * 生成官方客户端格式的 device id：**纯数字**。

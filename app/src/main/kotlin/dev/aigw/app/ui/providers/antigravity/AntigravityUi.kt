@@ -44,7 +44,7 @@ object AntigravityUi : ProviderUi {
         SectionCard(enterIndex = 0) {
             SectionLabel("登录")
             Button(
-                onClick = { actions.onWebLogin(id) },
+                onClick = { actions.onWebLogin(id, "") },
                 modifier = Modifier.fillMaxWidth(),
             ) { Text("在浏览器中登录 Google 账号") }
         }

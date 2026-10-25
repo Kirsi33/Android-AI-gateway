@@ -27,11 +27,13 @@ class TraeModelCatalog(
      * 取模型清单。没有可用账号时返回空列表，不发请求。
      */
     fun models(account: TraeAccount?): List<TraeModel> {
+        // 两个标记描述的是「本次返回的清单怎么来的」，每次调用先重置，
+        // 否则上一次的失败会被后面命中 TTL 缓存的调用沿用，界面会一直标「缓存」。
+        fromFallback = false
+        lastError = ""
         val now = nowMillis()
         cached?.let { if (now - fetchedAt < TTL_MILLIS) return it }
 
-        // 没有账号就不列模型（内置快照只在「有账号但拉取失败」时才兜底），
-        // 否则用户会以为这些模型能直接用，实际一发请求就缺凭证。
         if (account == null) {
             // 没有账号不算失败：登录前本就不该有模型。
             fromFallback = false

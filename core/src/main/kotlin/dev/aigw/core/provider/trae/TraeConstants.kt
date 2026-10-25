@@ -32,7 +32,10 @@ enum class TraeRegion(
     INTL(
         id = "global",
         label = "国际版",
-        agentHost = "https://api.trae.ai",
+        // 探测实测：api.trae.ai 上 /api/agent/v3/llm_utils_chat 与 /api/ide/v1/get_detail_param
+        // 都是 404（那是 OAuth/控制台 host），国际版的 agent 集群在 -sg 这个 mchost 域名上：
+        // 同一路径返回 401 + 与国内同构的 JSON，未知路径才 404。
+        agentHost = "https://trae-api-sg.mchost.guru",
         ugHost = "https://ug-normal.trae.ai",
         oauthHost = "https://api.trae.ai",
         consoleHost = "https://www.trae.ai",
@@ -49,22 +52,27 @@ enum class TraeRegion(
         fun of(id: String?): TraeRegion =
             entries.firstOrNull { it.id.equals(id?.trim(), ignoreCase = true) } ?: CN
 
-        /** 按域名推断区域（含 `trae.ai` → 国际）。 */
+        /**
+         * 推断区域。
+         *
+         * 两个入参都参与判定：`explicit` 是凭证里的 `domain`（历史上既写过区域 id `cn`/`global`，
+         * 也写过主机名 `trae.cn`，缺字段时还会被 TraeAccount.parse 填成 `trae.cn`），
+         * `domain` 是 `apiHost` 或登录回调里的 host。
+         * 只认第一个参数会把 apiHost 已是 `api.trae.ai` 的国际版凭证判成国内版。
+         */
         fun infer(explicit: String?, domain: String?): TraeRegion {
-            if (!explicit.isNullOrBlank()) return of(explicit)
-            val host = domain.orEmpty().lowercase()
-            return if (host.contains("trae.ai")) INTL else CN
+            val values = listOf(explicit, domain).map { it?.trim().orEmpty() }
+            if (values.any { it.equals(CN.id, ignoreCase = true) }) return CN
+            if (values.any { it.equals(INTL.id, ignoreCase = true) }) return INTL
+            return if (values.any { it.lowercase().contains("trae.ai") }) INTL else CN
         }
     }
 }
 
 /** Trae 上游常量。取值来自实测，改动需重新验证。 */
 object TraeConstants {
-    // 注意：Kotlin 的 const val 只能用编译期常量初始化，不能引用 enum 成员。
-    val AGENT_HOST = TraeRegion.CN.agentHost
-    val UG_HOST = TraeRegion.CN.ugHost
-    val OAUTH_HOST = TraeRegion.CN.oauthHost
-    val CONSOLE_HOST = TraeRegion.CN.consoleHost
+    // 上游 host 一律从 [TraeRegion] 取（各地区一套），不要在这里再定义国内别名：
+    // 它们看起来像「默认值」，实际只对国内成立，用作缺省值会让国际版账号打到国内站点。
 
     const val CLIENT_ID = "en1oxy7wnw8j9n"
     const val APP_ID = "6eefa01c-1036-4c7e-9ca5-d891f63bfcd8"

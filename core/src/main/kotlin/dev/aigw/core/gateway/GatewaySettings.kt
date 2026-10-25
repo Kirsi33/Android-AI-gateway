@@ -33,6 +33,10 @@ data class GatewaySettings(
     val verboseLogging: Boolean = false,
     /** 调用记录保留天数（1~3650）；服务运行时每日自动清理超过该天数的记录。 */
     val logRetentionDays: Int = DEFAULT_RETENTION_DAYS,
+    /** 调用记录开关：关闭后不再写入每条调用的记录（含请求/响应原文），已存记录不受影响。 */
+    val callLoggingEnabled: Boolean = true,
+    /** 请求日志环形缓冲容量（条）。 */
+    val requestLogCapacity: Int = DEFAULT_REQUEST_LOG_CAPACITY,
     /** 模型名不带 provider 前缀时落到哪个供应商。 */
     val defaultProvider: String = "trae",
 ) {
@@ -46,6 +50,8 @@ data class GatewaySettings(
         addProperty("maxRotate", maxRotate)
         addProperty("verboseLogging", verboseLogging)
         addProperty("logRetentionDays", logRetentionDays)
+        addProperty("callLoggingEnabled", callLoggingEnabled)
+        addProperty("requestLogCapacity", requestLogCapacity)
         addProperty("defaultProvider", defaultProvider)
     }
 
@@ -56,6 +62,13 @@ data class GatewaySettings(
         const val DEFAULT_RETENTION_DAYS = 30
         const val MIN_RETENTION_DAYS = 1
         const val MAX_RETENTION_DAYS = 3650
+
+        const val DEFAULT_REQUEST_LOG_CAPACITY = 300
+        const val MIN_REQUEST_LOG_CAPACITY = 50
+        const val MAX_REQUEST_LOG_CAPACITY = 5000
+
+        fun clampRequestLogCapacity(value: Int): Int =
+            value.coerceIn(MIN_REQUEST_LOG_CAPACITY, MAX_REQUEST_LOG_CAPACITY)
 
         /**
          * 预刷新窗口上限（秒）。
@@ -78,6 +91,8 @@ data class GatewaySettings(
                 refreshSkewSeconds = clampRefreshSkew(obj.longOr("refreshSkewSeconds", defaults.refreshSkewSeconds)),
                 maxRotate = obj.intOr("maxRotate", defaults.maxRotate),
                 verboseLogging = obj.boolOr("verboseLogging", defaults.verboseLogging),
+                callLoggingEnabled = obj.boolOr("callLoggingEnabled", defaults.callLoggingEnabled),
+                requestLogCapacity = clampRequestLogCapacity(obj.intOr("requestLogCapacity", defaults.requestLogCapacity)),
                 defaultProvider = obj.strOr("defaultProvider", defaults.defaultProvider),
                 logRetentionDays = clampRetentionDays(obj.intOr("logRetentionDays", defaults.logRetentionDays)),
             )

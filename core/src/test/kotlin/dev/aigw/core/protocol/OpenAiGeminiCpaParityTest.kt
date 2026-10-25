@@ -58,6 +58,39 @@ class OpenAiGeminiCpaParityTest {
     }
 
     @Test
+    fun `claude 通道不给思考块挂伪造签名`() {
+        // 占位签名在 Gemini 通道会被跳过，但 Vertex 上的 Anthropic 通道会真验签，
+        // 回传它会得到 400 Invalid `signature` in `thinking` block
+        val body = """
+            {"messages":[
+              {"role":"assistant","content":"答案","reasoning_content":"先想想"}
+            ]}
+        """.trimIndent()
+
+        val claude = OpenAiGemini.toGeminiRequest(body, "claude-sonnet-4-6")
+            .getAsJsonArray("contents")[0].asJsonObject.getAsJsonArray("parts")
+        assertEquals(1, claude.size(), "claude 通道不应生成 thought part：$claude")
+        assertEquals("答案", claude[0].asJsonObject.get("text").asString)
+
+        // 工具调用同样不能挂伪造签名
+        val withTool = """
+            {"messages":[
+              {"role":"assistant","content":"","tool_calls":[{"id":"c1","function":{"name":"f","arguments":"{}"}}]}
+            ]}
+        """.trimIndent()
+        val claudeTool = OpenAiGemini.toGeminiRequest(withTool, "claude-sonnet-4-6")
+            .getAsJsonArray("contents")[0].asJsonObject.getAsJsonArray("parts")
+        assertEquals(1, claudeTool.size())
+        assertEquals(false, claudeTool[0].asJsonObject.has("thoughtSignature"))
+
+        // gemini 通道保持原行为
+        val gemini = OpenAiGemini.toGeminiRequest(body, "gemini-3.8-flash-high")
+            .getAsJsonArray("contents")[0].asJsonObject.getAsJsonArray("parts")
+        assertEquals(2, gemini.size())
+        assertEquals(OpenAiGemini.THOUGHT_SIGNATURE, gemini[0].asJsonObject.get("thoughtSignature").asString)
+    }
+
+    @Test
     fun `多工具调用响应聚合在同一个 user content 保持严格交替`() {
         val body = """
             {"messages":[

@@ -1,11 +1,10 @@
 package dev.aigw.app.ui
 
+import androidx.compose.foundation.clickable
 import android.app.Activity
 import android.content.Intent
-import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -16,7 +15,6 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -24,12 +22,12 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
-
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.google.gson.JsonObject
 import dev.aigw.app.ui.providers.ProviderUiActions
 import dev.aigw.app.ui.providers.ProviderUiRegistry
 /**
@@ -46,24 +44,26 @@ fun ProviderDetailScreen(
     onBack: () -> Unit,
     onEditCustom: (String) -> Unit,
 ) {
-    val ui = ProviderUiRegistry.require(providerId)
+    val ui = remember(providerId) { ProviderUiRegistry.require(providerId) }
     val info = state.providerOf(providerId)
     val accounts = state.accountsOf(providerId)
+
+    // 内嵌网页登录（LongCat / Today 这类「凭证即 Cookie」的上游）：
+    // 记住这次是给哪个供应商登录 —— Activity 回调只会带回 Cookie，不带 providerId。
     val context = LocalContext.current
-
-    // 记住这次是给哪个供应商登录（Activity 回调只会带回 Cookie）
     var pendingCookieProvider by remember { mutableStateOf("") }
-
-    // 内嵌网页登录：打开上游网站，用户登录完成后把读到的 Cookie 交回 ViewModel 导入。
-    // 不注入 JS、不开多窗口，旧机器上也能跑（详见 CookieLoginActivity 的兼容说明）。
     val cookieLogin = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult(),
     ) { result ->
-        if (result.resultCode != Activity.RESULT_OK) return@rememberLauncherForActivityResult
+        if (result.resultCode != Activity.RESULT_OK) {
+            pendingCookieProvider = ""
+            return@rememberLauncherForActivityResult
+        }
         val cookie = result.data?.getStringExtra(CookieLoginActivity.EXTRA_RESULT_COOKIE).orEmpty()
         val target = pendingCookieProvider
         if (cookie.isNotEmpty() && target.isNotEmpty()) {
-            viewModel.importCredentials(target, """{"cookie":${jsonQuote(cookie)}}""")
+            val json = JsonObject().apply { addProperty("cookie", cookie) }.toString()
+            viewModel.importCredentials(target, json)
         }
         pendingCookieProvider = ""
     }
@@ -72,12 +72,12 @@ fun ProviderDetailScreen(
     // creditPacks/taskLists 随 state 变化，用 rememberUpdatedState 读取最新值。
     val creditPacks = rememberUpdatedState(state.creditPacks)
     val taskLists = rememberUpdatedState(state.taskLists)
+    val pointsBills = rememberUpdatedState(state.pointsBills)
     val actions = remember(viewModel, providerId) {
         ProviderUiActions(
             // 登录一律交给系统浏览器：本机 WebView 渲染异常（整页缩放错乱、输入框文字镜像），
             // 网关会在本地临时监听回调端口接住登录结果。
-            onWebLogin = { id -> viewModel.beginBrowserLogin(id) },
-            onDeviceLogin = { id, region -> viewModel.beginDeviceLogin(id, region) },
+            onWebLogin = { id, region -> viewModel.beginBrowserLogin(id, region) },
             onCookieLogin = { id, url, hosts, title ->
                 pendingCookieProvider = id
                 val intent = Intent(context, CookieLoginActivity::class.java).apply {
@@ -87,6 +87,7 @@ fun ProviderDetailScreen(
                 }
                 cookieLogin.launch(intent)
             },
+            onDeviceLogin = { id, region -> viewModel.beginDeviceLogin(id, region) },
             onSmsLogin = { id, phone, code, ccode, onResult ->
                 if (code.isEmpty()) {
                     viewModel.sendSmsCode(id, phone, ccode, onResult)
@@ -105,9 +106,7 @@ fun ProviderDetailScreen(
             },
             onRefreshCredits = { id, uid -> viewModel.refreshCredits(id, uid) },
             onAction = { id, uid, action, payload -> viewModel.performAction(id, uid, action, payload) },
-            onCheckDeviceAuth = { id, region -> viewModel.checkDeviceAuth(id, region) },
             onToggleAccount = { id, uid, enabled -> viewModel.setAccountEnabled(id, uid, enabled) },
-            onMoveAccountPriority = { id, uid, up -> viewModel.moveAccountPriority(id, uid, up) },
             onRemoveAccount = { id, uid -> viewModel.removeAccount(id, uid) },
             onUpdateSecret = { id, uid, secret, notice ->
                 viewModel.updateAccountSecret(id, uid, secret)
@@ -123,12 +122,13 @@ fun ProviderDetailScreen(
             onLoadCreditPacks = { id, uid -> viewModel.loadCreditPacks(id, uid) },
             taskListOf = { id, uid -> taskLists.value["$id/$uid"] },
             onLoadTaskList = { id, uid -> viewModel.loadTaskList(id, uid) },
+            pointsBillsOf = { id, uid -> pointsBills.value["$id/$uid"] },
+            onLoadPointsBills = { id, uid -> viewModel.loadPointsBills(id, uid) },
             onRegenerateDeviceId = { id, uid -> viewModel.regenerateDeviceId(id, uid) },
             onSetDeviceId = { id, uid, value -> viewModel.setDeviceId(id, uid, value) },
             onNotice = { viewModel.notice(it) },
         )
     }
-
 
     PageScaffold(
         title = info?.displayName ?: providerId,
@@ -163,8 +163,8 @@ fun ProviderDetailScreen(
         if (accounts.isNotEmpty() && !ui.managesOwnAccounts) {
             SectionCard(enterIndex = 0) {
                 SectionLabel("账号")
-                accounts.forEachIndexed { index, account ->
-                    AccountRow(account, ui, actions, index = index)
+                PagedAccountList(accounts, keyOf = { it.uid }) { pageIndex, account ->
+                    AccountRow(account, ui, actions, index = pageIndex)
                 }
                 OutlineActionButton("刷新额度") { actions.onRefreshCredits(providerId, null) }
             }
@@ -183,43 +183,18 @@ private fun AccountRow(
     actions: ProviderUiActions,
     index: Int,
 ) {
-    Column(
+    AccountCardShell(
+        account = account,
+        providerId = account.providerId,
+        actions = actions,
         modifier = Modifier.fillMaxWidth().staggeredAppear(index),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Column(Modifier.weight(1f)) {
-                Text(
-                    text = account.nickname.ifEmpty { account.uid },
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.SemiBold,
-                )
-                // 额度与明细交给各供应商自己的组件展示（它们知道该怎么解读），这里只报状态
-                Text(
-                    text = accountStatusText(account),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+        extra = { ui.AccountExtra(account, actions) },
+        footer = {
+            Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                LinkText("删除账号") { actions.onRemoveAccount(account.providerId, account.uid) }
             }
-            AccountPriorityArrows(
-                priority = account.priority,
-                onMove = { up -> actions.onMoveAccountPriority(account.providerId, account.uid, up) },
-            )
-            Switch(
-                checked = account.enabled,
-                onCheckedChange = { actions.onToggleAccount(account.providerId, account.uid, it) },
-            )
-        }
-
-        ui.AccountExtra(account, actions)
-
-        Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-            LinkText("删除账号") { actions.onRemoveAccount(account.providerId, account.uid) }
-        }
-    }
+        },
+    )
 }
 
 @Composable
@@ -230,20 +205,4 @@ private fun LinkText(text: String, onClick: () -> Unit) {
         color = MaterialTheme.colorScheme.primary,
         modifier = Modifier.clickable(onClick = onClick),
     )
-}
-
-/** 极简 JSON 字符串转义（Cookie 里可能带引号或反斜杠）。 */
-private fun jsonQuote(value: String): String {
-    val builder = StringBuilder("\"")
-    for (ch in value) {
-        when (ch) {
-            '"' -> builder.append("\\\"")
-            '\\' -> builder.append("\\\\")
-            '\n' -> builder.append("\\n")
-            '\r' -> builder.append("\\r")
-            '\t' -> builder.append("\\t")
-            else -> if (ch < ' ') builder.append(String.format("\\u%04x", ch.code)) else builder.append(ch)
-        }
-    }
-    return builder.append("\"").toString()
 }

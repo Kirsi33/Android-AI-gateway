@@ -7,16 +7,19 @@ class TraeChatCall(
     val status: Int,
     val stream: InputStream?,
     val errorBody: String,
+    /** 非流式响应（错误体 / 非 SSE 200）持有的连接，关闭时一并断开，避免 socket 泄漏。 */
+    private val conn: java.net.HttpURLConnection? = null,
 ) : AutoCloseable {
     override fun close() {
         stream?.close()
+        conn?.disconnect()
     }
 }
 
 /** SOLO 对话通道客户端。请求体改写交给 [TraePayload]。 */
 class TraeChatClient(
     private val version: TraeVersion,
-    private val host: String = TraeConstants.AGENT_HOST,
+    private val host: String,
     private val idleTimeoutMs: Int = TraeHttp.STREAM_IDLE_TIMEOUT_MS,
 ) {
 
@@ -39,7 +42,7 @@ class TraeChatClient(
         val status = conn.responseCode
         if (status >= 400) {
             val raw = TraeHttp.readBody(conn)
-            return TraeChatCall(status, null, raw)
+            return TraeChatCall(status, null, raw, conn)
         }
         val contentType = conn.contentType.orEmpty()
         if (!contentType.contains("event-stream", ignoreCase = true)) {
@@ -48,6 +51,7 @@ class TraeChatClient(
                 status,
                 null,
                 "上游未返回 SSE 流（Content-Type: ${contentType.ifEmpty { "—" }}）：${raw.trim().take(200).ifEmpty { "<空响应>" }}",
+                conn,
             )
         }
         return TraeChatCall(status, conn.inputStream, "")
@@ -64,7 +68,12 @@ class TraeChatClient(
         ) { TraeHeaders.solo(it, account, version, stream = false) }
 
         val status = conn.responseCode
-        val raw = TraeHttp.readBody(conn)
+        val raw = try {
+            TraeHttp.readBody(conn)
+        } finally {
+            // 目录是非流式请求：读完就断开，异常路径也不能漏
+            conn.disconnect()
+        }
         if (status >= 400) {
             throw TraeHttpException(status, TraeErrors.fromStatus(status, raw), raw, TraeErrors.extractCode(raw))
         }

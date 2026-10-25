@@ -1,5 +1,11 @@
 package dev.aigw.core.provider.loomy
 
+import dev.aigw.core.util.arrayOrNull
+import dev.aigw.core.util.bool
+import dev.aigw.core.util.long
+import dev.aigw.core.util.objOrNull
+import dev.aigw.core.util.str
+
 /**
  * 模型目录：从 `GET /api/v1/models` 拉取（需要 session）。
  *
@@ -23,10 +29,14 @@ class LoomyModelCatalog(
     var lastError: String = ""
         private set
 
+    /**
+     * 强制下次重新拉取（界面的刷新按钮用）。
+     *
+     * 只让缓存过期（[cachedAt] 归零），保留 [cached] 作失败兜底：
+     * 本方法只保证不再命中缓存，不保证上游此刻可用。
+     */
     fun invalidate() {
-        cached = null
         cachedAt = 0L
-        cachedSession = ""
     }
 
     /**
@@ -36,9 +46,11 @@ class LoomyModelCatalog(
      * 登录前本就不该有模型，报错只会在模型页吓人。
      */
     fun models(session: String?): List<LoomyModel> {
+        // 标记描述的是「本次返回的清单怎么来的」，每次调用先重置，
+        // 否则上一次的失败会被后面命中 TTL 缓存的调用沿用。
+        fromFallback = false
+        lastError = ""
         if (session.isNullOrEmpty()) {
-            fromFallback = false
-            lastError = ""
             return emptyList()
         }
         val now = nowMillis()
@@ -78,17 +90,17 @@ class LoomyModelCatalog(
         )
         val (status, body) = httpJson("$apiBase${LoomyConstants.PATH_MODELS}", "GET", headers)
         val obj = decodeEnvelope(status, body)
-        val array = obj.array("data") ?: return emptyList()
+        val array = obj.arrayOrNull("data") ?: return emptyList()
         val result = ArrayList<LoomyModel>()
         for (element in array) {
             val item = runCatching { element.asJsonObject }.getOrNull() ?: continue
             val id = item.str("id").trim()
             if (id.isEmpty()) continue
-            val limit = item.obj("limit")
+            val limit = item.objOrNull("limit")
             val context = limit?.long("context") ?: item.long("context_length")
             val output = limit?.long("output") ?: item.long("max_output_tokens")
-            val capabilities = item.obj("capabilities")
-            val inputModalities = item.obj("modalities")?.array("input")
+            val capabilities = item.objOrNull("capabilities")
+            val inputModalities = item.objOrNull("modalities")?.arrayOrNull("input")
             val hasImage = inputModalities?.any { it.asString == "image" } == true
             result.add(
                 LoomyModel(

@@ -1,10 +1,13 @@
 package dev.aigw.core.provider.raccoon
 
+import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import com.sun.net.httpserver.HttpServer
+import dev.aigw.core.provider.ACTION_CHECKIN
 import dev.aigw.core.provider.ErrorKind
 import dev.aigw.core.provider.ProviderAccount
 import java.net.InetSocketAddress
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -20,6 +23,12 @@ import kotlin.test.assertTrue
  * 这里把关键转换锁住。
  */
 class RaccoonProviderTest {
+
+    private companion object {
+        const val GRANT_PATH = "/api/web/desktop/v1/login/points/grant"
+        const val BILLS_PATH = "/api/web/points/v1/bills"
+        const val BALANCE_PATH = "/api/web/points/v1/balance"
+    }
 
     private fun account() = ProviderAccount(
         providerId = RaccoonProvider.ID,
@@ -102,6 +111,21 @@ class RaccoonProviderTest {
         val obj = prepare("""{"model":"raccoon-chat","max_tokens":128,"messages":[{"role":"user","content":"hi"}]}""")
         assertEquals(128L, obj.get("max_tokens").asLong)
         assertTrue(!obj.has("max_new_tokens"), "上游 v2 不认 max_new_tokens")
+    }
+
+    @Test
+    fun `max_completion_tokens 映射为 max_tokens`() {
+        val obj = prepare(
+            """{"model":"m","max_completion_tokens":256,"messages":[{"role":"user","content":"hi"}]}""",
+        )
+        assertEquals(256L, obj.get("max_tokens").asLong)
+        assertTrue(!obj.has("max_completion_tokens"), "上游不认 max_completion_tokens")
+    }
+
+    @Test
+    fun `同时给两个上限时以 max_tokens 为准`() {
+        val obj = prepare("""{"model":"m","max_tokens":64,"max_completion_tokens":256,"messages":[]}""")
+        assertEquals(64L, obj.get("max_tokens").asLong)
     }
 
     @Test
@@ -250,7 +274,112 @@ class RaccoonProviderTest {
         assertEquals(listOf("data: [DONE]\n\n"), translator.close())
     }
 
+    // ------------------------------------------------------------------ 签到（桌面端登录奖励）
+
+    @Test
+    fun `签到携带桌面端请求头`() {
+        withUpstreamHeaders(GRANT_PATH, """{"code":0,"data":{"granted":true,"popup":{"source":"desktop_login","points":3000}}}""") { base, captured ->
+            RaccoonProvider(host = base).performAction(account(), ACTION_CHECKIN, JsonObject())
+            val headers = captured()
+            // 官方桌面客户端靠这两个头判定「是桌面端」，缺了上游不发放
+            assertEquals("desktop-windows", headers["x-client-platform"]?.firstOrNull(), "缺 X-Client-Platform：$headers")
+            assertTrue(
+                headers["x-client-version"]?.firstOrNull()?.startsWith("v") == true,
+                "缺 X-Client-Version（需带 v 前缀）：$headers",
+            )
+        }
+    }
+
+    @Test
+    fun `发放成功时汇报 popup 里的积分`() {
+        val body = """{"code":0,"data":{"granted":true,"popup":{"source":"desktop_login","points":3000,"expire_at":"2026-10-20"}}}"""
+        withUpstreamHeaders(GRANT_PATH, body) { base, _ ->
+            val result = RaccoonProvider(host = base).performAction(account(), ACTION_CHECKIN, JsonObject())
+            assertTrue(result.ok, result.message)
+            assertTrue(result.message.contains("3000"), "积分没从 data.popup.points 取：${result.message}")
+        }
+    }
+
+    @Test
+    fun `未发放时不报成签到成功`() {
+        withUpstreamHeaders(GRANT_PATH, """{"code":0,"data":{"granted":false}}""") { base, _ ->
+            val result = RaccoonProvider(host = base).performAction(account(), ACTION_CHECKIN, JsonObject())
+            assertTrue(result.ok, result.message)
+            assertTrue(
+                result.message.contains("未发放"),
+                "上游明确没发积分，不能报成签到成功：${result.message}",
+            )
+        }
+    }
+
+    // ------------------------------------------------------------------ 积分明细
+
+    @Test
+    fun `积分明细按上游字段映射且保留正负号`() {
+        val body = """{"code":0,"data":{"items":[
+            {"bill_id":"b1","event_name":"每日赠送积分","biz_type":"daily_grant","points":300,"created_at":"2026-10-14T00:00:05+08:00"},
+            {"bill_id":"b2","biz_type":"daily_expire","points":-300,"created_at":"2026-10-14T23:59:59+08:00"}
+        ],"paging":{"total":2}}}"""
+        withUpstreamHeaders(BILLS_PATH, body) { base, _ ->
+            val view = assertNotNull(RaccoonProvider(host = base).pointsBills(account()))
+            assertEquals("", view.error)
+            assertEquals(2, view.bills.size, view.bills.toString())
+            assertEquals("每日赠送积分", view.bills[0].title)
+            assertEquals(300L, view.bills[0].points)
+            assertEquals("daily_grant", view.bills[0].bizType)
+            assertTrue(view.bills[0].createdAtMillis > 0, "created_at 应被解析成毫秒")
+            assertEquals(-300L, view.bills[1].points, "支出必须保留负号")
+            assertEquals("daily_expire", view.bills[1].title, "event_name 缺失时回退 biz_type")
+        }
+    }
+
+    // ------------------------------------------------------------------ 积分余额
+
+    @Test
+    fun `余额为 0 是真实值而不是缺字段`() {
+        val body = """{"code":0,"data":{"available_points":0}}"""
+        withUpstream(path = BALANCE_PATH, body = body) { base ->
+            val info = assertNotNull(RaccoonProvider(host = base).creditInfo(account()))
+            assertTrue(info.known, "上游明确给了 0，就是真实余额")
+            assertEquals(0L, info.balance)
+        }
+    }
+
+    @Test
+    fun `余额字段缺失时不能报成 known 的 0`() {
+        // 上游改口径（字段没了）时，界面必须显示「—」而不是「积分 0」
+        val body = """{"code":0,"data":{"daily_points":300,"monthly_points":1200}}"""
+        withUpstream(path = BALANCE_PATH, body = body) { base ->
+            val info = assertNotNull(RaccoonProvider(host = base).creditInfo(account()))
+            assertFalse(info.known, "没有积分字段就不能当已知额度：${info.detail}")
+            assertEquals(0L, info.balance)
+        }
+    }
+
     // ------------------------------------------------------------------ 上游响应
+
+    /** 起一个临时上游，并把收到的请求头暴露给断言（签到协议头回归用）。 */
+    private fun withUpstreamHeaders(
+        path: String,
+        body: String,
+        block: (baseUrl: String, captured: () -> Map<String, List<String>>) -> Unit,
+    ) {
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        val headers = AtomicReference<Map<String, List<String>>>(emptyMap())
+        server.createContext(path) { exchange ->
+            headers.set(exchange.requestHeaders.entries.associate { it.key.lowercase() to it.value })
+            val bytes = body.toByteArray(Charsets.UTF_8)
+            exchange.responseHeaders.add("Content-Type", "application/json")
+            exchange.sendResponseHeaders(200, bytes.size.toLong())
+            exchange.responseBody.use { it.write(bytes) }
+        }
+        server.start()
+        try {
+            block("http://127.0.0.1:${server.address.port}") { headers.get() }
+        } finally {
+            server.stop(0)
+        }
+    }
 
     private fun withUpstream(
         status: Int = 200,

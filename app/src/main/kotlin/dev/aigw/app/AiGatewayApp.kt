@@ -23,12 +23,16 @@ class AiGatewayApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
-        engine = GatewayEngine(
+        val created = GatewayEngine(
             store = EncryptedKeyValueStore(this),
             lanAddressProvider = { LanAddresses.current(this) },
             // 调用记录预载与过期清理改走后台，冷启动首帧不再等全量解密
             preloadCallLogs = false,
+            // 完整原文溢出到缓存目录（系统空间不足时可回收）：加密存储只留 8K 摘要，
+            // 详情页打开时按记录 id 回读全文
+            spillDir = java.io.File(cacheDir, "call-fulltext"),
         )
+        engine = created
         getSystemService<NotificationManager>()?.createNotificationChannel(
             NotificationChannel(
                 CHANNEL_ID,

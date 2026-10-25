@@ -3,7 +3,6 @@ package dev.aigw.app.ui
 import android.app.Activity
 import android.content.Intent
 import android.graphics.Bitmap
-import android.graphics.Color
 import android.os.Bundle
 import android.view.Gravity
 import android.view.ViewGroup
@@ -13,6 +12,7 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.util.TypedValue
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.ProgressBar
@@ -67,7 +67,9 @@ class CookieLoginActivity : Activity() {
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.WHITE)
+            // 跟随窗口主题（values / values-night 各一套），不再硬编码白底：
+            // 原来的 Color.WHITE 在深色模式下是一整块刺眼的白板。
+            setBackgroundColor(themeColor(android.R.attr.colorBackground))
         }
 
         // 顶部：说明 + 完成按钮（用户自己决定何时算登录完成）
@@ -79,7 +81,7 @@ class CookieLoginActivity : Activity() {
         val label = TextView(this).apply {
             text = "登录完成后点右侧按钮"
             textSize = 13f
-            setTextColor(Color.parseColor("#333333"))
+            setTextColor(themeColor(android.R.attr.textColorPrimary))
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
         val done = Button(this).apply {
@@ -110,7 +112,7 @@ class CookieLoginActivity : Activity() {
         val statusBar = TextView(this).apply {
             text = title
             textSize = 12f
-            setTextColor(Color.parseColor("#666666"))
+            setTextColor(themeColor(android.R.attr.textColorSecondary))
             setPadding(dp(14), dp(4), dp(14), dp(6))
         }
         status = statusBar
@@ -260,6 +262,22 @@ class CookieLoginActivity : Activity() {
     private fun dp(value: Int): Int =
         (value * resources.displayMetrics.density + 0.5f).toInt()
 
+    /**
+     * 读取当前窗口主题里的颜色属性。
+     *
+     * Activity 是原生 View（不是 Compose），拿不到 AiGatewayTheme 的配色，
+     * 所以用主题属性代替硬编码色值：系统深色时自动换成深色底 + 浅色字。
+     */
+    private fun themeColor(attr: Int): Int {
+        val value = TypedValue()
+        if (!theme.resolveAttribute(attr, value, true)) return FALLBACK_COLOR
+        return if (value.resourceId != 0) {
+            runCatching { resources.getColor(value.resourceId, theme) }.getOrDefault(FALLBACK_COLOR)
+        } else {
+            value.data
+        }
+    }
+
     companion object {
         const val EXTRA_START_URL = "start_url"
         const val EXTRA_COOKIE_HOSTS = "cookie_hosts"
@@ -273,5 +291,8 @@ class CookieLoginActivity : Activity() {
         /** 自动确认后等多久再收尾，给 Set-Cookie 落盘留时间。 */
         private const val AUTO_CONFIRM_DELAY_MS = 600L
         const val REQUEST_CODE = 8803
+
+        /** 主题属性解析失败时的中性灰：比「一片全黑/全白」更容易看出是降级了。 */
+        private const val FALLBACK_COLOR = 0xFF888888.toInt()
     }
 }

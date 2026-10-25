@@ -14,12 +14,24 @@ import dev.aigw.core.util.str
  */
 class TraeAuthClient(private val version: TraeVersion) {
 
+    /**
+     * 鉴权 host：凭证自带的 apiHost 优先，缺省时按区域取该区域的 OAuth host。
+     *
+     * 另外修掉存量数据里的「国际版账号 + 国内 apiHost」组合：旧版 [TraeAccount.parse]
+     * 把国内 OAuth host 当缺省值写进了凭证，拿国际版 token 打国内端点会直接失败。
+     */
+    internal fun authHost(account: TraeAccount): String {
+        val region = TraeRegion.infer(account.domain, account.apiHost)
+        val host = account.apiHost.ifEmpty { region.oauthHost }
+        return if (region == TraeRegion.INTL && host == TraeRegion.CN.oauthHost) region.oauthHost else host
+    }
+
     /** refreshToken → 新 accessToken，并轮换 refreshToken。 */
     fun exchangeToken(account: TraeAccount): TraeAccount {
         if (account.refreshToken.isBlank()) {
             throw TraeHttpException(0, TraeErrorKind.SESSION_DEAD, "缺少 refreshToken，需要重新登录")
         }
-        val host = account.apiHost.ifEmpty { TraeConstants.OAUTH_HOST }
+        val host = authHost(account)
         val body = JsonObject().apply {
             addProperty("ClientID", TraeConstants.CLIENT_ID)
             addProperty("RefreshToken", account.refreshToken)
@@ -55,7 +67,7 @@ class TraeAuthClient(private val version: TraeVersion) {
 
     /** 补全 / 刷新账号身份信息。 */
     fun getUserInfo(account: TraeAccount): TraeAccount {
-        val host = account.apiHost.ifEmpty { TraeConstants.OAUTH_HOST }
+        val host = authHost(account)
         val body = JsonObject().apply {
             addProperty("ReqSource", "IDE")
             addProperty("IDEVersion", version.ideVersion)

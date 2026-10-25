@@ -1,44 +1,23 @@
 package dev.aigw.core.provider.loomy
 
-import com.google.gson.JsonArray
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
+import dev.aigw.core.util.str
 
-/** JsonObject 取值的小工具，缺字段/类型不符时回退到默认值。 */
-fun JsonObject.str(key: String, fallback: String = ""): String {
-    val v = get(key) ?: return fallback
-    if (v.isJsonNull) return fallback
-    return runCatching { v.asString }.getOrDefault(fallback)
-}
-
-fun JsonObject.long(key: String, fallback: Long = 0L): Long {
-    val v = get(key) ?: return fallback
-    if (v.isJsonNull) return fallback
-    return runCatching { v.asLong }.getOrDefault(fallback)
-}
-
-fun JsonObject.int(key: String, fallback: Int = 0): Int {
-    val v = get(key) ?: return fallback
-    if (v.isJsonNull) return fallback
-    return runCatching { v.asInt }.getOrDefault(fallback)
-}
-
-fun JsonObject.bool(key: String, fallback: Boolean = false): Boolean {
-    val v = get(key) ?: return fallback
-    if (v.isJsonNull) return fallback
-    return runCatching { v.asBoolean }.getOrDefault(fallback)
-}
-
-fun JsonObject.obj(key: String): JsonObject? {
-    val v = get(key) ?: return null
-    if (!v.isJsonObject) return null
-    return v.asJsonObject
-}
-
-fun JsonObject.array(key: String): JsonArray? {
-    val v = get(key) ?: return null
-    if (!v.isJsonArray) return null
-    return v.asJsonArray
+/**
+ * 确保流式请求带 `stream_options.include_usage = true`。
+ *
+ * 上游只有收到该标志时，SSE 末帧才回 `usage`；缺了它用量统计会缺。
+ * 客户端已传 `stream_options` 时只合并 `include_usage`，不覆盖其它字段；
+ * 请求体不是合法 JSON 时原样返回（不因为一次改写失败而拆掉整个请求）。
+ */
+internal fun withIncludeUsage(body: String): String {
+    val obj = runCatching { JsonParser.parseString(body).asJsonObject }.getOrNull() ?: return body
+    val existing = obj.get("stream_options") as? JsonObject
+    if (existing != null && existing.get("include_usage") != null) return body
+    val options = existing ?: JsonObject().also { obj.add("stream_options", it) }
+    options.addProperty("include_usage", true)
+    return obj.toString()
 }
 
 /**

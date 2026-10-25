@@ -20,6 +20,9 @@ import dev.aigw.core.provider.ProviderCapability
 import dev.aigw.core.provider.ProviderHooks
 import dev.aigw.core.provider.ProviderModel
 import dev.aigw.core.provider.ProviderModelCatalogView
+import dev.aigw.core.provider.PointsBill
+import dev.aigw.core.provider.PointsBillListView
+import dev.aigw.core.provider.SSE_DONE
 import dev.aigw.core.provider.StreamFailureChatCall
 import dev.aigw.core.provider.StreamingChatCall
 import dev.aigw.core.provider.UpstreamError
@@ -28,19 +31,22 @@ import dev.aigw.core.provider.WebLoginTicket
 import dev.aigw.core.provider.isStreamingBody
 import dev.aigw.core.provider.queryParam
 import dev.aigw.core.provider.requestedModelOf
+import dev.aigw.core.util.HttpSupport
 import dev.aigw.core.util.arrayOrNull
 import dev.aigw.core.util.boolOrNull
+import dev.aigw.core.util.firstLong
+import dev.aigw.core.util.firstString
+import dev.aigw.core.util.jwtClaim
+import dev.aigw.core.util.jwtClaimLong
 import dev.aigw.core.util.longOrNull
+import dev.aigw.core.util.newCompletionId
 import dev.aigw.core.util.objOrNull
+import dev.aigw.core.util.randomHex
 import dev.aigw.core.util.stringOrNull
-import java.io.ByteArrayOutputStream
-import java.io.InputStream
 import java.net.HttpURLConnection
-import java.net.URL
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
-import java.security.SecureRandom
-import java.util.UUID
+import java.time.OffsetDateTime
 
 /**
  * 商汤「小浣熊」（`xiaohuanxiong.com`）的插件账号通道。
@@ -63,7 +69,7 @@ class RaccoonProvider(
     override val displayName: String = "小浣熊"
     override val authKind: AuthKind = AuthKind.WEBVIEW_CALLBACK
     override val capabilities: Set<ProviderCapability> =
-        setOf(ProviderCapability.CREDIT_REFRESH, ProviderCapability.CHECKIN)
+        setOf(ProviderCapability.CREDIT_REFRESH, ProviderCapability.CHECKIN, ProviderCapability.POINTS_BILLS)
 
     // ------------------------------------------------------------------ 模型
 
@@ -143,7 +149,7 @@ class RaccoonProvider(
         model: String,
     ): ChatCall {
         if (status !in 200..299) {
-            val errorBody = runCatching { readLimited(conn.errorStream) }.getOrDefault("")
+            val errorBody = runCatching { HttpSupport.readLimited(conn.errorStream) }.getOrDefault("")
             conn.disconnect()
             return FailedChatCall(status, errorBody)
         }
@@ -171,7 +177,7 @@ class RaccoonProvider(
             return AggregatedChatCall(status, aggregated)
         }
 
-        val text = runCatching { stream.use { readLimited(it) } }.getOrDefault("")
+        val text = runCatching { stream.use { HttpSupport.readLimited(it) } }.getOrDefault("")
         conn.disconnect()
         if (text.isBlank()) return emptyUpstreamFailure(status, contentType, text)
         val parsed = runCatching { JsonParser.parseString(text).asJsonObject }.getOrNull()
@@ -253,7 +259,10 @@ class RaccoonProvider(
             val (status, text) = getJson("$host$PATH_BALANCE", jsonHeaders(credential))
             if (status !in 200..299) return CreditInfo(0, known = false, detail = "上游 HTTP $status")
             val data = envelopeData(text) ?: return CreditInfo(0, known = false, detail = "响应缺少 data")
-            val points = data.firstLong("available_points", "availablePoints", "points", "balance", "credits")
+            // 不能走 firstLong：它把 0 当「未提供」，而积分真的是 0 与字段缺失必须区分——
+            // 字段缺失要报 known=false（界面显示「—」），不能显示成「积分 0」。
+            val points = BALANCE_POINT_KEYS.firstNotNullOfOrNull { data.longOrNull(it) }
+                ?: return CreditInfo(0, known = false, detail = "响应里没有积分字段（键：${data.keySet().joinToString(",")}）")
             CreditInfo(points, known = true, detail = "可用积分 $points")
         } catch (e: Exception) {
             CreditInfo(0, known = false, detail = e.message ?: "查询积分失败")
@@ -358,7 +367,7 @@ class RaccoonProvider(
         return completeWebLogin(trimmed)
     }
 
-    /** 每日签到领积分（web 通道）。 */
+    /** 供应商专属动作（web 通道）。 */
     override fun performAction(
         account: ProviderAccount,
         action: String,
@@ -368,22 +377,32 @@ class RaccoonProvider(
         else -> ProviderActionResult.unsupported(action)
     }
 
+    /**
+     * 领桌面端登录奖励（`/api/web/desktop/v1/login/points/grant`）。
+     *
+     * 上游不是「点一下就加积分」的签到：这笔奖励由服务端判定 `data.granted`，
+     * 而且只认官方桌面客户端——调用必须带 `X-Client-Platform` / `X-Client-Version`，
+     * 否则不发。发成功时积分在 `data.popup.points`（不是 `data.points`）。
+     */
     private fun checkin(account: ProviderAccount): ProviderActionResult {
         val credential = parse(account) ?: return ProviderActionResult.failure("凭证无法解析")
         return try {
-            val (status, text) = postJson("$host$PATH_GRANT", "{}", jsonHeaders(credential))
+            val (status, text) = postJson("$host$PATH_GRANT", "{}", jsonHeaders(credential) + desktopHeaders())
             if (status !in 200..299) {
                 return ProviderActionResult.failure(extractMessage(text).ifEmpty { "签到失败（HTTP $status）" })
             }
+            val data = runCatching { JsonParser.parseString(text).asJsonObject.objOrNull("data") }.getOrNull()
+            val granted = data?.boolOrNull("granted") == true
+            val points = data?.objOrNull("popup")?.firstLong("points") ?: 0L
             val message = extractMessage(text)
-            val points = runCatching {
-                JsonParser.parseString(text).asJsonObject.objOrNull("data")
-                    ?.firstLong("points", "available_points", "amount", "reward", "credits") ?: 0L
-            }.getOrDefault(0L)
             ProviderActionResult.success(
                 when {
-                    points > 0 -> "签到成功，+$points 积分"
-                    else -> friendlyCheckinResult(message)
+                    granted && points > 0 -> "签到成功，+$points 积分"
+                    granted -> message.ifEmpty { "签到成功" }
+                    // 上游回执多是英文短词（success / already checked in），直接透出对中文用户不友好；
+                    // 认识的翻成中文，不认识的原样给出，不猜也不吞。
+                    message.isNotEmpty() -> friendlyCheckinResult(message)
+                    else -> "本次未发放积分（可能今日已领取）"
                 },
             )
         } catch (e: Exception) {
@@ -391,14 +410,38 @@ class RaccoonProvider(
         }
     }
 
-    /** 上游回执多是英文短词（success/ok），直接展示不友好；其余文案原样透出。 */
+    /** 把上游的英文签到回执翻成中文；不认识的原文照返。 */
     private fun friendlyCheckinResult(raw: String): String {
         val text = raw.trim()
         return when (text.lowercase()) {
             "", "success", "ok", "true", "succeeded", "successful" -> "签到成功"
             "already checked in", "already_checkin", "already signed", "already_sign" -> "今日已签到"
+            "not checked in", "not_checkin" -> "今日尚未签到"
             else -> text
         }
+    }
+
+    /** 积分流水（`/api/web/points/v1/bills`），最近 [POINTS_BILLS_LIMIT] 条。 */
+    override fun pointsBills(account: ProviderAccount): PointsBillListView? {
+        val credential = parse(account) ?: return null
+        val url = "$host$PATH_BILLS?paging.limit=$POINTS_BILLS_LIMIT&paging.offset=0&type=all"
+        val (status, text) = getJson(url, jsonHeaders(credential))
+        if (status !in 200..299) throw IllegalStateException("积分明细 HTTP $status")
+        val data = envelopeData(text) ?: throw IllegalStateException("积分明细响应缺少 data")
+        val items = data.arrayOrNull("items") ?: return PointsBillListView(emptyList())
+        return PointsBillListView(
+            items.mapNotNull { element ->
+                val item = element.takeIf { it.isJsonObject }?.asJsonObject ?: return@mapNotNull null
+                PointsBill(
+                    id = item.firstString("bill_id", "id"),
+                    title = item.firstString("event_name", "title", "biz_type").ifEmpty { "积分变动" },
+                    // 不能用 firstLong：它把 ≤ 0 当作「未提供」，会把支出（负数）吞成 0。
+                    points = item.longOrNull("points") ?: item.longOrNull("amount") ?: 0L,
+                    bizType = item.firstString("biz_type"),
+                    createdAtMillis = isoMillisOf(item.firstString("created_at", "createdAt")),
+                )
+            },
+        )
     }
 
     // ------------------------------------------------------------------ 上游
@@ -474,31 +517,25 @@ class RaccoonProvider(
     // ------------------------------------------------------------------ HTTP
 
     private fun open(url: String, body: String?, headers: Map<String, String>): HttpURLConnection {
-        val conn = (URL(url).openConnection() as HttpURLConnection).apply {
-            requestMethod = if (body == null) "GET" else "POST"
-            connectTimeout = CONNECT_TIMEOUT_MS
-            readTimeout = READ_TIMEOUT_MS
-            instanceFollowRedirects = false
-            setRequestProperty("Accept-Encoding", "identity")
-            setRequestProperty("Accept", "text/event-stream, application/json")
+        val merged = buildMap {
+            put("Accept", "text/event-stream, application/json")
+            putAll(headers)
+            if (body != null) put("Content-Type", "application/json")
         }
-        for ((key, value) in headers) conn.setRequestProperty(key, value)
-        if (body != null) {
-            conn.doOutput = true
-            conn.setRequestProperty("Content-Type", "application/json")
-            val bytes = body.toByteArray(StandardCharsets.UTF_8)
-            conn.setFixedLengthStreamingMode(bytes.size)
-            conn.outputStream.use { it.write(bytes) }
-        }
-        return conn
+        return HttpSupport.open(
+            url = url,
+            method = if (body == null) "GET" else "POST",
+            headers = merged,
+            body = body,
+            connectTimeoutMs = CONNECT_TIMEOUT_MS,
+            readTimeoutMs = READ_TIMEOUT_MS,
+        )
     }
 
     private fun postJson(url: String, body: String?, headers: Map<String, String>): Pair<Int, String> {
         val conn = open(url, body, headers)
         return try {
-            val status = conn.responseCode
-            val text = if (status in 200..299) readLimited(conn.inputStream) else readLimited(conn.errorStream)
-            status to text
+            conn.responseCode to HttpSupport.readBody(conn)
         } finally {
             conn.disconnect()
         }
@@ -507,9 +544,7 @@ class RaccoonProvider(
     private fun getJson(url: String, headers: Map<String, String>): Pair<Int, String> {
         val conn = open(url, null, headers)
         return try {
-            val status = conn.responseCode
-            val text = if (status in 200..299) readLimited(conn.inputStream) else readLimited(conn.errorStream)
-            status to text
+            conn.responseCode to HttpSupport.readBody(conn)
         } finally {
             conn.disconnect()
         }
@@ -521,6 +556,19 @@ class RaccoonProvider(
         put("Accept-Language", "zh-Hans")
         if (credential.orgCode.isNotEmpty()) put("X-Org-Code", credential.orgCode)
     }
+
+    /**
+     * 桌面客户端标识头。上游靠它判定「调用方是官方桌面端」，缺了就不发登录奖励。
+     */
+    private fun desktopHeaders(): Map<String, String> = mapOf(
+        "X-Client-Platform" to CLIENT_PLATFORM,
+        "X-Client-Version" to CLIENT_VERSION,
+    )
+
+    /** 上游 `created_at` 是 ISO-8601 字符串，转毫秒；解析不了就当未知（0）。 */
+    private fun isoMillisOf(value: String): Long = runCatching {
+        OffsetDateTime.parse(value.trim()).toInstant().toEpochMilli()
+    }.getOrDefault(0L)
 
     private fun bearerHeaders(accessToken: String): Map<String, String> = mapOf(
         "Accept" to "application/json",
@@ -583,24 +631,6 @@ class RaccoonProvider(
         return ""
     }
 
-    private fun readLimited(input: InputStream?): String {
-        if (input == null) return ""
-        val out = ByteArrayOutputStream()
-        val buffer = ByteArray(8192)
-        while (true) {
-            val read = input.read(buffer)
-            if (read < 0) break
-            if (out.size() + read > MAX_BODY_BYTES) {
-                out.write(buffer, 0, MAX_BODY_BYTES - out.size())
-                break
-            }
-            out.write(buffer, 0, read)
-        }
-        return out.toString("UTF-8")
-    }
-
-    private fun newCompletionId(): String = "chatcmpl-" + UUID.randomUUID().toString().replace("-", "").take(24)
-
     private fun enc(value: String): String = URLEncoder.encode(value, "UTF-8")
 
     private data class Credential(
@@ -629,8 +659,23 @@ class RaccoonProvider(
         const val PATH_MODELS = "/api/web/llm/v2/model_catalog"
         const val PATH_BALANCE = "/api/web/points/v1/balance"
 
-        /** 每日签到领积分。 */
+        /** 余额响应里可能放可用积分的键（按优先级）。字段缺失与「真是 0」必须区分。 */
+        private val BALANCE_POINT_KEYS =
+            listOf("available_points", "availablePoints", "points", "balance", "credits")
+
+        /** 桌面端登录奖励（不是每日签到）。 */
         const val PATH_GRANT = "/api/web/desktop/v1/login/points/grant"
+
+        /** 积分流水明细。 */
+        const val PATH_BILLS = "/api/web/points/v1/bills"
+
+        /** 桌面客户端标识：上游只给「官方桌面端」发登录奖励，伪装成 Windows 桌面端（与 [CLIENT_UA] 一致）。 */
+        const val CLIENT_PLATFORM = "desktop-windows"
+
+        const val CLIENT_VERSION = "v1.0.38"
+
+        /** 积分明细一次拉取的条数（官方客户端用 20）。 */
+        const val POINTS_BILLS_LIMIT = 20
 
         /** 伪装成官方桌面 Web 客户端的 UA（web 通道的调用方就是它）。 */
         const val CLIENT_UA =
@@ -645,15 +690,6 @@ class RaccoonProvider(
 
         private const val CONNECT_TIMEOUT_MS = 30_000
         private const val READ_TIMEOUT_MS = 300_000
-        private const val MAX_BODY_BYTES = 1 shl 20
-
-        private val random = SecureRandom()
-
-        fun randomHex(byteCount: Int): String {
-            val bytes = ByteArray(byteCount)
-            random.nextBytes(bytes)
-            return bytes.joinToString("") { "%02x".format(it) }
-        }
     }
 }
 
@@ -663,6 +699,7 @@ class RaccoonProvider(
  * - 字段名保持 OpenAI 标准（上游 v2 是 LiteLLM 兼容层，`max_tokens` 等标准名直接认；
  *   改名成 `max_new_tokens` 会被上游以 500 unexpected keyword argument 拒绝）；
  * - 保留 `max_tokens`/`temperature`/`top_p`/`frequency_penalty`/`presence_penalty`/`stop`；
+ *   新版 OpenAI 客户端的 `max_completion_tokens` 按同义映射到 `max_tokens`，否则会被静默丢弃；
  * - **强制 `stream:true`**（上游拒绝非流式），非流式由本类聚合；
  * - `tools` 原样映射，并带上 `tool_choice:"auto"`。
  *
@@ -673,7 +710,9 @@ internal fun prepareRaccoonBody(src: String): String {
     return JsonObject().apply {
         obj.stringOrNull("model")?.let { addProperty("model", it) }
         obj.arrayOrNull("messages")?.let { add("messages", it) }
-        obj.longOrNull("max_tokens")?.let { addProperty("max_tokens", it) }
+        // 新版 OpenAI 客户端发 max_completion_tokens：按同义映射，否则会被上游静默丢弃
+        (obj.longOrNull("max_tokens") ?: obj.longOrNull("max_completion_tokens"))
+            ?.let { addProperty("max_tokens", it) }
         obj.doubleOrNull("temperature")?.let { addProperty("temperature", it) }
         obj.doubleOrNull("top_p")?.let { addProperty("top_p", it) }
         obj.doubleOrNull("frequency_penalty")?.let { addProperty("frequency_penalty", it) }
@@ -778,53 +817,7 @@ internal class RaccoonSseTranslator(
         }
         return "data: $obj\n\n"
     }
-
-    companion object {
-        const val SSE_DONE = "data: [DONE]\n\n"
-    }
 }
 
 private fun JsonObject.doubleOrNull(name: String): Double? =
     get(name)?.takeIf { it.isJsonPrimitive }?.asDouble
-
-/** 取第一个非空字符串字段（兼容 camelCase / snake_case 两套命名）。 */
-internal fun JsonObject.firstString(vararg keys: String): String {
-    for (key in keys) {
-        val value = get(key) ?: continue
-        if (!value.isJsonPrimitive) continue
-        val text = runCatching { value.asString }.getOrNull().orEmpty()
-        if (text.isNotEmpty()) return text
-    }
-    return ""
-}
-
-internal fun JsonObject.firstLong(vararg keys: String): Long {
-    for (key in keys) {
-        val value = get(key) ?: continue
-        if (!value.isJsonPrimitive) continue
-        val number = runCatching { value.asLong }.getOrNull()
-        if (number != null && number > 0) return number
-    }
-    return 0L
-}
-
-/** 从 JWT 的 payload 里取某个字符串声明；取不到返回空串。 */
-internal fun jwtClaim(accessToken: String, key: String): String {
-    val obj = jwtPayload(accessToken) ?: return ""
-    return obj.firstString(key)
-}
-
-/** 从 JWT 的 payload 里取某个数值声明（如 exp）；取不到返回 null。 */
-internal fun jwtClaimLong(accessToken: String, key: String): Long? {
-    val obj = jwtPayload(accessToken) ?: return null
-    return obj.get(key)?.takeIf { it.isJsonPrimitive }?.asLong
-}
-
-private fun jwtPayload(accessToken: String): JsonObject? {
-    val payload = accessToken.split('.').getOrNull(1) ?: return null
-    if (payload.isEmpty()) return null
-    val json = runCatching {
-        String(java.util.Base64.getUrlDecoder().decode(payload), StandardCharsets.UTF_8)
-    }.getOrNull() ?: return null
-    return runCatching { JsonParser.parseString(json).asJsonObject }.getOrNull()
-}

@@ -1,6 +1,6 @@
 package dev.aigw.core.provider.loomy
 
-import java.security.SecureRandom
+import dev.aigw.core.util.randomHex
 
 /**
  * W3C Trace Context 的 `traceparent`。
@@ -11,13 +11,8 @@ import java.security.SecureRandom
  */
 object LoomyTrace {
 
-    private val random = SecureRandom()
+    fun newTraceparent(): String = "00-${randomHex(16)}-${randomHex(8)}-01"
 
-    fun newTraceparent(): String = "00-${hex(16)}-${hex(8)}-01"
-
-    private fun hex(bytes: Int): String {
-        val out = ByteArray(bytes)
-        random.nextBytes(out)
-        return out.joinToString("") { "%02x".format(it) }
-    }
+    /** 会话/消息 id 用；与官方客户端的 `chat-<uuid>`、`msg-<uuid>` 形状一致。 */
+    fun newUuid(): String = java.util.UUID.randomUUID().toString()
 }

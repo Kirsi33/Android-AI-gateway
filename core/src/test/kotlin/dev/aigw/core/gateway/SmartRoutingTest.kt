@@ -39,8 +39,27 @@ class SmartRoutingTest {
         override fun resolveModel(requested: String) = requested
         override fun classify(status: Int, body: String) = UpstreamError(ErrorKind.CLIENT, body)
         override fun openChat(account: ProviderAccount, openAiBody: String): ChatCall = throw UnsupportedOperationException()
-        override fun regionOf(account: ProviderAccount) = regions.first()
+        override fun regionOf(account: ProviderAccount) =
+            regions.firstOrNull { account.uid.endsWith("-$it") } ?: regions.first()
+
         override fun regions() = regions
+    }
+
+    /**
+     * 带固定模型目录的桩：启发式跨供应商回退靠目录里的同名模型匹配，
+     * 用空目录的桩永远匹配不到，等于测不到候选产生。
+     */
+    private inner class CatalogProvider(
+        override val id: String,
+        private val modelIds: List<String>,
+    ) : Provider {
+        override val displayName = id
+        override val authKind = AuthKind.NONE
+        override fun listModels(account: ProviderAccount?) =
+            ProviderModelCatalogView(modelIds.map { dev.aigw.core.provider.ProviderModel(it, it) }, false, "")
+        override fun resolveModel(requested: String) = requested
+        override fun classify(status: Int, body: String) = UpstreamError(ErrorKind.CLIENT, body)
+        override fun openChat(account: ProviderAccount, openAiBody: String): ChatCall = throw UnsupportedOperationException()
     }
 
     @Test
@@ -62,7 +81,6 @@ class SmartRoutingTest {
         // 内置 CodeBuddyProvider 已实现 RegionAwareSupport；这里用替身覆盖同名 id，
         // 因为模型目录只在登录后拉取，无内置快照后单测里拿不到真实目录。
         engine.registry.register(RegionStubProvider("codebuddy", listOf("cn", "global")))
-
         // 路由解析支持 codebuddy-cn 与 codebuddy-global，且带出正确的 region 约束
         val routeCn = engine.resolveRoute("codebuddy-cn/deepseek-v3")
         assertEquals("codebuddy", routeCn?.providerId)
@@ -78,7 +96,9 @@ class SmartRoutingTest {
         assertEquals("cn", engine.resolveRoute("workbuddy-cn/deepseek-v3")?.region)
         assertEquals("global", engine.resolveRoute("workbuddy-global/deepseek-v3")?.region)
 
-        // 模型列表里针对区域型供应商拆出两个独立前缀组
+        // 模型列表里针对区域型供应商拆出两个独立前缀组（每个区域各用本区域账号拉一次）
+        engine.pool.upsert(ProviderAccount("codebuddy", "u-cn", "国内号", "{}"))
+        engine.pool.upsert(ProviderAccount("codebuddy", "u-global", "国际号", "{}"))
         val models = engine.models().filter { it.providerId == "codebuddy" }
         val prefixes = models.map { it.routePrefix }.distinct()
         assertTrue(prefixes.contains("codebuddy-cn"), "应包含国内组前缀：$prefixes")
@@ -121,5 +141,25 @@ class SmartRoutingTest {
         val route = engine.resolveRoute("auto")
         assertNotNull(route)
         assertEquals("antigravity", route.providerId)
+    }
+
+    @Test
+    fun `关闭故障转移后不再产生跨供应商候选`() {
+        val engine = GatewayEngine(InMemoryKeyValueStore())
+        // 两家都提供同名模型且都有账号 —— 满足启发式回退产生候选的条件
+        engine.registry.register(CatalogProvider("trae", listOf("gemini-2.5-flash")))
+        engine.registry.register(CatalogProvider("antigravity", listOf("gemini-2.5-flash")))
+        engine.pool.upsert(ProviderAccount("trae", "t1", "trae 账号", "{}"))
+        engine.pool.upsert(ProviderAccount("antigravity", "a1", "反重力账号", "{}"))
+
+        val candidates = engine.resolveCandidateRoutes("trae/gemini-2.5-flash")
+        assertTrue(candidates.size > 1, "开关开启时应能产生跨供应商候选：$candidates")
+
+        // 关闭后只允许首选路由：此前 enabled 只在「显式路由表」分支生效，
+        // 启发式回退照跑，表现为「界面关了故障转移、实际仍在自动换供应商」
+        engine.updateFailoverSettings(engine.failoverSettings().copy(enabled = false))
+        val disabled = engine.resolveCandidateRoutes("trae/gemini-2.5-flash")
+        assertEquals(1, disabled.size, "关闭后不得有跨供应商候选：$disabled")
+        assertEquals("trae", disabled.single().providerId)
     }
 }

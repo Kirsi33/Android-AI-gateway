@@ -1,7 +1,5 @@
 package dev.aigw.app.ui.providers.codebuddy
 
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -18,8 +16,7 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -35,9 +32,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.layout.padding
 import com.google.gson.JsonObject
-import dev.aigw.app.ui.AccountPriorityArrows
+import dev.aigw.app.ui.AccountCardShell
 import dev.aigw.app.ui.ChoiceChip
 import dev.aigw.app.ui.OutlineActionButton
+import dev.aigw.app.ui.PagedAccountList
+import dev.aigw.app.ui.RegionSelector
 import dev.aigw.app.ui.SectionCard
 import dev.aigw.app.ui.SectionLabel
 import dev.aigw.app.ui.bouncyClick
@@ -76,6 +75,8 @@ object CodeBuddyUi : ProviderUi {
         var global by rememberSaveable {
             mutableStateOf(actions.providerOptionOf(id, "region", CodeBuddyProvider.REGION_CN) == CodeBuddyProvider.REGION_GLOBAL)
         }
+        var expanded by remember { mutableStateOf(false) }
+        var raw by remember { mutableStateOf("") }
         val region = if (global) CodeBuddyProvider.REGION_GLOBAL else CodeBuddyProvider.REGION_CN
         SectionCard(enterIndex = 0) {
             Row(
@@ -114,7 +115,29 @@ object CodeBuddyUi : ProviderUi {
             ) {
                 Text(if (global) "打开国际版登录页" else "打开国内版登录页")
             }
-            OutlineActionButton("重新检查授权状态") { actions.onCheckDeviceAuth(id, region) }
+            OutlineActionButton(
+                text = if (expanded) "收起粘贴导入" else "粘贴凭证 JSON 导入",
+            ) { expanded = !expanded }
+            if (expanded) {
+                OutlinedTextField(
+                    value = raw,
+                    onValueChange = { raw = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    minLines = 3,
+                    maxLines = 8,
+                    label = { Text("凭证 JSON") },
+                )
+                Button(
+                    onClick = {
+                        actions.onImport(id, raw.trim())
+                        raw = ""
+                    },
+                    enabled = raw.isNotBlank(),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("导入")
+                }
+            }
         }
         if (accounts.isNotEmpty()) {
             AccountRegionSection(global, accounts, actions)
@@ -139,7 +162,7 @@ object CodeBuddyUi : ProviderUi {
             }
             SectionCard(enterIndex = 1) {
                 SectionLabel("账号 · ${scoped.size} 个")
-                for (account in scoped) {
+                PagedAccountList(scoped, keyOf = { it.uid }) { _, account ->
                     AccountBlock(account, actions)
                 }
                 OutlineActionButton("刷新额度") { actions.onRefreshCredits(id, null) }
@@ -149,60 +172,40 @@ object CodeBuddyUi : ProviderUi {
 
     @Composable
     private fun AccountBlock(status: AccountStatus, actions: ProviderUiActions) {
-        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
+        AccountCardShell(
+            account = status,
+            providerId = id,
+            actions = actions,
+            extra = {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text("额度", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
                     Text(
-                        text = status.nickname.ifEmpty { status.uid },
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.SemiBold,
+                        text = if (status.creditsKnown) status.credits.toString() else "—",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.primary,
                     )
+                }
+                if (status.detail.isNotEmpty()) {
                     Text(
-                        text = accountStatusText(status),
+                        text = status.detail,
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-                AccountPriorityArrows(
-                    priority = status.priority,
-                    onMove = { up -> actions.onMoveAccountPriority(id, status.uid, up) },
-                )
-                Switch(
-                    checked = status.enabled,
-                    onCheckedChange = { actions.onToggleAccount(id, status.uid, it) },
-                )
-            }
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Text("额度", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
-                Text(
-                    text = if (status.creditsKnown) status.credits.toString() else "—",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.primary,
-                )
-            }
-            if (status.detail.isNotEmpty()) {
-                Text(
-                    text = status.detail,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            // 国际版（workbuddy.ai）没有签到制度与成长中心，只给国内账号渲染这两个入口
-            if (actions.regionOf(id, status.uid) != CodeBuddyProvider.REGION_GLOBAL) {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    ChoiceChip("签到", false) {
-                        actions.onAction(id, status.uid, ACTION_CHECKIN, JsonObject())
+                // 国际版（workbuddy.ai）没有签到制度与成长中心，只给国内账号渲染这两个入口
+                if (actions.regionOf(id, status.uid) != CodeBuddyProvider.REGION_GLOBAL) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        ChoiceChip("签到", false) {
+                            actions.onAction(id, status.uid, ACTION_CHECKIN, JsonObject())
+                        }
+                        ChoiceChip("成长中心", false) {
+                            actions.onAction(id, status.uid, ACTION_TASKS, JsonObject())
+                        }
                     }
-                    ChoiceChip("成长中心", false) {
-                        actions.onAction(id, status.uid, ACTION_TASKS, JsonObject())
-                    }
+                    TaskListSection(status, actions)
                 }
-                TaskListSection(status, actions)
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                ChoiceChip("删除账号", false) { actions.onRemoveAccount(id, status.uid) }
-            }
-        }
+            },
+        )
     }
 
     /**
@@ -320,55 +323,5 @@ object CodeBuddyUi : ProviderUi {
         task.completed -> MaterialTheme.colorScheme.tertiary
         task.locked -> MaterialTheme.colorScheme.outline
         else -> MaterialTheme.colorScheme.error
-    }
-
-    /**
-     * 国内/国外分段滑块：长条一分为二，蓝色背景块在两半之间滑动指示选中侧。
-     */
-    /**
-     * 优雅的微胶囊分段滑块（MiniMax 同款，高弹性物理动效）。
-     */
-    @Composable
-    private fun RegionSelector(
-        isGlobal: Boolean,
-        onSelectGlobal: (Boolean) -> Unit,
-    ) {
-        Surface(
-            shape = CircleShape,
-            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
-            modifier = Modifier.clip(CircleShape),
-        ) {
-            Row(
-                modifier = Modifier.padding(2.dp),
-                horizontalArrangement = Arrangement.spacedBy(2.dp),
-            ) {
-                val items = listOf("国内", "国外")
-                items.forEachIndexed { index, label ->
-                    val selected = (index == 1) == isGlobal
-                    val animProgress by animateFloatAsState(
-                        targetValue = if (selected) 1f else 0f,
-                        animationSpec = spring(dampingRatio = 0.72f, stiffness = 600f),
-                        label = "regionIndicator$index",
-                    )
-                    Box(
-                        modifier = Modifier
-                            .clip(CircleShape)
-                            .background(
-                                MaterialTheme.colorScheme.primary.copy(alpha = animProgress),
-                            )
-                            .clickable { onSelectGlobal(index == 1) }
-                            .padding(horizontal = 12.dp, vertical = 4.dp),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Text(
-                            text = label,
-                            style = MaterialTheme.typography.labelMedium,
-                            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
-                            color = if (selected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                }
-            }
-        }
     }
 }

@@ -49,6 +49,15 @@ class TraePayloadTest {
     }
 
     @Test
+    fun `developer 角色改叫 system`() {
+        // SOLO 上游只认 system/assistant/user/tool；新版 OpenAI 客户端会发 developer
+        val out = prepare("""{"messages":[{"role":"developer","content":"d"},{"role":"user","content":"u"}]}""")
+        val messages = out.getAsJsonArray("messages")
+        assertEquals("system", messages[0].asJsonObject.get("role").asString)
+        assertEquals("user", messages[1].asJsonObject.get("role").asString)
+    }
+
+    @Test
     fun `tools 的 parameters 对象被序列化为字符串`() {
         val raw = """
             {"messages":[],"tools":[{"type":"function","function":{"name":"f","parameters":{"type":"object","properties":{}}}}]}
@@ -105,6 +114,51 @@ class TraePayloadTest {
     fun `非法 JSON 原样返回`() {
         assertEquals("not json", TraePayload.prepare("not json"))
     }
+
+    @Test
+    fun `工具 schema 的同文档 dollar-ref 被内联展开`() {
+        val raw = """
+            {"messages":[],"tools":[{"type":"function","function":{"name":"f","parameters":{
+              "type":"object","properties":{"a":{"${'$'}ref":"#/${'$'}defs/Thing"}},
+              "${'$'}defs":{"Thing":{"type":"object","properties":{"x":{"type":"string"}}}}}}}]}
+        """.trimIndent()
+        val schema = parametersOf(prepare(raw))
+        val text = schema.toString()
+        assertFalse(text.contains("\$ref"), "不得再出现 ref：$text")
+        assertFalse(text.contains("\$defs"), "不得再出现 defs：$text")
+        // 被引用定义的内容已内联到属性 a
+        assertTrue(text.contains("\"x\""), "被引用定义应已内联：$text")
+    }
+
+    @Test
+    fun `循环 dollar-ref 不会无限展开`() {
+        // A -> B -> A；必须能正常返回，不能死循环/栈溢出
+        val raw = """
+            {"messages":[],"tools":[{"type":"function","function":{"name":"f","parameters":{
+              "type":"object","properties":{"a":{"${'$'}ref":"#/definitions/A"}},
+              "definitions":{
+                "A":{"type":"object","properties":{"b":{"${'$'}ref":"#/definitions/B"}}},
+                "B":{"type":"object","properties":{"a":{"${'$'}ref":"#/definitions/A"}}}}}}}]}
+        """.trimIndent()
+        val schema = parametersOf(prepare(raw))
+        assertTrue(schema.toString().isNotEmpty())
+    }
+
+    @Test
+    fun `解析不到的 dollar-ref 原样保留`() {
+        val raw = """
+            {"messages":[],"tools":[{"type":"function","function":{"name":"f","parameters":{
+              "type":"object","properties":{"a":{"${'$'}ref":"https://example.com/schema.json"}}}}}]}
+        """.trimIndent()
+        val schema = parametersOf(prepare(raw))
+        assertTrue(schema.toString().contains("example.com"), "外部引用应原样保留")
+    }
+
+    private fun parametersOf(prepared: JsonObject): JsonObject {
+        val fn = prepared.getAsJsonArray("tools")[0].asJsonObject.getAsJsonObject("function")
+        // parameters 已被序列化为字符串
+        return JsonParser.parseString(fn.get("parameters").asString).asJsonObject
+    }
 }
 
 class TraeSseParserTest {
@@ -156,7 +210,7 @@ class TraeSseParserTest {
         val failure = events[0] as SoloEvent.Failure
         assertEquals(1005L, failure.code)
         assertEquals("plan", failure.message)
-        assertEquals(TraeErrorKind.PLAN_LIMIT, SoloStreamError(failure.code, failure.message).kind)
+        assertEquals(TraeErrorKind.MODEL_LIMIT, SoloStreamError(failure.code, failure.message).kind)
     }
 
     @Test
@@ -208,7 +262,7 @@ class OpenAiSseTranslatorTest {
 
     @Test
     fun `流内错误输出 OpenAI 标准错误帧`() {
-        // 额度耗尽（code 1005）曾被转成私有格式（event: error + 字符串 body），
+        // 额度/权益不足（code 1005）曾被转成私有格式（event: error + 字符串 body），
         // 网关的 parseChunk 识别不了，客户端看到的是「正常结束」——错误被静默吞掉
         val translator = OpenAiSseTranslator("id1", "m")
         val chunks = translator.translate(SoloEvent.Failure(1005, "额度已耗尽"))
@@ -219,7 +273,7 @@ class OpenAiSseTranslatorTest {
         val error = obj.getAsJsonObject("error")
         assertEquals(1005L, error.get("code").asLong)
         assertEquals("额度已耗尽", error.get("message").asString)
-        assertEquals("QUOTA", error.get("type").asString, "PLAN_LIMIT 映射到统一错误分类 QUOTA")
+        assertEquals("MODEL_LIMIT", error.get("type").asString, "1005 映射到统一错误分类 MODEL_LIMIT")
         assertEquals("data: [DONE]\n\n", chunks[1])
     }
 
@@ -291,7 +345,7 @@ class OpenAiAggregatorTest {
         val aggregator = OpenAiAggregator("id1", "m")
         aggregator.accept(SoloEvent.Failure(1005, "plan"))
         assertNotNull(aggregator.failure)
-        assertEquals(TraeErrorKind.PLAN_LIMIT, aggregator.failure!!.kind)
+        assertEquals(TraeErrorKind.MODEL_LIMIT, aggregator.failure!!.kind)
     }
 }
 
@@ -303,10 +357,12 @@ class TraeErrorsTest {
         assertEquals(TraeErrorKind.NOT_FOUND, TraeErrors.fromStatus(404, ""))
         assertEquals(TraeErrorKind.SOFT_RATE, TraeErrors.fromStatus(429, ""))
         assertEquals(TraeErrorKind.SERVER, TraeErrors.fromStatus(503, ""))
-        assertEquals(TraeErrorKind.PLAN_LIMIT, TraeErrors.fromStatus(400, """{"code":1005}"""))
+        assertEquals(TraeErrorKind.MODEL_LIMIT, TraeErrors.fromStatus(400, """{"code":1005}"""))
         assertEquals(TraeErrorKind.PLAN_LIMIT, TraeErrors.fromStatus(400, """{"code":4008}"""))
         assertEquals(TraeErrorKind.SOFT_RATE, TraeErrors.fromStatus(400, """{"code":4011}"""))
         assertEquals(TraeErrorKind.SESSION_DEAD, TraeErrors.fromStatus(400, """{"code":1001}"""))
+        // 国际版失效码
+        assertEquals(TraeErrorKind.SESSION_DEAD, TraeErrors.fromStatus(400, """{"code":20101}"""))
         assertEquals(TraeErrorKind.CLIENT, TraeErrors.fromStatus(400, """{"code":4001}"""))
     }
 
@@ -458,10 +514,25 @@ class TraeModelCatalogTest {
     }
 
     @Test
+    fun `上下文窗口取上游 max_input_tokens 缺失时不编造`() {
+        // 131072 曾是本地写死的固定值，而上游明明给了 max_input_tokens，必须读上游；
+        // 上游没给时只能记 0（界面据此不展示），不能拿一个常量冒充。
+        val raw = """
+            {"config_info_list":[
+              {"config_name":"glm-5.2","max_input_tokens":200000,"display_config":{"display_name":"GLM 5.2"}},
+              {"config_name":"kimi-k3","display_config":{"display_name":"Kimi K3"}}
+            ]}
+        """.trimIndent()
+        val models = TraePayloadModels.parse(raw)
+        assertEquals(200_000L, models[0].contextWindow, "应取上游 max_input_tokens")
+        assertEquals(0L, models[1].contextWindow, "上游没给上下文窗口时必须为 0，不能编造")
+    }
+
+    @Test
     fun `没有账号时不列模型`() {
         // 模型目录只在登录后向官方接口拉取：无账号时既不给内置快照，也不算失败
         // （否则用户会把内置快照当成可用模型，一发请求就缺凭证）。
-        val catalog = TraeModelCatalog(TraeChatClient(TraeVersion()))
+        val catalog = TraeModelCatalog(TraeChatClient(TraeVersion(), TraeRegion.CN.agentHost))
         val models = catalog.models(null)
         assertTrue(models.isEmpty(), "无账号不该列出模型，实际=${models.map { it.id }}")
         assertFalse(catalog.fromFallback)

@@ -25,17 +25,25 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import dev.aigw.app.ui.theme.LocalAppColors
 import dev.aigw.app.ui.theme.formatHex
 import dev.aigw.core.usage.StorageAudit
+import dev.aigw.core.usage.UsageStats
+import java.util.Locale
 
 @Composable
 fun MeScreen(state: AppUiState, viewModel: AppViewModel, open: (SubPage) -> Unit) {
@@ -108,29 +116,35 @@ fun MeScreen(state: AppUiState, viewModel: AppViewModel, open: (SubPage) -> Unit
             ) { open(SubPage.SecurityProtection) }
             EditorialRow(
                 "02.3",
+                "并发与容错 · RESILIENCE",
+                "并发闸门、重试退避与熔断器",
+                concurrencySummary(state.failover),
+            ) { open(SubPage.Resilience) }
+            EditorialRow(
+                "02.4",
                 "额度中心 · CREDITS",
                 "按供应商查看额度包明细",
-                if (state.pool.creditsKnown > 0) formatNumber(state.pool.totalCredits) else "",
+                if (state.pool.creditsKnown > 0) formatCount(state.pool.totalCredits) else "",
             ) { open(SubPage.CreditCenter) }
-            EditorialRow("02.4", "用量统计 · TELEMETRY", "请求数、token 与成功率", formatHumanTokens(state.today.totalTokens)) {
+            EditorialRow("02.5", "用量统计 · TELEMETRY", "请求数、token 与成功率", formatTokens(state.today.totalTokens)) {
                 open(SubPage.Usage)
             }
             EditorialRow(
-                "02.5",
+                "02.6",
                 "代理设置 · NETWORK PROXY",
                 "境外供应商需要走代理",
                 if (state.proxy.usable) "已启用" else "未启用",
             ) { open(SubPage.Proxy) }
             EditorialRow(
-                "02.6",
+                "02.7",
                 "保活与权限 · BACKGROUND",
                 "通知、电池优化与后台限制",
                 if (state.keepAlive?.allGood == true) "就绪" else "待配置",
             ) { open(SubPage.KeepAlive) }
             EditorialRow(
-                "02.7",
+                "02.8",
                 "数据管理 · STORAGE AUDIT",
-                "存储占用、清理与截断",
+                "存储占用、保留期与截断",
                 StorageAudit.formatSize(state.storage?.totalChars ?: 0L),
             ) {
                 viewModel.refreshStorage()
@@ -138,29 +152,7 @@ fun MeScreen(state: AppUiState, viewModel: AppViewModel, open: (SubPage) -> Unit
             }
         }
 
-        EditorialGroupHeader("03", "排查诊断 · DIAGNOSTICS")
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween,
-        ) {
-            Column(Modifier.weight(1f)) {
-                Text("详细日志", style = MaterialTheme.typography.titleSmall)
-                Text(
-                    "记录每次调用的请求、转发、发送与返回原文，用于排查 503 等问题；关闭后立即生效",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            Switch(
-                checked = state.settings.verboseLogging,
-                onCheckedChange = {
-                    viewModel.updateSettings(state.settings.copy(verboseLogging = it))
-                },
-            )
-        }
-
-        EditorialGroupHeader("04", "架构关于 · ABOUT THE ENGINE")
+        EditorialGroupHeader("03", "架构关于 · ABOUT THE ENGINE")
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(
                 text = "ai-gateway · 本地 OpenAI 兼容网关",
@@ -237,7 +229,14 @@ private fun EditorialRow(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                Text(title, style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurface)
+                // 标题固定单行：「中文 · ENGLISH」被挤成两行会破坏栅格（英文标签跑到第二行）
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
                 Text(
                     text = subtitle,
                     style = MaterialTheme.typography.bodySmall,
@@ -345,8 +344,8 @@ private fun AboutDialog(onDismiss: () -> Unit) {
 
 @Composable
 fun UsageScreen(state: AppUiState, viewModel: AppViewModel, onBack: () -> Unit) {
-    // 存储占用只在数据管理页刷过，本页「存储」卡片读的是同一份 state，
-    // 不主动刷新会恒为 0；进入本页时算一次（代价高，不放进 refresh）。
+    // 存储占用不挂在全局 refresh 里（要扫全量存储键并解密，代价高），
+    // 本页「存储」卡片读的是 state 里的同一份，不主动刷新会恒为 0，故进入本页时算一次。
     LaunchedEffect(Unit) { viewModel.refreshStorage() }
     PageScaffold(
         title = "用量统计",
@@ -362,54 +361,27 @@ fun UsageScreen(state: AppUiState, viewModel: AppViewModel, onBack: () -> Unit) 
     ) {
         SectionCard(enterIndex = 3) {
             SectionLabel("今日")
+            CacheHitGauge(state.today)
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-                StatCell(formatNumber(state.today.requests), "请求")
-                StatCell(formatNumber(state.today.success), "成功")
-                StatCell(formatNumber(state.today.failed), "失败")
+                StatCell(formatCount(state.today.requests), "请求")
+                StatCell(formatCount(state.today.success), "成功")
+                StatCell(formatCount(state.today.failed), "失败")
+                StatCell(formatCount(state.today.aborted), "中断")
             }
-            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
-            TokenUsageRow("输入 Tokens", state.today.promptTokens, MaterialTheme.colorScheme.primary)
-            TokenUsageRow("输出 Tokens", state.today.completionTokens, MaterialTheme.colorScheme.tertiary)
-            TokenUsageRow("总计 Tokens", state.today.totalTokens, MaterialTheme.colorScheme.secondary)
         }
 
         SectionCard(enterIndex = 4) {
             SectionLabel("累计")
+            CacheHitGauge(state.total)
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-                StatCell(formatNumber(state.total.requests), "请求")
-                StatCell(formatNumber(state.total.success), "成功")
-                StatCell(formatNumber(state.total.failed), "失败")
+                StatCell(formatCount(state.total.requests), "请求")
+                StatCell(formatCount(state.total.success), "成功")
+                StatCell(formatCount(state.total.failed), "失败")
+                StatCell(formatCount(state.total.aborted), "中断")
             }
-            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
-            TokenUsageRow("输入 Tokens", state.total.promptTokens, MaterialTheme.colorScheme.primary)
-            TokenUsageRow("输出 Tokens", state.total.completionTokens, MaterialTheme.colorScheme.tertiary)
-            TokenUsageRow("总计 Tokens", state.total.totalTokens, MaterialTheme.colorScheme.secondary)
         }
 
         SectionCard(enterIndex = 5) {
-            SectionLabel("最近调用")
-            if (state.calls.isEmpty()) {
-                EmptyHint("还没有调用记录", "客户端发起请求后，这里会显示模型、账号与耗时。")
-            } else {
-                for (record in state.calls.take(20)) {
-                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                        Text(
-                            text = "${record.providerId}/${record.model}",
-                            style = MaterialTheme.typography.titleSmall,
-                            fontWeight = FontWeight.SemiBold,
-                        )
-                        Text(
-                            text = "${record.status} · ${record.durationMillis}ms · " +
-                                "tokens ${record.totalTokens} · ${record.accountNickname.ifEmpty { record.accountUid }}",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                }
-            }
-        }
-
-        SectionCard(enterIndex = 6) {
             SectionLabel("存储")
             Text(
                 text = "调用记录 ${state.storedCalls} 条，占用约 ${StorageAudit.formatSize(state.storage?.totalChars ?: 0L)}",
@@ -420,66 +392,127 @@ fun UsageScreen(state: AppUiState, viewModel: AppViewModel, onBack: () -> Unit) 
     }
 }
 
-
-/** 格式化数字：带千分位逗号 */
-private fun formatNumber(n: Long): String = String.format(java.util.Locale.US, "%,d", n)
-
-/** 人类友好的数字紧凑缩写（如 73.25M / 276.6K） */
-private fun formatHumanTokens(tokens: Long): String = when {
-    tokens >= 1_000_000_000L -> String.format(java.util.Locale.US, "%.2fB", tokens / 1_000_000_000.0)
-    tokens >= 1_000_000L -> String.format(java.util.Locale.US, "%.2fM", tokens / 1_000_000.0)
-    tokens >= 1_000L -> String.format(java.util.Locale.US, "%.1fK", tokens / 1_000.0)
-    else -> tokens.toString()
+/**
+ * 输入 token 构成环：命中缓存 / 未命中 / 输出 三段按比例分色填充，中心显示命中率。
+ *
+ * 环形绘制借鉴 open-claude-ui（MIT, Caho1）的 Token 仪表做法：
+ * `strokeDasharray = 2πr`、`strokeDashoffset = circumference × (1 − ratio)`，
+ * 各段用 offset 依次错开。没有输入 token 时只显示「—」，不画环（不编造 0%）。
+ */
+@Composable
+private fun CacheHitGauge(stats: UsageStats) {
+    val hitColor = MaterialTheme.colorScheme.tertiary
+    val missColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.55f)
+    val outputColor = MaterialTheme.colorScheme.secondary.copy(alpha = 0.75f)
+    val trackColor = MaterialTheme.colorScheme.surfaceVariant
+    val hit = stats.cachedTokens.coerceAtMost(stats.promptTokens)
+    val miss = (stats.promptTokens - hit).coerceAtLeast(0)
+    val output = stats.completionTokens
+    val total = hit + miss + output
+    val percent = stats.cacheHitPercent
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(16.dp),
+    ) {
+        Box(contentAlignment = Alignment.Center) {
+            Canvas(Modifier.size(72.dp)) {
+                val stroke = 7.dp.toPx()
+                val inset = stroke / 2
+                val arcSize = Size(size.width - stroke, size.height - stroke)
+                val topLeft = Offset(inset, inset)
+                // 轨道
+                drawArc(
+                    color = trackColor,
+                    startAngle = -90f,
+                    sweepAngle = 360f,
+                    useCenter = false,
+                    topLeft = topLeft,
+                    size = arcSize,
+                    style = Stroke(width = stroke, cap = StrokeCap.Round),
+                )
+                if (total > 0L) {
+                    var start = -90f
+                    for ((value, color) in listOf(
+                        hit to hitColor,
+                        miss to missColor,
+                        output to outputColor,
+                    )) {
+                        if (value <= 0L) continue
+                        val sweep = 360f * value / total.toFloat()
+                        // 段间留 2° 缝隙，避免同色相邻时粘成一团
+                        val gap = if (sweep > 6f) 2f else 0f
+                        drawArc(
+                            color = color,
+                            startAngle = start + gap / 2,
+                            sweepAngle = (sweep - gap).coerceAtLeast(0f),
+                            useCenter = false,
+                            topLeft = topLeft,
+                            size = arcSize,
+                            style = Stroke(width = stroke, cap = StrokeCap.Round),
+                        )
+                        start += sweep
+                    }
+                }
+            }
+            Text(
+                text = if (percent != null) "${String.format(Locale.US, "%.0f", percent)}%" else "—",
+                style = MaterialTheme.typography.titleMedium.copy(fontFamily = FontFamily.Monospace),
+                color = MaterialTheme.colorScheme.onSurface,
+                fontWeight = FontWeight.SemiBold,
+            )
+        }
+        // 没有任何 token 数据时只留一个空环 + 「—」：图例全为 0 没有信息量，还会与上方的请求数重复
+        if (total > 0L) {
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp), modifier = Modifier.weight(1f)) {
+                GaugeLegend("命中缓存", hit, hitColor)
+                GaugeLegend("未命中", miss, missColor)
+                GaugeLegend("输出", output, outputColor)
+            }
+        } else {
+            Text(
+                text = "还没有 token 用量",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.weight(1f),
+            )
+        }
+    }
 }
 
-/** 方案 C：用量统计单项明细行 */
 @Composable
-private fun TokenUsageRow(
-    label: String,
-    tokens: Long,
-    indicatorColor: androidx.compose.ui.graphics.Color,
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 4.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.SpaceBetween,
-    ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            Box(
-                modifier = Modifier
-                    .size(8.dp)
-                    .clip(CircleShape)
-                    .background(indicatorColor),
-            )
-            Text(
-                text = label,
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-        ) {
-            Text(
-                text = formatNumber(tokens),
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold,
-                color = MaterialTheme.colorScheme.onSurface,
-            )
-            if (tokens >= 1_000L) {
-                Text(
-                    text = formatHumanTokens(tokens),
-                    style = MaterialTheme.typography.labelSmall,
-                    fontWeight = FontWeight.Medium,
-                    color = MaterialTheme.colorScheme.primary,
-                )
-            }
-        }
+private fun GaugeLegend(label: String, tokens: Long, color: androidx.compose.ui.graphics.Color) {
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        Box(
+            Modifier
+                .size(7.dp)
+                .clip(androidx.compose.foundation.shape.CircleShape)
+                .background(color),
+        )
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.weight(1f),
+        )
+        Text(
+            text = formatTokens(tokens),
+            style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
+            color = MaterialTheme.colorScheme.onSurface,
+        )
+    }
+}
+
+/**
+ * 「并发与容错」入口的右侧元信息。
+ *
+ * 写成紧凑形式（不带空格）：这一行的标题是全页最长（「并发与容错 · RESILIENCE」），
+ * 元信息再用「并发 单账号 1 / 全局 0」这种长文案会把英文标签挤到第二行。
+ */
+private fun concurrencySummary(failover: dev.aigw.core.failover.ModelFailoverSettings): String {
+    val concurrency = failover.concurrency
+    return when {
+        concurrency.maxPerAccount == 0 && concurrency.maxGlobal == 0 -> "并发不限"
+        else -> "单账号${concurrency.maxPerAccount}/全局${concurrency.maxGlobal}"
     }
 }

@@ -21,9 +21,23 @@ data class KeepAliveStatus(
     val backgroundRestricted: Boolean,
     /** 是否开启了流量节省模式（可能影响后台联网）。 */
     val dataSaverRestricted: Boolean,
+    /** 是否已允许「显示在其他应用上层」（可选的悬浮窗保活需要）。 */
+    val overlayGranted: Boolean,
 ) {
     val allGood: Boolean
         get() = notificationsGranted && batteryUnrestricted && !backgroundRestricted && !dataSaverRestricted
+}
+
+/** 可选的悬浮窗保活开关（加密存储，服务与界面共读）。 */
+object KeepAlivePrefs {
+    private const val KEY_OVERLAY = "keepalive/overlay"
+
+    fun overlayEnabled(store: dev.aigw.core.store.KeyValueStore): Boolean =
+        store.read(KEY_OVERLAY) == "1"
+
+    fun setOverlayEnabled(store: dev.aigw.core.store.KeyValueStore, enabled: Boolean) {
+        store.write(KEY_OVERLAY, if (enabled) "1" else "0")
+    }
 }
 
 /** 保活相关的状态检测与系统设置跳转。 */
@@ -44,6 +58,7 @@ object KeepAlive {
             },
             dataSaverRestricted = connectivity?.restrictBackgroundStatus ==
                 ConnectivityManager.RESTRICT_BACKGROUND_STATUS_ENABLED,
+            overlayGranted = Settings.canDrawOverlays(context),
         )
     }
 

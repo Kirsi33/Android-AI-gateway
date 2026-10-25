@@ -1,6 +1,9 @@
 package dev.aigw.core.provider.codebuddy
 
 import com.google.gson.JsonParser
+import dev.aigw.core.util.firstLong
+import dev.aigw.core.util.firstString
+import dev.aigw.core.util.jwtClaim
 import kotlin.test.Test
 import kotlin.test.assertEquals
 

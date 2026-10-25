@@ -131,7 +131,6 @@ object ModelRates {
         put("doubao-seed-code", SEED_CODE)
         put("doubao-seed-2.0-code", SEED_CODE)
 
-
         // ---- GLM 系 ----
         put("glm-5.3", GLM_5X)
         put("glm-5.2", GLM_5X)

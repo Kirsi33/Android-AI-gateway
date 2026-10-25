@@ -109,6 +109,10 @@ fun HomeScreen(
 
         TelemetryGrid(state, Modifier.staggeredAppear(1))
 
+        // 批量动作进行中/结束：首页也要看得到进度与失败原因（签到按钮就在本页）
+        BatchProgressHost(state.batchProgress)
+        BatchOutcomeHost(state.batchOutcome) { viewModel.dismissBatchOutcome() }
+
         TrendCard(state)
 
         SectionCard(modifier = Modifier.staggeredAppear(3)) {
@@ -324,11 +328,13 @@ private fun AddressRow(label: String, value: String, onCopy: (() -> Unit)?) {
 /** 消耗趋势卡：近 14 天输入/输出 tokens 折线。 */
 @Composable
 private fun TrendCard(state: AppUiState) {
-    val trend = state.daily.takeLast(TREND_DAYS)
+    val trend = remember(state.daily) { state.daily.takeLast(TREND_DAYS) }
+    val drawable = remember(trend) {
+        trend.size >= 2 && trend.any { it.promptTokens > 0 || it.completionTokens > 0 }
+    }
     val gold = LocalAppColors.current.goldStart
     SectionCard(modifier = Modifier.staggeredAppear(2)) {
         SectionHeader("消耗趋势 · TREND", action = if (trend.isEmpty()) null else "近 ${trend.size} 天")
-        val drawable = trend.size >= 2 && trend.any { it.promptTokens > 0 || it.completionTokens > 0 }
         if (drawable) {
             TrendChart(trend, startOfDay(System.currentTimeMillis()))
             Row(
@@ -373,8 +379,18 @@ private fun TrendChart(daily: List<UsageStats>, todayStart: Long) {
     val labels = remember(daily, todayStart) {
         List(n) { index -> dayLabel(todayStart - (n - 1 - index) * 86_400_000L) }
     }
+
     // 复用同一支画笔：绘制阶段只改对齐方式，不再每次重绘都新建
     val axisPaint = remember { android.graphics.Paint() }
+    val inFractions = remember(daily, maxValue) {
+        FloatArray(n) { daily[it].promptTokens.toFloat() / maxValue }
+    }
+    val outFractions = remember(daily, maxValue) {
+        FloatArray(n) { daily[it].completionTokens.toFloat() / maxValue }
+    }
+    val xs = remember(n) { FloatArray(n) }
+    val inY = remember(n) { FloatArray(n) }
+    val outY = remember(n) { FloatArray(n) }
     Canvas(Modifier.fillMaxWidth().height(150.dp)) {
         val gutterLeft = 40.dp.toPx()
         val gutterBottom = 22.dp.toPx()
@@ -384,9 +400,11 @@ private fun TrendChart(daily: List<UsageStats>, todayStart: Long) {
         val chartHeight = (size.height - gutterBottom - padTop).coerceAtLeast(1f)
         val originY = padTop + chartHeight
         val stepX = chartWidth / (n - 1)
-        val xs = FloatArray(n) { gutterLeft + it * stepX }
-        val inY = FloatArray(n) { originY - daily[it].promptTokens.toFloat() / maxValue * chartHeight }
-        val outY = FloatArray(n) { originY - daily[it].completionTokens.toFloat() / maxValue * chartHeight }
+        for (i in 0 until n) {
+            xs[i] = gutterLeft + i * stepX
+            inY[i] = originY - inFractions[i] * chartHeight
+            outY[i] = originY - outFractions[i] * chartHeight
+        }
 
         drawLine(gridColor, Offset(gutterLeft, originY), Offset(gutterLeft + chartWidth, originY), strokeWidth = 1f)
         drawSeries(xs, inY, originY, gold)
@@ -658,17 +676,6 @@ private fun AntigravityQuotaSection(state: AppUiState, viewModel: AppViewModel, 
             }
         }
     }
-}
-
-/** 千分位计数。 */
-private fun formatCount(value: Long): String = String.format(Locale.US, "%,d", value)
-
-/** 人类友好缩写：3.82M / 276.6K。 */
-private fun formatTokens(tokens: Long): String = when {
-    tokens >= 1_000_000_000L -> String.format(Locale.US, "%.2fB", tokens / 1_000_000_000.0)
-    tokens >= 1_000_000L -> String.format(Locale.US, "%.2fM", tokens / 1_000_000.0)
-    tokens >= 1_000L -> String.format(Locale.US, "%.1fK", tokens / 1_000.0)
-    else -> tokens.toString()
 }
 
 /** 坐标轴上限缩写：1.2k / 3.4M。 */

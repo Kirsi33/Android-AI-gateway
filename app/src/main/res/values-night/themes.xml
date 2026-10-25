@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  深色模式下的窗口主题。
+
+  App 主体是 Compose，配色由 AiGatewayTheme 自己画；但 CookieLoginActivity 是原生
+  Activity，它拿不到 Compose 的颜色，只能吃 XML 主题。这里给一份夜间版本，
+  让内嵌登录页在系统深色下不再是一整块白底——和 App 内的深色页面至少不会打架。
+-->
+<resources>
+    <color name="page_background">#0E1013</color>
+
+    <style name="Theme.AiGateway" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/page_background</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+    </style>
+</resources>

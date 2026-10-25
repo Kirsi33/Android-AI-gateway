@@ -29,6 +29,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -330,16 +331,19 @@ private fun WheelColumn(
 private fun HueWheel(color: Color, onPick: (Color) -> Unit) {
     val (hue, saturation) = hueSatOf(color)
     val hueColors = remember { List(13) { Color.hsv(it * 30f, 1f, 1f) } }
+    // 手势块只在 key 变化时重启，若不缓存最新 lambda 就会一直用首次组合时的 onPick；
+    // 两个色轮的 onPick 都捕获了对方的当前颜色，冻结后会「拖一端把另一端写回旧值」。
+    val currentOnPick by rememberUpdatedState(onPick)
     Canvas(
         modifier = Modifier
             .size(WheelSize)
             .pointerInput(Unit) {
-                detectTapGestures { offset -> onPick(colorAt(offset, size.width, size.height, density)) }
+                detectTapGestures { offset -> currentOnPick(colorAt(offset, size.width, size.height, density)) }
             }
             .pointerInput(Unit) {
                 detectDragGestures { change, _ ->
                     change.consume()
-                    onPick(colorAt(change.position, size.width, size.height, density))
+                    currentOnPick(colorAt(change.position, size.width, size.height, density))
                 }
             },
     ) {

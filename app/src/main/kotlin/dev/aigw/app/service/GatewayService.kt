@@ -36,6 +36,7 @@ class GatewayService : Service() {
         if (started) {
             engine.requestLog.info("前台服务已拉起，通知已发布")
             acquireLocks()
+            applyOverlay(engine)
             // START_NOT_STICKY：进程被杀后不自重建（自重建是灰色软件检测的典型特征）。
             // 代价：系统回收后网关不会自动恢复，用户需重新打开 App 或点磁贴。
             return START_NOT_STICKY
@@ -46,6 +47,7 @@ class GatewayService : Service() {
     }
 
     override fun onDestroy() {
+        FloatingKeepAlive.hide(this)
         releaseLocks()
         stopForeground(STOP_FOREGROUND_REMOVE)
         super.onDestroy()
@@ -85,6 +87,20 @@ class GatewayService : Service() {
         runCatching { wifiLock?.takeIf { it.isHeld }?.release() }
         wakeLock = null
         wifiLock = null
+    }
+
+    /**
+     * 可选的悬浮窗保活：用户开启时才显示（需要「显示在其他应用上层」权限），
+     * 服务停止时一并移除。未授权时静默跳过，不影响网关运行。
+     */
+    private fun applyOverlay(engine: dev.aigw.core.gateway.GatewayEngine) {
+        if (!dev.aigw.app.data.KeepAlivePrefs.overlayEnabled(engine.store())) return
+        val shown = FloatingKeepAlive.show(this, "网关 ${engine.settings().port}")
+        if (shown) {
+            engine.requestLog.info("悬浮窗保活已开启")
+        } else {
+            engine.requestLog.warn("悬浮窗保活已开启但未获授权（显示在其他应用上层），本次未显示")
+        }
     }
 
     private fun buildNotification(port: Int): Notification {

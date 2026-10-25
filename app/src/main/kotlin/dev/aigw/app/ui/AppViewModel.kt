@@ -13,6 +13,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
+import dev.aigw.app.data.ApkInstaller
 import dev.aigw.app.data.KeepAlive
 import dev.aigw.app.data.KeepAliveStatus
 import dev.aigw.app.gatewayEngine
@@ -22,6 +23,10 @@ import dev.aigw.app.ui.theme.formatHex
 import dev.aigw.app.ui.theme.parseHexColor
 import dev.aigw.app.service.GatewayService
 import dev.aigw.app.service.GatewayTileService
+import dev.aigw.core.gateway.BatchActionResult
+import dev.aigw.core.gateway.BatchProgress
+import dev.aigw.core.gateway.BatchTarget
+import dev.aigw.core.gateway.CreditRefreshResult
 import dev.aigw.core.gateway.CustomProviderConfig
 import dev.aigw.core.gateway.GatewayEngine
 import dev.aigw.core.gateway.GatewaySettings
@@ -42,13 +47,15 @@ import dev.aigw.core.provider.ProviderCapability
 import dev.aigw.core.provider.QuotaPack
 import dev.aigw.core.provider.custom.CustomProvider
 import dev.aigw.core.provider.RoutedModel
-import dev.aigw.core.provider.codebuddy.CodeBuddyProvider
 import dev.aigw.core.provider.trae.TraeRegion
 import dev.aigw.core.provider.trae.TraeProvider
 import dev.aigw.core.store.KeyValueStore
+import dev.aigw.core.update.ApkDownloader
+import dev.aigw.core.update.MirrorSpeedTest
+import dev.aigw.core.update.UpdateRepository
+import dev.aigw.core.update.UpdateSources
 import dev.aigw.core.usage.CallRecord
 import dev.aigw.core.usage.LogLine
-import dev.aigw.core.usage.StorageAudit
 import dev.aigw.core.usage.StorageReport
 import dev.aigw.core.usage.UsageStats
 import kotlinx.coroutines.Dispatchers
@@ -59,8 +66,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.net.HttpURLConnection
-import java.net.URL
+import java.io.File
 
 /** 验证码重发间隔（秒）：上游有频率限制，连点只会被拒。 */
 private const val SMS_RESEND_INTERVAL_MS = 60_000L
@@ -69,13 +75,7 @@ private const val SMS_RESEND_INTERVAL_MS = 60_000L
 private const val GOLD_PERSIST_DEBOUNCE_MS = 300L
 
 /** 项目仓库地址（GitHub）。 */
-private const val PROJECT_URL = "https://github.com/x3284728970/Android-AI-gateway"
-
-/** GitHub 最新 Release 接口（API 地址；网页地址 .../releases/latest 返回 HTML，不能当 JSON 解析）。 */
-private const val RELEASES_API = "https://api.github.com/repos/x3284728970/Android-AI-gateway/releases/latest"
-
-/** GitHub API 要求请求带 User-Agent。 */
-private const val UPDATE_UA = "ai-gateway-android"
+private const val PROJECT_URL = "https://github.com/xibai6668/Android-AI-gateway"
 
 /** 外观偏好：动态取色、明暗模式、页面底色与金色渐变两端。 */
 class AppearanceStore(private val store: KeyValueStore) {
@@ -168,7 +168,31 @@ class UpdateStore(private val store: KeyValueStore) {
 }
 
 /** 检查更新发现的新版本信息。 */
-data class UpdateInfo(val version: String, val url: String, val notes: String)
+data class UpdateInfo(
+    val version: String,
+    /** 发布页地址（浏览器打开用）。 */
+    val url: String,
+    val notes: String,
+    /** APK 直链；为空时只能去发布页手动下载。 */
+    val apkUrl: String? = null,
+    val apkSize: Long = 0L,
+)
+
+/** 应用内更新的下载阶段（界面据此切换「测速中 / 下载中 / 可安装 / 失败」）。 */
+sealed interface UpdateDownload {
+    /** 正在并发测速所有线路。 */
+    data object Probing : UpdateDownload
+    data class Downloading(
+        val downloaded: Long,
+        val total: Long,
+        val bytesPerSecond: Long,
+        val source: String,
+        val threads: Int,
+    ) : UpdateDownload
+    /** 下载完成且已校验可安装。 */
+    data class Ready(val path: String, val source: String) : UpdateDownload
+    data class Failed(val reason: String) : UpdateDownload
+}
 
 sealed interface ModelTestStatus {
     data object Testing : ModelTestStatus
@@ -188,6 +212,28 @@ sealed interface ModelLoadState {
     /** 拉取失败，[reason] 为异常消息或供应商自报的目录错误。 */
     data class Failed(val reason: String) : ModelLoadState
 }
+
+/**
+ * 批量动作进行中的进度（供 UI 显示「已完成 X/N（当前：某账号）」）。
+ */
+@Immutable
+data class BatchProgressUi(val done: Int, val total: Int, val current: String)
+
+/** 批量结果里的单个失败账号条目。 */
+@Immutable
+data class BatchItem(val account: String, val message: String)
+
+/**
+ * 一次批量动作的结构化结果：UI 据此展示「成功 N 个 / 失败 M 个」+ 逐条原因，
+ * 而不是把整批失败拼成一条读不完的字符串。
+ */
+@Immutable
+data class BatchOutcome(
+    val title: String,
+    val succeeded: Int,
+    val failed: Int,
+    val items: List<BatchItem>,
+)
 
 /**
  * 界面状态的唯一快照。
@@ -219,30 +265,16 @@ data class AppUiState(
     /** 模型测速状态，键为 `model.fullId`。 */
     val modelTestLatencies: Map<String, ModelTestStatus> = emptyMap(),
     val calls: List<CallRecord> = emptyList(),
-    /** 存储中的记录条数（含未载入内存的，仅供「数据管理」展示）。 */
+    /** 存储中的记录条数（含未载入内存的）。 */
     val storedCalls: Int = 0,
     /** 已拉取的额度包明细，键为 `providerId/uid`。 */
     val creditPacks: Map<String, List<QuotaPack>> = emptyMap(),
     /** 已拉取的成长任务明细，键为 `providerId/uid`。 */
     val taskLists: Map<String, dev.aigw.core.provider.ProviderTaskListView> = emptyMap(),
+    /** 已拉取的积分流水明细，键为 `providerId/uid`。 */
+    val pointsBills: Map<String, dev.aigw.core.provider.PointsBillListView> = emptyMap(),
     val logs: List<LogLine> = emptyList(),
     val settings: GatewaySettings = GatewaySettings(),
-    /** 模型开放名单镜像：勾选/开关变化时要驱动模型页重组，所以放进 UI 状态。 */
-    val modelExposure: dev.aigw.core.gateway.ModelExposureSettings = dev.aigw.core.gateway.ModelExposureSettings(),
-    /**
-     * 非空表示需要打开内嵌登录页（URL）。
-     *
-     * 优先用 App 内的 WebView 而不是系统浏览器：权限、Cookie 抓取、回调拦截
-     * 都在自己进程里，用户不用在 App 和浏览器之间来回切。
-     * 消费后由 UI 调 [AppViewModel.consumeInAppLogin] 清空。
-     */
-    val inAppLoginUrl: String = "",
-    /** 内嵌登录页的标题（展示用）。 */
-    val inAppLoginTitle: String = "",
-    /** 内嵌登录页需要回读 Cookie 的域名；为空表示只是完成登录、不需要抓 Cookie。 */
-    val inAppLoginCookieHosts: List<String> = emptyList(),
-    /** 内嵌登录完成后要导入凭证的供应商 id；为空表示登录结果由网关自己接（Trae/Antigravity/WorkBuddy）。 */
-    val inAppLoginImportTarget: String = "",
     /** 代理设置。 */
     val proxy: ProxySettings = ProxySettings(),
     val dynamicColor: Boolean = false,
@@ -259,18 +291,38 @@ data class AppUiState(
     val storage: StorageReport? = null,
     /** 安全防护与风控设置。 */
     val security: dev.aigw.core.security.SecuritySettings = dev.aigw.core.security.SecuritySettings(),
+    /** 可选的悬浮窗保活是否开启（需「显示在其他应用上层」权限）。 */
+    val overlayKeepAlive: Boolean = false,
+    /** 模型开放名单：只对外暴露勾选的模型。 */
+    val modelExposure: dev.aigw.core.gateway.ModelExposureSettings = dev.aigw.core.gateway.ModelExposureSettings(),
+    /** 故障转移与并发配置。 */
+    val failover: dev.aigw.core.failover.ModelFailoverSettings = dev.aigw.core.failover.ModelFailoverSettings(),
     /** 出网取证记录列表。 */
     val evidences: List<dev.aigw.core.security.OutboundEvidence> = emptyList(),
     /** 当前生效的脱敏规则词汇数。 */
     val sanitizerRulesCount: Int = 0,
     val busy: String = "",
     val notice: String = "",
+    /** 批量动作进行中的进度；非空时 UI 显示「已完成 X/N（当前：某账号）」。 */
+    val batchProgress: BatchProgressUi? = null,
+    /** 批量动作结束后要展示的结构化结果；非空时弹结果面板，逐条列出失败原因。 */
+    val batchOutcome: BatchOutcome? = null,
     /** 是否正在检查更新。 */
     val updateChecking: Boolean = false,
     /** 检查到的新版本；非空时界面弹更新窗。 */
     val updateInfo: UpdateInfo? = null,
+    /** 应用内更新下载进度；null 表示没有进行中的下载。 */
+    val updateDownload: UpdateDownload? = null,
     /** 是否自动检查更新（启动时每天最多一次）。 */
     val autoCheckUpdate: Boolean = true,
+    /** 待打开的内嵌登录页地址；非空时 UI 拉起 [CookieLoginActivity]。 */
+    val inAppLoginUrl: String = "",
+    /** 内嵌登录页标题。 */
+    val inAppLoginTitle: String = "",
+    /** 需要读取 Cookie 的域名（空表示不限制）。 */
+    val inAppLoginCookieHosts: List<String> = emptyList(),
+    /** 登录成功后要把 Cookie 导入到哪个供应商。 */
+    val inAppLoginImportTarget: String = "",
 ) {
     /** 某个供应商的账号。 */
     fun accountsOf(providerId: String): List<AccountStatus> = accounts.filter { it.providerId == providerId }
@@ -299,6 +351,8 @@ private class Snapshot(
     val evidences: List<dev.aigw.core.security.OutboundEvidence>,
     val sanitizerRulesCount: Int,
     val modelExposure: dev.aigw.core.gateway.ModelExposureSettings,
+    val failover: dev.aigw.core.failover.ModelFailoverSettings,
+    val overlayKeepAlive: Boolean,
 )
 
 class AppViewModel(
@@ -318,7 +372,6 @@ class AppViewModel(
             backgroundOverride = appearance.backgroundHex()?.let { parseHexColor(it) },
             goldStart = parseHexColor(appearance.goldStartHex()) ?: defaultAppColors.goldStart,
             goldEnd = parseHexColor(appearance.goldEndHex()) ?: defaultAppColors.goldEnd,
-            modelExposure = engine.modelExposureSettings(),
         ),
     )
     val state: StateFlow<AppUiState> = _state.asStateFlow()
@@ -329,14 +382,14 @@ class AppViewModel(
     /** 下次可重新发送验证码的时间，按供应商记（界面倒计时会随页面重置，不能只靠界面拦）。 */
     private val smsResendAt = HashMap<String, Long>()
 
-    /** 最近一次设备授权登录的 state，供「重新检查授权状态」手动重试。 */
-    private val deviceStates = HashMap<String, String>()
-
-    /** 最近一次设备授权登录的区域，保证手动重试轮询与登录时打同一个端点。 */
-    private val deviceRegions = HashMap<String, String>()
-
     /** 金色渐变去抖落盘的挂起任务；每次取色取消上一轮，松手后才真正写盘。 */
     private var persistAppearanceJob: Job? = null
+
+    /** 应用内更新的下载任务；取消时置 [cancelRequested] 让分段线程尽快收手。 */
+    private var updateJob: Job? = null
+
+    @Volatile
+    private var cancelRequested = false
 
     /** 账号集合签名：判断账号变化是否真的影响模型目录，避免刷新凭证也重复拉取。 */
     private var lastAccountSignature: String = ""
@@ -404,6 +457,8 @@ class AppViewModel(
                     evidences = engine.sanitizer.evidenceList(),
                     sanitizerRulesCount = engine.sanitizer.currentRulesCount(),
                     modelExposure = engine.modelExposureSettings(),
+                    failover = engine.failoverSettings(),
+                    overlayKeepAlive = dev.aigw.app.data.KeepAlivePrefs.overlayEnabled(engine.store()),
                 )
             }
             _state.value = _state.value.copy(
@@ -427,6 +482,8 @@ class AppViewModel(
                 evidences = snapshot.evidences,
                 sanitizerRulesCount = snapshot.sanitizerRulesCount,
                 modelExposure = snapshot.modelExposure,
+                failover = snapshot.failover,
+                overlayKeepAlive = snapshot.overlayKeepAlive,
             )
         }
     }
@@ -447,7 +504,8 @@ class AppViewModel(
             // 整体 equals 在主线程上是 O(总字符数) 的开销。
             if (calls.size == current.calls.size && logs.size == current.logs.size &&
                 calls.firstOrNull()?.id == current.calls.firstOrNull()?.id &&
-                logs.firstOrNull()?.atMillis == current.logs.firstOrNull()?.atMillis
+                // 用 seq（单调自增）而不是时间戳：同一毫秒内的多条新日志时间戳相同，会漏刷一轮
+                logs.firstOrNull()?.seq == current.logs.firstOrNull()?.seq
             ) {
                 return@launch
             }
@@ -456,7 +514,7 @@ class AppViewModel(
     }
 
     /**
-     * 单独刷新「数据管理」的存储占用。
+     * 单独刷新存储占用（用量统计页展示用）。
      *
      * 刻意不放在 [refresh] 里：它要扫全部加密存储键并遍历缓存目录，代价高，
      * 而记录页每 5 秒就会调一次 refresh。
@@ -470,7 +528,7 @@ class AppViewModel(
         }
     }
 
-    fun refreshModels(silent: Boolean = false) {
+    fun refreshModels(silent: Boolean = false, forceRefresh: Boolean = false) {
         val gen = ++modelsGeneration
         modelsFetchedAt = System.currentTimeMillis()
         viewModelScope.launch {
@@ -488,7 +546,7 @@ class AppViewModel(
             )
             val (catalog, error) = withContext(Dispatchers.IO) {
                 runCatching {
-                    engine.modelsStreaming { chunk ->
+                    engine.modelsStreaming(forceRefresh = forceRefresh) { chunk ->
                         viewModelScope.launch {
                             if (gen == modelsGeneration) applyModelsChunk(chunk)
                         }
@@ -507,7 +565,30 @@ class AppViewModel(
                 modelsError = listOf(error, providerError).filter { it.isNotEmpty() }.joinToString("；"),
                 busy = if (quiet) _state.value.busy else "",
             )
+            // 清名单要读写加密存储（同步落盘），放到 IO 线程，避免主线程卡帧
+            pruneStaleExposure(catalog.models)
         }
+    }
+
+    /**
+     * 清掉开放名单里远端已不存在的模型。
+     *
+     * 只处理「本轮真的拉到了模型」的前缀：拉不到（无账号、上游临时故障）时目录可能只是暂时取不到，
+     * 不能凭此抹掉用户的勾选。
+     */
+    private suspend fun pruneStaleExposure(live: List<RoutedModel>) {
+        if (live.isEmpty()) return
+        val current = engine.modelExposureSettings()
+        if (current.exposed.isEmpty()) return
+        val liveIds = live.map { it.fullId }.toSet()
+        val prefixes = live.map { it.routePrefix }.toSet()
+        val stale = current.exposed.filter { it.substringBefore('/') in prefixes && it !in liveIds }
+        if (stale.isEmpty()) return
+        // 同步落盘（加密存储 commit），必须在 IO 线程
+        withContext(Dispatchers.IO) {
+            engine.updateModelExposure(current.copy(exposed = current.exposed - stale.toSet()))
+        }
+        _state.value = _state.value.copy(modelExposure = engine.modelExposureSettings())
     }
 
     /**
@@ -648,6 +729,51 @@ class AppViewModel(
         }
     }
 
+    fun updateFailoverSettings(updated: dev.aigw.core.failover.ModelFailoverSettings) {
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) { engine.updateFailoverSettings(updated) }
+            refresh()
+        }
+    }
+
+    /**
+     * 开关「悬浮窗保活」：落盘后立即生效。
+     *
+     * 悬浮窗只在**网关服务运行时**显示（它服务于保活，网关没跑时没有意义）；
+     * 未启动时只记开关，下次启动网关时由前台服务拉起。
+     */
+    fun setOverlayKeepAlive(enabled: Boolean) {
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) { dev.aigw.app.data.KeepAlivePrefs.setOverlayEnabled(engine.store(), enabled) }
+            if (enabled) {
+                if (!engine.isRunning()) {
+                    notice("已开启，悬浮窗将在网关服务启动后显示")
+                } else {
+                    val label = "网关 ${engine.settings().port}"
+                    val shown = dev.aigw.app.service.FloatingKeepAlive.show(app, label)
+                    notice(
+                        if (shown) "悬浮窗保活已开启"
+                        else "已开启，但缺少「显示在其他应用上层」权限，请在上方授权",
+                    )
+                }
+            } else {
+                dev.aigw.app.service.FloatingKeepAlive.hide(app)
+                notice("悬浮窗保活已关闭")
+            }
+            refresh()
+        }
+    }
+
+    /**
+     * 授权返回后重新应用悬浮窗：仅在网关服务运行时补显示（开关开着且未在显示）。
+     */
+    fun reapplyOverlayIfEnabled() {
+        if (!engine.isRunning()) return
+        if (!dev.aigw.app.data.KeepAlivePrefs.overlayEnabled(engine.store())) return
+        if (dev.aigw.app.service.FloatingKeepAlive.isShowing()) return
+        dev.aigw.app.service.FloatingKeepAlive.show(app, "网关 ${engine.settings().port}")
+    }
+
     /** 重新加载反审核脱敏处理链。 */
     fun reloadSanitizerPipeline() = action {
         val count = engine.reloadSanitizerPipeline()
@@ -742,18 +868,16 @@ class AppViewModel(
 
     /**
      * 设备授权的区域感知版本（WorkBuddy）：先把区域同步写进供应商设置，
-     * 引擎开登录页时才能读到正确的端点（cn=copilot.tencent.com / global=workbuddy.ai），
-     * 同时记住本轮登录的区域，保证「重新检查授权状态」轮询同一端点。
+     * 引擎开登录页时才能读到正确的端点（cn=copilot.tencent.com / global=workbuddy.ai）。
      */
     fun beginDeviceLogin(providerId: String, region: String) {
-        deviceRegions[providerId] = region
         val settings = providerSettings(providerId)
         viewModelScope.launch {
             withContext(Dispatchers.IO) {
                 engine.updateProviderSettings(providerId, settings.copy(options = settings.options + ("region" to region)))
             }
         }
-        beginBrowserLogin(providerId)
+        beginBrowserLogin(providerId, region)
     }
 
     fun providerOption(providerId: String, key: String, fallback: String = ""): String =
@@ -771,11 +895,11 @@ class AppViewModel(
      * 浏览器完成登录后由网关接住回调并落池；WorkBuddy 没有本地回调，
      * 返回轮询用的 state，由 [pollDeviceLogin] 换取 token。
      */
-    fun beginBrowserLogin(providerId: String) {
+    fun beginBrowserLogin(providerId: String, region: String = "") {
         viewModelScope.launch {
             _state.value = _state.value.copy(busy = "正在准备登录")
             val result = withContext(Dispatchers.IO) {
-                runCatching { engine.beginBrowserLogin(providerId) }
+                runCatching { engine.beginBrowserLogin(providerId, region) }
             }
             _state.value = _state.value.copy(busy = "")
             result.fold(
@@ -785,8 +909,8 @@ class AppViewModel(
                         return@fold
                     }
                     if (ticket.pollState.isNotEmpty()) {
-                        deviceStates[providerId] = ticket.pollState
-                        pollDeviceLogin(providerId, ticket.pollState)
+                        // 用票据自带的区域轮询：授权页创建在哪个区域，就只能在该区域查这个 state
+                        pollDeviceLogin(providerId, ticket.pollState, ticket.region)
                     } else {
                         _state.value = _state.value.copy(notice = "已在浏览器打开登录页，完成后会自动添加账号")
                     }
@@ -799,7 +923,7 @@ class AppViewModel(
     /**
      * 打开登录页。
      *
-     * 默认走 **App 内嵌 WebView**（[inAppLoginUrl] 交给 UI 层拉起），
+     * 默认走 **App 内嵌 WebView**（[AppUiState.inAppLoginUrl] 交给 UI 层拉起），
      * 全部流程在自己进程里完成，不依赖系统浏览器。
      *
      * 备注：Trae / Antigravity / WorkBuddy 的登录结果由网关自己的本地回调端口
@@ -828,11 +952,12 @@ class AppViewModel(
         )
     }
 
-    /** 内嵌登录页返回的 Cookie 处理（LongCat 这类「凭证即 Cookie」的上游用）。 */
+    /** 内嵌登录页返回的 Cookie 处理（LongCat / Today 这类「凭证即 Cookie」的上游用）。 */
     fun applyInAppLoginCookie(cookie: String) {
         val target = _state.value.inAppLoginImportTarget
         if (cookie.isNotEmpty() && target.isNotEmpty()) {
-            importCredentials(target, """{"cookie":${jsonQuoteForVm(cookie)}}""")
+            val json = JsonObject().apply { addProperty("cookie", cookie) }.toString()
+            importCredentials(target, json)
         }
         consumeInAppLogin()
     }
@@ -884,17 +1009,6 @@ class AppViewModel(
                 onFailure = { onResult(emptyList(), it.message ?: "拉取失败") },
             )
         }
-    }
-
-    /** 手动重新检查设备授权状态（浏览器里已完成登录但轮询错过时）。 */
-    fun checkDeviceAuth(providerId: String, region: String = "") {
-        val state = deviceStates[providerId]
-        if (state.isNullOrEmpty()) {
-            notice("请先点「在浏览器中打开登录页」，完成登录后再回来检查")
-            return
-        }
-        if (region.isNotEmpty()) deviceRegions[providerId] = region
-        pollDeviceLogin(providerId, state, deviceRegions[providerId].orEmpty())
     }
 
     /** 发短信验证码（msgid 内部暂存）；[onResult] 回传错误信息（空串表示成功）。 */
@@ -1031,6 +1145,11 @@ class AppViewModel(
         if (enabled) "已启用该账号" else "已停用该账号"
     }
 
+    fun removeAccount(providerId: String, uid: String) = action {
+        if (!engine.removeAccount(providerId, uid)) throw IllegalStateException("账号不存在")
+        "账号已删除"
+    }
+
     /** 调整账号使用优先级（↑/↓）：靠前的先用，同级按余额。 */
     fun moveAccountPriority(providerId: String, uid: String, up: Boolean) {
         viewModelScope.launch {
@@ -1039,97 +1158,148 @@ class AppViewModel(
         }
     }
 
-    fun removeAccount(providerId: String, uid: String) = action {
-        if (!engine.removeAccount(providerId, uid)) throw IllegalStateException("账号不存在")
-        "账号已删除"
-    }
-
-    /** 刷新额度；uid 为空表示刷新该供应商的全部账号。 */
-    fun refreshCredits(providerId: String, uid: String?) = action {
+    /**
+     * 刷新额度；uid 为空表示刷新该供应商的全部账号。
+     *
+     * 单账号与「某个供应商全部账号」都可能从供应商详情页这类没有批量结果面板的页面触发，
+     * 所以走提示（notice）而不是结果面板；全局的「刷新全部额度」才走 [runBatch]（首页/任务中心有面板）。
+     */
+    fun refreshCredits(providerId: String, uid: String?) {
         if (uid != null) {
-            val result = engine.refreshCredits(providerId, uid)
-            if (result.error.isNotEmpty()) throw IllegalStateException(result.error)
-            "额度已刷新"
-        } else {
+            action {
+                val result = engine.refreshCredits(providerId, uid)
+                if (result.error.isNotEmpty()) throw IllegalStateException(result.error)
+                "额度已刷新"
+            }
+            return
+        }
+        // 有界并发（默认并发度）替掉串行；结果汇总成一句话，避免整批失败拼成一条读不完的串。
+        action {
             val results = engine.refreshAllCredits(providerId)
             if (results.isEmpty()) throw IllegalStateException("该供应商还没有账号")
-            val failed = results.filter { it.error.isNotEmpty() }
-            if (failed.isNotEmpty()) {
-                throw IllegalStateException(failed.joinToString("；") { "${it.uid}：${it.error}" })
-            }
-            "额度已刷新（${results.size} 个账号）"
+            summarizeCredits(results, "（${results.size} 个账号）")
         }
     }
 
-    /** 刷新全部供应商的额度。 */
-    fun refreshAllCredits() = action {
-        val results = engine.refreshAllCredits()
-        if (results.isEmpty()) throw IllegalStateException("还没有账号，先去「供应商」页添加")
+    /** 刷新全部供应商的额度（首页 / 任务中心入口）：有进度与结构化结果面板。 */
+    fun refreshAllCredits() = runBatch("刷新额度") { onProgress ->
+        if (engine.accounts().isEmpty()) throw IllegalStateException("还没有账号，先去「供应商」页添加")
+        engine.refreshAllCredits(onProgress = onProgress).map { it.toBatchResult() }
+    }
+
+    /** 额度刷新结果 → 批量结果条目（error 为空即成功）。 */
+    private fun CreditRefreshResult.toBatchResult(): BatchActionResult =
+        BatchActionResult(providerId, uid, nickname, error.isEmpty(), error)
+
+    /** 无结果面板的场景：把额度刷新结果压成一句提示（失败最多列 3 个，其余折叠）。 */
+    private fun summarizeCredits(results: List<CreditRefreshResult>, suffix: String): String {
         val failed = results.filter { it.error.isNotEmpty() }
-        if (failed.isNotEmpty()) {
-            throw IllegalStateException(failed.joinToString("；") { "${it.providerId}/${it.uid}：${it.error}" })
-        }
-        "额度已刷新（${results.size} 个账号）"
+        if (failed.isEmpty()) return "额度已刷新$suffix"
+        val head = failed.take(3).joinToString("；") { "${it.nickname.ifEmpty { it.uid }}：${it.error}" }
+        val rest = if (failed.size > 3) "…等 ${failed.size} 个" else ""
+        return "额度刷新完成：成功 ${results.size - failed.size} 个，失败 ${failed.size} 个（$head$rest）"
     }
 
     /**
      * 对所有支持签到的账号批量签到。
      *
-     * 只签到 Trae 与 WorkBuddy 国内版（cn）：WorkBuddy 国际版（global）没有签到制度，
-     * 跳过可避免每次批量签到都报错。
-     *
-     * 逐个执行并把每个账号的上游原话带回，避免用户只看到一句「N 个账号失败」而无法定位。
+     * 只签到 Trae 与 WorkBuddy 国内版（cn）：WorkBuddy 国际版（global）与 Trae 国际版
+     * 没有签到制度，跳过可避免每次批量签到都报错。
+     * 并发与失败隔离由 [GatewayEngine.performActionAll] 负责；这里只负责选目标与汇总结果。
      */
-    fun checkinAll() = action {
+    fun checkinAll() = runBatch("批量签到") { onProgress ->
         val targets = engine.providers()
             .filter { ProviderCapability.CHECKIN in it.capabilities }
             .flatMap { info -> engine.accounts(info.id) }
             // 区域型供应商的国际版没有签到制度（Trae INTL / WorkBuddy global），跳过避免整批报错
             .filter { account -> accountRegion(account.providerId, account.uid) != TraeRegion.INTL.id }
+            .map { BatchTarget(it.providerId, it.uid) }
         if (targets.isEmpty()) throw IllegalStateException("还没有支持签到的账号")
-
-        val results = targets.map { account ->
-            account to engine.performAction(account.providerId, account.uid, ACTION_CHECKIN)
-        }
-        val failed = results.filter { !it.second.ok }
-        if (failed.isNotEmpty()) {
-            throw IllegalStateException(
-                failed.joinToString("；") {
-                    "${it.first.nickname.ifEmpty { it.first.uid }}：${it.second.message}"
-                },
-            )
-        }
-        "签到完成（${results.size} 个账号）"
+        engine.performActionAll(targets, ACTION_CHECKIN, onProgress = onProgress)
     }
 
     /**
-     * 对所有支持任务的账号批量执行「任务中心」的动作。
+     * 对所有支持任务的账号批量执行任务（目前是 Loomy 的新手任务）。
      *
-     * 各家含义不同，由 provider 自己解释：
-     *  - Loomy：新手任务；
-     *  - WorkBuddy（国内版）：成长中心（领任务、Buddy 旅行、开盲盒）；
-     *  - Trae：无独立任务中心，每日签到已由 [checkinAll] 覆盖。
+     * Trae / WorkBuddy 的「任务」实际就是每日签到，已由 [checkinAll] 覆盖。
+     * 全部成功时把各账号的上游原话拼进提示（如 Loomy 的领取结果），失败时走结果面板逐条展示。
      */
-    fun runAllTasks() = action {
+    fun runAllTasks() = runBatch(
+        busyText = "批量任务",
+        successNotice = { results ->
+            results.filter { it.message.isNotEmpty() }
+                .joinToString("；") { "${it.nickname.ifEmpty { it.uid }}：${it.message}" }
+                .ifEmpty { "任务完成（${results.size} 个账号）" }
+        },
+    ) { onProgress ->
         val targets = engine.providers()
             .filter { ProviderCapability.TASKS in it.capabilities }
             .flatMap { info -> engine.accounts(info.id) }
+            .map { BatchTarget(it.providerId, it.uid) }
         if (targets.isEmpty()) throw IllegalStateException("还没有支持任务的账号")
+        engine.performActionAll(targets, ACTION_TASKS, onProgress = onProgress)
+    }
 
-        val results = targets.map { account ->
-            account to engine.performAction(account.providerId, account.uid, ACTION_TASKS)
-        }
-        val failed = results.filter { !it.second.ok }
-        if (failed.isNotEmpty()) {
-            throw IllegalStateException(
-                failed.joinToString("；") {
-                    "${it.first.nickname.ifEmpty { it.first.uid }}：${it.second.message}"
+    /**
+     * 跑一批批量动作：后台 IO 执行、过程中把进度写回状态、结束后给结构化结果并刷新界面。
+     *
+     * [block] 在 IO 线程执行，[onProgress] 由引擎在后台线程回调（不保证顺序），
+     * 这里只负责把它翻译成 [BatchProgressUi]；窗口内的 Composable 直接读这个字段画进度。
+     * [successNotice] 只在全部成功时决定提示文案（默认「成功 N 个」）。
+     */
+    private fun runBatch(
+        busyText: String,
+        successNotice: ((List<BatchActionResult>) -> String)? = null,
+        block: (onProgress: (BatchProgress) -> Unit) -> List<BatchActionResult>,
+    ) {
+        viewModelScope.launch {
+            // 先置空上一次的结果面板，避免新一轮的进度被旧面板挡住
+            _state.value = _state.value.copy(batchProgress = BatchProgressUi(0, 0, ""), batchOutcome = null)
+            val outcome = withContext(Dispatchers.IO) {
+                runCatching {
+                    val results = block { progress -> onBatchProgress(progress) }
+                    val failed = results.filter { !it.ok }
+                    BatchOutcome(
+                        title = busyText,
+                        succeeded = results.count { it.ok },
+                        failed = failed.size,
+                        // 只把失败账号进结果面板：成功账号的文案千篇一律，逐条列出反而淹没真正要看的原因
+                        items = failed.map { BatchItem(it.nickname.ifEmpty { it.uid }, it.message) },
+                    ) to results
+                }
+            }
+            _state.value = _state.value.copy(batchProgress = null)
+            outcome.fold(
+                { (result, results) ->
+                    if (result.failed > 0) {
+                        _state.value = _state.value.copy(
+                            batchOutcome = result,
+                            notice = "${busyText}完成：成功 ${result.succeeded} 个，失败 ${result.failed} 个",
+                        )
+                    } else {
+                        val text = successNotice?.invoke(results)
+                            ?: "${busyText}完成：成功 ${result.succeeded} 个"
+                        _state.value = _state.value.copy(notice = text)
+                    }
                 },
+                { error -> _state.value = _state.value.copy(notice = error.message ?: "操作失败") },
             )
+            refresh()
         }
-        results.joinToString("；") {
-            "${it.first.nickname.ifEmpty { it.first.uid }}：${it.second.message}"
+    }
+
+    private fun onBatchProgress(progress: BatchProgress) {
+        // 多个账号在后台线程并发回调：CAS 循环逐个重试，避免并发写把已完成数覆盖回去。
+        val next = BatchProgressUi(progress.done, progress.total, progress.nickname.ifEmpty { progress.uid })
+        while (true) {
+            val prev = _state.value
+            if (_state.compareAndSet(prev, prev.copy(batchProgress = next))) return
         }
+    }
+
+    /** 关闭批量结果面板。 */
+    fun dismissBatchOutcome() {
+        _state.value = _state.value.copy(batchOutcome = null)
     }
 
     fun performAction(providerId: String, uid: String, action: String, payload: JsonObject = JsonObject()) = action {
@@ -1159,19 +1329,16 @@ class AppViewModel(
     }
 
     /**
-     * 账号所属区域：WorkBuddy（workbuddy.ai = global）与 Trae（trae.ai = global），无区域概念返回空串。
+     * 账号所属区域（无区域概念的供应商返回空串）；判定统一走 provider 的
+     * [dev.aigw.core.provider.RegionAwareSupport.regionOf]——各家的凭证结构与区域字段口径
+     * 都不同（Trae 的 secret 是嵌套结构且存区域 id，WorkBuddy 是扁平结构且存主机名），
+     * UI 再解析一遍 secret 必然走样。
      */
     fun accountRegion(providerId: String, uid: String): String {
-        if (providerId != CodeBuddyProvider.ID && providerId != TraeProvider.ID) return ""
+        val provider = engine.registry.get(providerId) as? dev.aigw.core.provider.RegionAwareSupport
+            ?: return ""
         val account = engine.account(providerId, uid) ?: return ""
-        val domain = runCatching {
-            com.google.gson.JsonParser.parseString(account.secret).asJsonObject.get("domain")?.asString.orEmpty()
-        }.getOrDefault("").lowercase()
-        return when {
-            providerId == CodeBuddyProvider.ID ->
-                if (domain.endsWith("workbuddy.ai")) TraeRegion.INTL.id else CodeBuddyProvider.REGION_CN
-            else -> if (domain.endsWith("trae.ai")) TraeRegion.INTL.id else TraeRegion.CN.id
-        }
+        return provider.regionOf(account).orEmpty()
     }
 
     fun regenerateDeviceId(providerId: String, uid: String) = action {
@@ -1246,6 +1413,17 @@ class AppViewModel(
         }
     }
 
+    /** 拉取某账号的积分流水明细（会打上游）；支持账本的供应商才返回结果。 */
+    fun loadPointsBills(providerId: String, uid: String) {
+        viewModelScope.launch {
+            val view = withContext(Dispatchers.IO) { engine.pointsBills(providerId, uid) }
+            if (view == null) return@launch
+            _state.value = _state.value.copy(
+                pointsBills = _state.value.pointsBills + ("$providerId/$uid" to view),
+            )
+        }
+    }
+
     // ------------------------------------------------------------------ 数据管理
 
     /** 更新保留天数（越界由 core 夹回 1~3650）。 */
@@ -1253,17 +1431,6 @@ class AppViewModel(
         val clamped = GatewaySettings.clampRetentionDays(days)
         engine.updateSettings(engine.settings().copy(logRetentionDays = clamped))
         if (clamped != days) "保留天数需在 1~3650 之间，已按 $clamped 天保存" else "保留天数已设为 $clamped 天"
-    }
-
-    fun purgeExpiredRecords() = action(alsoRefreshStorage = true) {
-        val removed = engine.purgeExpiredRecords()
-        val days = engine.settings().logRetentionDays
-        if (removed == 0) "没有超过 $days 天的记录可清理" else "已清理 $removed 条过期记录"
-    }
-
-    fun truncateLongRecords() = action(alsoRefreshStorage = true) {
-        val (count, saved) = engine.truncateLongRecords()
-        if (count == 0) "没有超长记录需要截断" else "已截断 $count 条记录，释放约 ${StorageAudit.formatSize(saved)}"
     }
 
     // ------------------------------------------------------------------ 记录
@@ -1282,6 +1449,10 @@ class AppViewModel(
         engine.requestLog.clear()
         "请求日志已清空"
     }
+
+    /** 回读调用记录某字段的完整原文（溢出文件缺失时返回 null，调用方回落用摘要）。 */
+    fun engineFullText(id: String, field: dev.aigw.core.usage.CallTextField): String? =
+        engine.callLogStore.fullText(id, field)
 
     // ------------------------------------------------------------------ 关于与更新
 
@@ -1303,19 +1474,137 @@ class AppViewModel(
         viewModelScope.launch { withContext(Dispatchers.IO) { updateStore.setAutoCheck(enabled) } }
     }
 
-    fun dismissUpdate() {
-        _state.value = _state.value.copy(updateInfo = null)
-    }
-
     fun openProjectRepo() {
-        if (!openExternal(PROJECT_URL)) {
+        if (!openBrowser(PROJECT_URL)) {
             _state.value = _state.value.copy(notice = "没有可用的浏览器，无法打开项目地址")
         }
     }
 
     fun openReleasePage(url: String) {
-        if (!openExternal(url)) {
+        if (!openBrowser(url)) {
             _state.value = _state.value.copy(notice = "没有可用的浏览器，无法打开下载页")
+        }
+    }
+
+    /** 应用内更新：先并发测速所有线路（GitHub 直连 + 国内镜像），再让最快的线路
+     * 多线程下载 APK；某条失败就依次换下一条。
+     */
+    fun downloadUpdate(info: UpdateInfo) {
+        val apkUrl = info.apkUrl ?: run {
+            _state.value = _state.value.copy(
+                updateDownload = UpdateDownload.Failed("该版本没有提供 APK，请前往发布页手动下载"),
+            )
+            return
+        }
+        if (_state.value.updateDownload is UpdateDownload.Probing ||
+            _state.value.updateDownload is UpdateDownload.Downloading
+        ) {
+            return
+        }
+        cancelRequested = false
+        _state.value = _state.value.copy(updateDownload = UpdateDownload.Probing)
+        val target = File(File(app.cacheDir, "updates").apply { mkdirs() }, "update-${info.version}.apk")
+        updateJob = viewModelScope.launch {
+            // 线路按实测带宽降序；全部探测失败时退回内置顺序逐一尝试
+            val candidates = withContext(Dispatchers.IO) {
+                MirrorSpeedTest().measure(apkUrl, UpdateSources.DOWNLOAD)
+            }.map { it.source }.ifEmpty { UpdateSources.DOWNLOAD }
+            if (cancelRequested) return@launch
+            downloadWithCandidates(info, apkUrl, target, candidates)
+        }
+    }
+
+    /** 依次尝试候选线路：某条失败就换下一条，全部失败才报错。 */
+    private suspend fun downloadWithCandidates(
+        info: UpdateInfo,
+        apkUrl: String,
+        target: File,
+        candidates: List<dev.aigw.core.update.MirrorSource>,
+    ) {
+        var lastError = "没有可用的下载线路"
+        for (source in candidates) {
+            if (cancelRequested) return
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    target.delete()
+                    ApkDownloader().download(
+                        url = apkUrl,
+                        source = source,
+                        targetPath = target.path,
+                        isCancelled = { cancelRequested },
+                        onProgress = { done, total, speed, threads ->
+                            val totalBytes = if (total > 0) total else info.apkSize
+                            _state.value = _state.value.copy(
+                                updateDownload = UpdateDownload.Downloading(
+                                    downloaded = done,
+                                    total = totalBytes,
+                                    bytesPerSecond = speed,
+                                    source = source.label,
+                                    threads = threads,
+                                ),
+                            )
+                        },
+                    )
+                }
+            }
+            result.fold(
+                onSuccess = {
+                    val archiveVersion = ApkInstaller.archiveVersion(app, target)
+                    if (archiveVersion == null) {
+                        lastError = "下载包无法识别（${source.label}）"
+                        target.delete()
+                        return@fold
+                    }
+                    _state.value = _state.value.copy(
+                        updateDownload = UpdateDownload.Ready(target.path, source.label),
+                    )
+                    return
+                },
+                onFailure = { e ->
+                    if (cancelRequested) return
+                    lastError = "${source.label}：${e.message ?: "下载失败"}"
+                    target.delete()
+                },
+            )
+        }
+        if (!cancelRequested) {
+            _state.value = _state.value.copy(updateDownload = UpdateDownload.Failed(lastError))
+        }
+    }
+
+    fun cancelUpdateDownload() {
+        cancelRequested = true
+        updateJob?.cancel()
+        updateJob = null
+        _state.value = _state.value.copy(updateDownload = null)
+    }
+
+    /** 本包自身是否具备安装 APK 的能力（清单里声明了 REQUEST_INSTALL_PACKAGES）。 */
+    fun canInstallUpdate(): Boolean = ApkInstaller.canRequestInstall(app)
+
+    /** 安装已下载的 APK：无「安装未知应用」权限时先引导去授权，授权页打不开要说清楚。 */
+    fun installUpdate() {
+        val ready = _state.value.updateDownload as? UpdateDownload.Ready ?: return
+        val file = File(ready.path)
+        if (!file.exists()) {
+            _state.value = _state.value.copy(updateDownload = UpdateDownload.Failed("安装包已不存在，请重新下载"))
+            return
+        }
+        if (!ApkInstaller.canInstall(app)) {
+            // 打不开授权页通常意味着包内没声明 REQUEST_INSTALL_PACKAGES（2.13.1 及更早即如此），
+            // 这时只能让用户去仓库手动下载，不能只弹一句「请授权」让人反复点。
+            val opened = ApkInstaller.openInstallPermission(app)
+            _state.value = _state.value.copy(
+                notice = if (opened) {
+                    "请在设置里允许本应用安装未知来源应用，返回后再点安装"
+                } else {
+                    "本版本应用内更新无法安装，请到项目仓库下载更新"
+                },
+            )
+            return
+        }
+        if (!ApkInstaller.install(app, file)) {
+            _state.value = _state.value.copy(notice = "没有可用的安装器，请到项目仓库下载更新")
         }
     }
 
@@ -1350,29 +1639,16 @@ class AppViewModel(
         }
     }
 
-    /** 直连 GitHub 取最新 Release（不走代理，按用户选择）。 */
+    /** 直连 GitHub 取最新 Release（多线路竞争，不在主线程阻塞）。 */
     private fun fetchLatestRelease(): UpdateInfo {
-        val conn = (URL(RELEASES_API).openConnection() as HttpURLConnection).apply {
-            requestMethod = "GET"
-            connectTimeout = 10_000
-            readTimeout = 10_000
-            setRequestProperty("Accept", "application/vnd.github+json")
-            setRequestProperty("User-Agent", UPDATE_UA)
-        }
-        try {
-            val status = conn.responseCode
-            if (status == 404) throw IllegalStateException("暂无发布版本")
-            if (status !in 200..299) throw IllegalStateException("HTTP $status")
-            val body = conn.inputStream.bufferedReader().use { it.readText() }
-            val obj = JsonParser.parseString(body).asJsonObject
-            val version = obj.get("tag_name")?.asString?.trim().orEmpty().removePrefix("v")
-            if (version.isEmpty()) throw IllegalStateException("未找到版本信息")
-            val url = obj.get("html_url")?.asString.orEmpty().ifEmpty { "$PROJECT_URL/releases" }
-            val notes = obj.get("body")?.asString.orEmpty().trim()
-            return UpdateInfo(version = version, url = url, notes = notes)
-        } finally {
-            conn.disconnect()
-        }
+        val release = UpdateRepository.fetchLatest()
+        return UpdateInfo(
+            version = release.version,
+            url = release.pageUrl,
+            notes = release.notes,
+            apkUrl = release.apkUrl,
+            apkSize = release.apkSize,
+        )
     }
 
     /** 逐段比较版本号，远端更大返回 true。 */
@@ -1387,6 +1663,7 @@ class AppViewModel(
         return false
     }
 
+    /** 当前安装的版本名。 */
     private fun installedVersionName(): String = runCatching {
         app.packageManager.getPackageInfo(app.packageName, 0).versionName.orEmpty()
     }.getOrDefault("")
@@ -1415,20 +1692,4 @@ class AppViewModel(
             if (alsoRefreshStorage) refreshStorage()
         }
     }
-}
-
-/** 极简 JSON 字符串转义（Cookie 里可能带引号或反斜杠）。 */
-private fun jsonQuoteForVm(value: String): String {
-    val builder = StringBuilder("\"")
-    for (ch in value) {
-        when (ch) {
-            '"' -> builder.append("\\\"")
-            '\\' -> builder.append("\\\\")
-            '\n' -> builder.append("\\n")
-            '\r' -> builder.append("\\r")
-            '\t' -> builder.append("\\t")
-            else -> if (ch < ' ') builder.append(String.format("\\u%04x", ch.code)) else builder.append(ch)
-        }
-    }
-    return builder.append("\"").toString()
 }

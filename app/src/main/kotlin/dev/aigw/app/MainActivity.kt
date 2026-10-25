@@ -10,13 +10,15 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
-import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
@@ -29,6 +31,7 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
@@ -57,10 +60,10 @@ import dev.aigw.app.service.GatewayTileService
 import dev.aigw.app.ui.pushPopSpec
 import dev.aigw.app.ui.tabContentSpec
 import dev.aigw.app.ui.AppUiState
-import dev.aigw.app.ui.CookieLoginActivity
 import dev.aigw.app.ui.ApiSettingsScreen
 import dev.aigw.app.ui.AppViewModel
 import dev.aigw.app.ui.AppearanceThemeScreen
+import dev.aigw.app.ui.CookieLoginActivity
 import dev.aigw.app.ui.CustomProviderScreen
 import dev.aigw.app.ui.CreditCenterScreen
 import dev.aigw.app.ui.DataManagementScreen
@@ -73,10 +76,14 @@ import dev.aigw.app.ui.ProviderDetailScreen
 import dev.aigw.app.ui.ProviderListScreen
 import dev.aigw.app.ui.ProviderCreditsScreen
 import dev.aigw.app.ui.ProxyScreen
+import dev.aigw.app.ui.ResilienceScreen
 import dev.aigw.app.ui.SecurityProtectionScreen
 import dev.aigw.app.ui.SubPage
 import dev.aigw.app.ui.TaskCenterScreen
 import dev.aigw.app.ui.UsageScreen
+import dev.aigw.app.ui.formatBytes
+import dev.aigw.app.ui.formatSpeed
+import dev.aigw.app.ui.UpdateDownload
 import dev.aigw.app.ui.providers.ProviderUiRegistry
 import dev.aigw.app.ui.theme.AiGatewayTheme
 import dev.aigw.app.ui.theme.AppColors
@@ -122,7 +129,7 @@ class MainActivity : ComponentActivity() {
                     )
                     // 成功信号按上游类型给，命中即自动收尾（用户不用点「完成」）：
                     //  - Trae / Antigravity / WorkBuddy：登录完会跳到本地回调端口；
-                    //  - LongCat：站内跳转、没有回调地址，靠关键 Cookie 判断。
+                    //  - LongCat / Today：站内跳转、没有回调地址，靠关键 Cookie 判断。
                     putExtra(
                         CookieLoginActivity.EXTRA_SUCCESS_URL_PREFIXES,
                         LocalHostCallbackPorts.map { "http://127.0.0.1:$it/" }.toTypedArray(),
@@ -278,6 +285,7 @@ private fun AppRoot(viewModel: AppViewModel, state: AppUiState) {
                 SubPage.Proxy -> ProxyScreen(state, viewModel) { subPage = null }
                 SubPage.ApiSettings -> ApiSettingsScreen(state, viewModel) { subPage = null }
                 SubPage.SecurityProtection -> SecurityProtectionScreen(state, viewModel) { subPage = null }
+                SubPage.Resilience -> ResilienceScreen(state, viewModel) { subPage = null }
                 SubPage.DataManagement -> DataManagementScreen(state, viewModel) { subPage = null }
                 SubPage.AppearanceTheme -> AppearanceThemeScreen(state, viewModel) { subPage = null }
                 null -> MainTabs(
@@ -296,12 +304,27 @@ private fun AppRoot(viewModel: AppViewModel, state: AppUiState) {
         }
     }
 
-    state.updateInfo?.let { info ->
+    // 「稍后」只在本次会话内生效：关掉后仍可用「检查更新」重新拉出更新弹窗
+    var updatePromptDismissed by remember(state.updateInfo?.version) { mutableStateOf(false) }
+    val download = state.updateDownload
+    val updateBusy = download is UpdateDownload.Probing || download is UpdateDownload.Downloading
+    // 当前安装包能否自己装 APK（旧版本含 v2.13.1 缺 REQUEST_INSTALL_PACKAGES，必然装不了）
+    val canSelfInstall = viewModel.canInstallUpdate()
+    state.updateInfo?.takeIf { !updatePromptDismissed }?.let { info ->
         AlertDialog(
-            onDismissRequest = { viewModel.dismissUpdate() },
+            onDismissRequest = { if (!updateBusy) updatePromptDismissed = true },
             title = { Text("发现新版本 ${info.version}") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (!canSelfInstall) {
+                        // 旧版本（含 v2.13.1）缺少 REQUEST_INSTALL_PACKAGES，应用内安装必然失败
+                        Text(
+                            "已更新至 v2.13.1 版本的用户需点击项目仓库下载更新，因为应用内更新有 bug",
+                            style = MaterialTheme.typography.bodySmall,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    }
                     Text(
                         "更新日志",
                         style = MaterialTheme.typography.labelMedium,
@@ -321,16 +344,67 @@ private fun AppRoot(viewModel: AppViewModel, state: AppUiState) {
                             modifier = Modifier.heightIn(max = 320.dp).verticalScroll(rememberScrollState()),
                         )
                     }
+                    // 应用内更新的进度就摆在更新日志下方，不另开页面
+                    when (download) {
+                        is UpdateDownload.Probing -> Text(
+                            "正在测速直连与国内镜像…",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurface,
+                        )
+                        is UpdateDownload.Downloading -> Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Text(
+                                "${download.source} · ${formatBytes(download.downloaded)} / ${formatBytes(download.total)}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurface,
+                            )
+                            LinearProgressIndicator(
+                                progress = {
+                                    if (download.total <= 0) 0f
+                                    else (download.downloaded.toFloat() / download.total).coerceIn(0f, 1f)
+                                },
+                                modifier = Modifier.fillMaxWidth().height(6.dp),
+                            )
+                            Text(
+                                "${formatSpeed(download.bytesPerSecond)} · ${download.threads} 线程并发",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        is UpdateDownload.Ready -> Text(
+                            if (canSelfInstall) {
+                                "安装包已就绪（${download.source}），点「安装」完成更新。"
+                            } else {
+                                "本版本无法应用内安装，请点下方「到仓库下载」手动更新。"
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurface,
+                        )
+                        is UpdateDownload.Failed -> Text(
+                            "下载失败：${download.reason}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                        null -> Unit
+                    }
                 }
             },
             confirmButton = {
-                TextButton(onClick = {
-                    viewModel.openReleasePage(info.url)
-                    viewModel.dismissUpdate()
-                }) { Text("前往下载") }
+                when (download) {
+                    is UpdateDownload.Ready -> TextButton(onClick = {
+                        // 自身包装不了时系统安装器根本不会被唤起，直接给用户可行的出路
+                        if (canSelfInstall) viewModel.installUpdate() else viewModel.openReleasePage(info.url)
+                    }) { Text(if (canSelfInstall) "安装" else "到仓库下载") }
+                    is UpdateDownload.Failed, null -> TextButton(onClick = {
+                        if (info.apkUrl == null) viewModel.openReleasePage(info.url) else viewModel.downloadUpdate(info)
+                    }) { Text(if (info.apkUrl == null) "前往下载" else "应用内更新") }
+                    else -> TextButton(onClick = { viewModel.cancelUpdateDownload() }) { Text("取消下载") }
+                }
             },
             dismissButton = {
-                TextButton(onClick = { viewModel.dismissUpdate() }) { Text("稍后") }
+                TextButton(onClick = {
+                    if (updateBusy) viewModel.cancelUpdateDownload()
+                    updatePromptDismissed = true
+                }) { Text("稍后") }
             },
         )
     }
@@ -369,5 +443,5 @@ private fun MainTabs(
     }
 }
 
-/** 网关本地回调端口：Trae 51120、Antigravity 51121。 */
+/** 上游 OAuth 回环回调端口：命中这些 URL 前缀即认为登录完成。 */
 private val LocalHostCallbackPorts = listOf(51120, 51121)

@@ -135,7 +135,7 @@ object LoomyUi : ProviderUi {
 
     @Composable
     override fun AccountExtra(status: AccountStatus, actions: ProviderUiActions) {
-        var invite by remember(status.uid) { mutableStateOf(DEFAULT_INVITE_CODE) }
+        var invite by remember(status.uid) { mutableStateOf("") }
         var code by remember(status.uid) { mutableStateOf("") }
 
         Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -154,12 +154,6 @@ object LoomyUi : ProviderUi {
                 singleLine = true,
                 label = { Text("兑换邀请码") },
             )
-            Text(
-                text = "邀请码是双向的：填了双方都得积分。已预填一个，可直接用；" +
-                    "也可以改成自己的——自己的码在 Loomy 官方 App / 网页的「邀请好友」页面里。",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
             Button(
                 onClick = {
                     val value = invite.trim()
@@ -169,8 +163,7 @@ object LoomyUi : ProviderUi {
                         LoomyProvider.ACTION_REDEEM_INVITE,
                         JsonObject().apply { addProperty("inviteCode", value) },
                     )
-                    // 兑换成功后重置为默认值（而不是清空）：下次打开仍是预填状态
-                    invite = DEFAULT_INVITE_CODE
+                    invite = ""
                 },
                 enabled = invite.isNotBlank(),
                 modifier = Modifier.fillMaxWidth(),
@@ -184,11 +177,6 @@ object LoomyUi : ProviderUi {
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true,
                 label = { Text("兑换码") },
-            )
-            Text(
-                text = "兑换码由讯飞官方发放（节日活动、发布会、官方社群福利），App 里不生成。",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Button(
                 onClick = {
@@ -213,11 +201,3 @@ object LoomyUi : ProviderUi {
         }
     }
 }
-
-/**
- * 默认预填的 Loomy 邀请码。
- *
- * 邀请码是双向的：填了双方都得积分。预填一个方便直接用，用户随时可以改成自己的。
- * 想清空默认值就把这里置成空串。
- */
-private const val DEFAULT_INVITE_CODE = "R3HFVJ"

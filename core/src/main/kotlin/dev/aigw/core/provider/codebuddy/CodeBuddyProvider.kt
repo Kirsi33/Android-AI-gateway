@@ -24,17 +24,21 @@ import dev.aigw.core.provider.ProviderModelCatalogView
 import dev.aigw.core.provider.ProviderTask
 import dev.aigw.core.provider.ProviderTaskListView
 import dev.aigw.core.provider.QuotaPack
+import dev.aigw.core.provider.StreamFailureChatCall
 import dev.aigw.core.provider.StreamingChatCall
 import dev.aigw.core.provider.UpstreamError
 import dev.aigw.core.util.arrayOrNull
+import dev.aigw.core.protocol.FALLBACK_CONVERSATION_ID
+import dev.aigw.core.protocol.stableConversationId
+import dev.aigw.core.util.HttpSupport
+import dev.aigw.core.util.firstLong
+import dev.aigw.core.util.firstString
+import dev.aigw.core.util.jwtClaim
+import dev.aigw.core.util.longOrNull
 import dev.aigw.core.util.objOrNull
 import dev.aigw.core.util.str
-import java.io.ByteArrayOutputStream
-import java.io.InputStream
 import java.net.HttpURLConnection
-import java.net.URL
 import java.net.URLEncoder
-import java.nio.charset.StandardCharsets
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -84,7 +88,6 @@ class CodeBuddyProvider(
     override fun resolveModel(requested: String): String {
         val model = requested.trim()
         // 默认走官方的 Auto（id = default-model）；模型列表里首位顺序会随上游变化，不能拿它当默认。
-
         if (model.isEmpty() || model == "auto") return DEFAULT_MODEL_ID
         return model
     }
@@ -105,10 +108,13 @@ class CodeBuddyProvider(
         val credential = parse(account) ?: return FailedChatCall(401, "凭证无法解析")
         val streaming = isStreaming(openAiBody)
         val model = resolveModel(requestedModel(openAiBody))
-        val prepared = prepareCodeBuddyBody(openAiBody)
+        val request = prepareCodeBuddyRequest(openAiBody)
+        val prepared = request.body
+        // 工具名被改写过时，响应里的调用名要还原（空表 = 直接透传）
+        val restoreNames = request.toolNameRestore
 
         val conn = try {
-            open("${chatBase(credential)}$PATH_CHAT", credential, prepared, chatHeaders(credential))
+            open("${chatBase(credential)}$PATH_CHAT", credential, prepared, chatHeaders(credential, prepared))
         } catch (e: Exception) {
             return FailedChatCall(0, e.message ?: "连接失败")
         }
@@ -119,7 +125,7 @@ class CodeBuddyProvider(
             return FailedChatCall(0, e.message ?: "连接失败")
         }
         if (status !in 200..299) {
-            val errorBody = runCatching { readLimited(conn.errorStream) }.getOrDefault("")
+            val errorBody = runCatching { HttpSupport.readLimited(conn.errorStream) }.getOrDefault("")
             conn.disconnect()
             return FailedChatCall(status, errorBody)
         }
@@ -128,28 +134,43 @@ class CodeBuddyProvider(
         val stream = conn.inputStream
         if (contentType.contains("event-stream", ignoreCase = true)) {
             if (streaming) {
-                return StreamingChatCall(status, stream) { conn.disconnect() }
+                val body = if (restoreNames.isEmpty()) stream else ToolNameRestoringStream(stream, restoreNames)
+                return StreamingChatCall(status, body) { conn.disconnect() }
             }
             val aggregated = try {
                 OpenAiSseAggregator.aggregate(stream, model)
             } finally {
                 conn.disconnect()
             }
-            return AggregatedChatCall(status, aggregated)
+            return AggregatedChatCall(status, restoreToolNames(aggregated, restoreNames))
         }
 
-        val text = runCatching { stream.use { readLimited(it) } }.getOrDefault("")
+        val text = runCatching { stream.use { HttpSupport.readLimited(it) } }.getOrDefault("")
         conn.disconnect()
-        return AggregatedChatCall(status, text)
+        // 200 也可能是「HTTP 200 + 业务错误码」（与 Loomy 同形）：不校验会把真实错误
+        // 当成正常聚合结果，下游只会报「上游返回了空回复」，用户看不到真正原因。
+        val businessCode = runCatching { JsonParser.parseString(text).asJsonObject.get("code")?.asLong }
+            .getOrNull()
+        if (businessCode != null && businessCode != 0L) {
+            return StreamFailureChatCall(200, classify(200, text))
+        }
+        return AggregatedChatCall(status, restoreToolNames(text, restoreNames))
     }
 
     override fun classify(status: Int, body: String): UpstreamError {
         val message = extractMessage(body)
         val kind = when {
+            // 401/403 是凭证失效：必须判 SESSION_DEAD，网关才会禁用该账号并换家。
+            // 落到下面的 400..499 → CLIENT 的话会被当作客户端错误早返回，
+            // 死账号被反复选中、用户持续收到「请求被上游拒绝」。其余五家都这么映射。
+            status == 401 || status == 403 -> ErrorKind.SESSION_DEAD
             status == 402 -> ErrorKind.QUOTA
-            status == 429 -> ErrorKind.SOFT_RATE
+            // 429 分两种：业务码 6004 是**该模型**超限（换号无用，换模型立刻可用），
+            // 其余 429（无业务码/账号级限流）才按可退避的限流处理。
+            status == 429 -> if (businessCode(body) == CODE_MODEL_LIMITED) ErrorKind.MODEL_LIMIT else ErrorKind.SOFT_RATE
             status == 404 -> ErrorKind.NOT_FOUND
             status in 500..599 -> ErrorKind.SERVER
+            businessCode(body) == CODE_MODEL_LIMITED -> ErrorKind.MODEL_LIMIT
             matchesQuota(body) -> ErrorKind.QUOTA
             matchesSessionDead(body) -> ErrorKind.SESSION_DEAD
             status in 400..499 -> ErrorKind.CLIENT
@@ -157,6 +178,10 @@ class CodeBuddyProvider(
         }
         return UpstreamError(kind, message.ifEmpty { "上游 HTTP $status" })
     }
+
+    /** 取响应体里的业务码；取不到/非数字返回 null。 */
+    private fun businessCode(body: String): Long? =
+        runCatching { JsonParser.parseString(body).asJsonObject.get("code")?.asLong }.getOrNull()
 
     override fun creditInfo(account: ProviderAccount): CreditInfo? {
         val credential = parse(account) ?: return null
@@ -168,22 +193,33 @@ class CodeBuddyProvider(
                 billingHeaders(credential),
             )
             if (status !in 200..299) {
-                return CreditInfo(0, known = false, detail = "上游 HTTP $status" + describeBody(text))
+                return CreditInfo(
+                    0,
+                    known = false,
+                    detail = failure("额度接口", endpoint(credential), "${billingBase(credential)}$PATH_USER_RESOURCE", status, text),
+                )
             }
             val data = envelopeData(text) ?: return CreditInfo(0, known = false, detail = "响应缺少 data")
             val accounts = data.objOrNull("Response")?.objOrNull("Data")?.arrayOrNull("Accounts")
+                ?: return CreditInfo(0, known = false, detail = "响应缺少 Response.Data.Accounts")
             var remain = 0L
-            accounts?.forEach { element ->
+            var fieldSeen = false
+            accounts.forEach { element ->
                 val item = runCatching { element.asJsonObject }.getOrNull() ?: return@forEach
-                val size = item.get("CycleCapacitySize")?.asLong ?: 0L
-                val cycleRemain = item.get("CycleCapacityRemain")?.asLong ?: 0L
-                val value = if (size > 0 || cycleRemain > 0) {
-                    cycleRemain
+                // 字段缺失（结构改口径）不能当成「额度就是 0」：三个键全缺时视为解析不了，报 known=false
+                val size = item.longOrNull("CycleCapacitySize")
+                val cycleRemain = item.longOrNull("CycleCapacityRemain")
+                val capacityRemain = item.longOrNull("CapacityRemain")
+                if (size == null && cycleRemain == null && capacityRemain == null) return@forEach
+                fieldSeen = true
+                val value = if ((size ?: 0L) > 0 || (cycleRemain ?: 0L) > 0) {
+                    cycleRemain ?: 0L
                 } else {
-                    item.get("CapacityRemain")?.asLong ?: 0L
+                    capacityRemain ?: 0L
                 }
                 if (value > 0) remain += value
             }
+            if (!fieldSeen) return CreditInfo(0, known = false, detail = "响应里没有可识别的额度字段")
             CreditInfo(remain, known = true, detail = "周期剩余 $remain")
         } catch (e: Exception) {
             CreditInfo(0, known = false, detail = e.message ?: "查询额度失败")
@@ -201,6 +237,16 @@ class CodeBuddyProvider(
             return when (action) {
                 ACTION_CHECKIN, ACTION_TASKS ->
                     ProviderActionResult.failure("国际版没有签到与成长中心")
+                else -> ProviderActionResult.unsupported(action)
+            }
+        }
+        // 企业账号没有个人成长体系：签到/成长/连签类调用上游必失败
+        // （`400 code 10001` 或 `403 growth system is only available for personal users`），
+        // 直接短路不发请求；企业额度走 billing 的 get-enterprise-user-usage。
+        if (credential != null && credential.enterpriseId.isNotEmpty()) {
+            return when (action) {
+                ACTION_CHECKIN, ACTION_TASKS ->
+                    ProviderActionResult.failure("企业账号没有个人成长体系（签到/任务仅个人账号可用）")
                 else -> ProviderActionResult.unsupported(action)
             }
         }
@@ -515,10 +561,15 @@ class CodeBuddyProvider(
     override fun taskList(account: ProviderAccount): ProviderTaskListView? {
         val credential = parse(account) ?: return ProviderTaskListView(emptyList(), error = "凭证无法解析")
         if (regionOf(credential) == REGION_GLOBAL) return ProviderTaskListView(emptyList())
+        // 企业账号没有个人成长体系，不发请求（上游会回 403/10001）
+        if (credential.enterpriseId.isNotEmpty()) return ProviderTaskListView(emptyList())
         return try {
             val (status, body) = getJson("${chatBase(credential)}$PATH_GROWTH/tasks", billingHeaders(credential))
             if (status !in 200..299) {
-                return ProviderTaskListView(emptyList(), error = "上游 HTTP $status" + describeBody(body))
+                return ProviderTaskListView(
+                    emptyList(),
+                    error = failure("成长中心", endpoint(credential), "${chatBase(credential)}$PATH_GROWTH/tasks", status, body),
+                )
             }
             val obj = jsonOf(body) ?: return ProviderTaskListView(emptyList(), error = "响应不是合法 JSON")
             val inPeriod = obj.get("in_period")?.asBoolean ?: false
@@ -608,7 +659,7 @@ class CodeBuddyProvider(
             )
             if (status !in 200..299) {
                 return ProviderActionResult.failure(
-                    "签到失败（HTTP $status）" + describeBody(text),
+                    failure("签到", endpoint(credential), "${billingBase(credential)}$PATH_CHECKIN", status, text),
                 )
             }
             val code = runCatching { JsonParser.parseString(text).asJsonObject.get("code")?.asLong }.getOrNull() ?: -1L
@@ -626,39 +677,96 @@ class CodeBuddyProvider(
 
     // ------------------------------------------------------------------ 凭证
 
+    private val refreshLock = Any()
+
+    /**
+     * 最近一次成功刷新的凭证，按账号 uid 记录。
+     *
+     * 用 uid 而不是 refresh_token 作键：上游会轮换 refresh_token，旧值随即作废，
+     * 以旧值为键会查不到刚写入的缓存而重复刷新。
+     */
+    @Volatile
+    private var lastRefreshed: Map<String, Credential> = emptyMap()
+
+    /** 各账号最近一次刷新失败的秒级时间戳（按 uid），用于失败冷却。 */
+    @Volatile
+    private var lastRefreshFailedAt: Map<String, Long> = emptyMap()
+
     override fun refreshAccount(account: ProviderAccount, skewSeconds: Long): ProviderAccount? {
         val credential = parse(account) ?: return null
         val nowSeconds = nowMillis() / 1000
         if (credential.expiresAt > 0 && credential.expiresAt - nowSeconds > skewSeconds) return null
         if (credential.refreshToken.isEmpty()) return null
-        return try {
-            val (status, text) = postJson(
-                "${chatBase(credential)}$PATH_TOKEN_REFRESH",
-                credential,
-                null,
-                refreshHeaders(credential),
-            )
-            if (status !in 200..299) return null
-            val data = envelopeData(text) ?: return null
-            val access = data.get("accessToken")?.asString.orEmpty()
-            if (access.isEmpty()) return null
-            val expiresIn = data.get("expiresIn")?.asLong ?: 0L
-            val refreshed = credential.copy(
-                accessToken = access,
-                refreshToken = data.get("refreshToken")?.asString.orEmpty().ifEmpty { credential.refreshToken },
-                domain = data.get("domain")?.asString.orEmpty().ifEmpty { credential.domain },
-                expiresAt = if (expiresIn > 0) nowSeconds + expiresIn else credential.expiresAt,
-            )
-            toProviderAccount(refreshed)
-        } catch (_: Exception) {
-            null
+        val uid = account.uid
+        synchronized(refreshLock) {
+            // 锁内复查：并发请求跨入同一临期窗口时，复用别的线程刚刷出的凭证，绝不重复刷新。
+            // 必须返回新凭证——返回 null 会让调用方拿旧 token 去请求（直接 401）。
+            val cached = lastRefreshed[uid]
+            if (cached != null && cached.expiresAt - nowSeconds > skewSeconds) {
+                return toProviderAccount(cached)
+            }
+            // 失败冷却：刷新失败后短时间内不再重打，否则 token 被吊销后会按请求频率轰炸端点。
+            val failedAt = lastRefreshFailedAt[uid]
+            if (failedAt != null && nowSeconds - failedAt < REFRESH_COOLDOWN_SECONDS) return null
+            return try {
+                val (status, text) = postJson(
+                    "${chatBase(credential)}$PATH_TOKEN_REFRESH",
+                    credential,
+                    null,
+                    refreshHeaders(credential),
+                )
+                if (status !in 200..299) return refreshFailed(uid, nowSeconds)
+                val data = envelopeData(text) ?: return refreshFailed(uid, nowSeconds)
+                val access = data.get("accessToken")?.asString.orEmpty()
+                if (access.isEmpty()) return refreshFailed(uid, nowSeconds)
+                val expiresIn = data.get("expiresIn")?.asLong ?: 0L
+                val refreshed = credential.copy(
+                    accessToken = access,
+                    refreshToken = data.get("refreshToken")?.asString.orEmpty().ifEmpty { credential.refreshToken },
+                    domain = data.get("domain")?.asString.orEmpty().ifEmpty { credential.domain },
+                    expiresAt = if (expiresIn > 0) nowSeconds + expiresIn else credential.expiresAt,
+                )
+                lastRefreshed = lastRefreshed + (uid to refreshed)
+                if (lastRefreshFailedAt.containsKey(uid)) lastRefreshFailedAt = lastRefreshFailedAt - uid
+                toProviderAccount(refreshed)
+            } catch (_: Exception) {
+                refreshFailed(uid, nowSeconds)
+            }
         }
+    }
+
+    /** 记录一次刷新失败并返回 null（调用方据此沿用旧凭证/除障）。 */
+    private fun refreshFailed(uid: String, nowSeconds: Long): ProviderAccount? {
+        lastRefreshFailedAt = lastRefreshFailedAt + (uid to nowSeconds)
+        return null
+    }
+
+    /**
+     * 粘贴凭证 JSON 导入。
+     *
+     * 上游没有回调链接端点，浏览器授权错过后只能手工把凭证 JSON 贴进来。
+     * 解析走与设备授权相同的 [credentialOf] → [toProviderAccount] 链路，
+     * 因此导入的账号与轮询登录得到的账号结构完全一致，账号池无需区分来源。
+     *
+     * [credentialOf] 已经兼容 camelCase / snake_case 两套字段名并在 uid 缺失时从 JWT 兜底，
+     * 这里只负责报错——非法输入必须给出可读原因（`importAccountJson` 会把 message 当错误回传）。
+     */
+    override fun importCredentials(raw: String): ProviderAccount? {
+        val text = raw.trim()
+        if (text.isEmpty()) throw IllegalStateException("凭证 JSON 不能为空")
+        val obj = runCatching { JsonParser.parseString(text).asJsonObject }.getOrNull()
+            ?: throw IllegalStateException("不是合法的 JSON，请粘贴完整凭证")
+        val credential = credentialOf(obj)
+        if (credential.accessToken.isEmpty()) {
+            throw IllegalStateException("凭证缺少 accessToken（access_token）字段")
+        }
+        return toProviderAccount(credential)
     }
 
     // ------------------------------------------------------------------ 设备授权登录
 
     override fun startDeviceAuth(region: String): DeviceAuthTicket {
-        val base = if (region == REGION_GLOBAL) GLOBAL_CHAT_BASE else CN_CHAT_BASE
+        val base = endpointOf(region).chatBase
         val (status, text) = try {
             postJson("$base$PATH_AUTH_STATE?platform=CLI", null, "{}", emptyMap())
         } catch (e: Exception) {
@@ -673,7 +781,7 @@ class CodeBuddyProvider(
     }
 
     override fun pollDeviceAuth(state: String, region: String): DeviceAuthPoll {
-        val base = if (region == REGION_GLOBAL) GLOBAL_CHAT_BASE else CN_CHAT_BASE
+        val base = endpointOf(region).chatBase
         val encoded = URLEncoder.encode(state, "UTF-8")
         val (status, text) = try {
             getJson("$base$PATH_AUTH_TOKEN?state=$encoded")
@@ -696,13 +804,34 @@ class CodeBuddyProvider(
     // ------------------------------------------------------------------ 上游
 
     private fun fetchModels(credential: Credential): List<ProviderModel> {
-        val (status, text) = getJson("${chatBase(credential)}$PATH_MODELS", chatHeaders(credential))
-        if (status !in 200..299) throw IllegalStateException("模型接口 HTTP $status")
+        val ep = endpoint(credential)
+        val host = ep.chatBase
+        val path = ep.modelsPath
+        val (status, text) = try {
+            // 目录响应带内嵌图标，可能上百 KB：允许 gzip（平台自己带上并透明解压）
+            getJson("$host$path", modelsHeaders(credential), MODELS_READ_TIMEOUT_MS, allowCompression = true)
+        } catch (e: Exception) {
+            throw IllegalStateException("模型接口请求失败（${ep.label} $host$path）：${e.message}", e)
+        }
+        if (status !in 200..299) {
+            throw IllegalStateException(failure("模型接口", ep, "$host$path", status, text))
+        }
         val obj = runCatching { JsonParser.parseString(text).asJsonObject }.getOrNull()
-            ?: throw IllegalStateException("模型响应不是合法 JSON")
-        if (obj.get("code")?.asLong != 0L) throw IllegalStateException("模型接口 code=${obj.get("code")}")
-        val data = obj.objOrNull("data") ?: return emptyList()
+            ?: throw IllegalStateException("模型响应不是合法 JSON：${text.trim().take(160)}")
+        if (obj.get("code")?.asLong != 0L) {
+            throw IllegalStateException("模型接口 code=${obj.get("code")}" + describeBody(text))
+        }
+        return parseModelsCatalog(obj.objOrNull("data") ?: return emptyList())
+    }
 
+    /**
+     * 从目录响应解析模型清单。
+     *
+     * 国内（网页控制台）与国际（客户端 product config）两份响应的结构相同：
+     * `data.models[]` 是模型定义，`data.agents[name=cli].models` 是 CLI 可用的白名单，
+     * 所以解析逻辑共用。
+     */
+    internal fun parseModelsCatalog(data: JsonObject): List<ProviderModel> {
         val cliIds = LinkedHashSet<String>()
         data.arrayOrNull("agents")?.forEach { element ->
             val agent = runCatching { element.asJsonObject }.getOrNull() ?: return@forEach
@@ -749,22 +878,14 @@ class CodeBuddyProvider(
         body: String?,
         headers: Map<String, String>,
         method: String = if (body == null) "GET" else "POST",
+        readTimeoutMs: Int = READ_TIMEOUT_MS,
+        allowCompression: Boolean = false,
     ): HttpURLConnection {
-        val conn = (URL(url).openConnection() as HttpURLConnection).apply {
-            requestMethod = method
-            connectTimeout = CONNECT_TIMEOUT_MS
-            readTimeout = READ_TIMEOUT_MS
-            instanceFollowRedirects = false
-            setRequestProperty("Accept-Encoding", "identity")
+        val merged = buildMap {
+            putAll(headers)
+            if (body != null) put("Content-Type", "application/json")
         }
-        for ((key, value) in headers) conn.setRequestProperty(key, value)
-        if (body != null) {
-            conn.doOutput = true
-            val bytes = body.toByteArray(StandardCharsets.UTF_8)
-            conn.setFixedLengthStreamingMode(bytes.size)
-            conn.outputStream.use { it.write(bytes) }
-        }
-        return conn
+        return HttpSupport.open(url, method, merged, body, CONNECT_TIMEOUT_MS, readTimeoutMs, allowCompression)
     }
 
     private fun postJson(
@@ -775,20 +896,21 @@ class CodeBuddyProvider(
     ): Pair<Int, String> {
         val conn = open(url, credential, body, headers)
         return try {
-            val status = conn.responseCode
-            val text = if (status in 200..299) readLimited(conn.inputStream) else readLimited(conn.errorStream)
-            status to text
+            conn.responseCode to HttpSupport.readBody(conn)
         } finally {
             conn.disconnect()
         }
     }
 
-    private fun getJson(url: String, headers: Map<String, String> = emptyMap()): Pair<Int, String> {
-        val conn = open(url, null, null, headers, method = "GET")
+    private fun getJson(
+        url: String,
+        headers: Map<String, String> = emptyMap(),
+        readTimeoutMs: Int = READ_TIMEOUT_MS,
+        allowCompression: Boolean = false,
+    ): Pair<Int, String> {
+        val conn = open(url, null, null, headers, method = "GET", readTimeoutMs = readTimeoutMs, allowCompression = allowCompression)
         return try {
-            val status = conn.responseCode
-            val text = if (status in 200..299) readLimited(conn.inputStream) else readLimited(conn.errorStream)
-            status to text
+            conn.responseCode to HttpSupport.readBody(conn)
         } finally {
             conn.disconnect()
         }
@@ -806,13 +928,59 @@ class CodeBuddyProvider(
         )
     }
 
-    private fun chatHeaders(credential: Credential): Map<String, String> = buildMap {
+    private fun chatHeaders(credential: Credential, body: String? = null): Map<String, String> = buildMap {
         putAll(commonHeaders(credential))
         put("Authorization", "Bearer ${credential.accessToken}")
         if (credential.uid.isNotEmpty()) put("X-User-Id", credential.uid)
-        if (credential.enterpriseId.isNotEmpty()) put("X-Enterprise-Id", credential.enterpriseId)
+        if (credential.enterpriseId.isNotEmpty()) {
+            // 企业账号必须两个都带（与 billingHeaders 口径一致）：
+            // 官方客户端每个请求都同时发 X-Enterprise-Id 与 X-Tenant-Id；
+            // 只带一个时上游会按**个人账号**回答——模型目录/能力会退化成个人套餐。
+            put("X-Enterprise-Id", credential.enterpriseId)
+            put("X-Tenant-Id", credential.enterpriseId)
+        }
         if (credential.domain.isNotEmpty()) put("X-Domain", credential.domain)
         put("X-Product", "SaaS")
+        // 官方 CLI 的会话 ID 头族（对话端点必需）：国际版缺 `X-Conversation-ID`
+        // 会直接 400「conversation id missing」。
+        if (body != null) putAll(conversationHeaders(body))
+    }
+
+    /**
+     * 会话 ID 头族。
+     *
+     * 两个必须区分开的语义：
+     * - `X-Conversation-ID` **在同一个会话内必须稳定**：上游按它给提示词缓存分桶，
+     *   每请求一个新 id 会让每次请求落到不同桶——长上下文下实测 0% 前缀命中、
+     *   积分多花约 3 倍。所以它由消息前缀确定性派生（同会话同值）。
+     * - `X-Conversation-Request-ID` / `X-Conversation-Message-ID` / `X-Request-ID`
+     *   每个请求都换新（官方 CLI 也是如此，参照实现用抓包验证过）。
+     */
+    private fun conversationHeaders(body: String): Map<String, String> {
+        val traceId = uuid4()
+        // 派生不出会话指纹时**不能**改成随机：那会让每次请求落到不同缓存桶。
+        // 退回一个固定 UUID（与官方 CLI 的「会话内稳定」语义一致）。
+        val conversationId = stableConversationId(body).ifEmpty { FALLBACK_CONVERSATION_ID }
+        return mapOf(
+            "X-Conversation-ID" to conversationId,
+            "X-Conversation-Request-ID" to uuid4(),
+            "X-Conversation-Message-ID" to uuid4(),
+            "X-Request-ID" to traceId,
+            "X-Trace-ID" to traceId,
+            "X-Agent-Intent" to "craft",
+            "X-Agent-Purpose" to "conversation",
+            "X-IDE-Type" to "CLI",
+            "X-IDE-Name" to "CLI",
+            "x-codebuddy-request" to "1",
+        )
+    }
+
+    /**
+     * 模型目录请求头：同 [chatHeaders]，再叠加该区域的附加头（国际版要 `X-Agent-Type: main`）。
+     */
+    private fun modelsHeaders(credential: Credential): Map<String, String> = buildMap {
+        putAll(chatHeaders(credential))
+        putAll(endpoint(credential).extraHeaders)
     }
 
     private fun billingHeaders(credential: Credential): Map<String, String> = buildMap {
@@ -837,9 +1005,20 @@ class CodeBuddyProvider(
     private fun refreshHeaders(credential: Credential): Map<String, String> = buildMap {
         putAll(commonHeaders(credential))
         put("X-Refresh-Token", credential.refreshToken)
-        if (credential.enterpriseId.isNotEmpty()) put("X-Enterprise-Id", credential.enterpriseId)
+        if (credential.enterpriseId.isNotEmpty()) {
+            put("X-Enterprise-Id", credential.enterpriseId)
+            put("X-Tenant-Id", credential.enterpriseId)
+        }
         put("X-Auth-Refresh-Source", "workbuddy")
     }
+
+    /**
+     * 上游失败的统一描述：`<前缀>（<区域> <URL>）HTTP <状态码>：<上游原文>`。
+     *
+     * 只报状态码无法定位（同一个 500 可能来自完全不同的原因），所以原文一律带出来。
+     */
+    private fun failure(prefix: String, endpoint: Endpoint, url: String, status: Int, body: String): String =
+        "$prefix（${endpoint.label} $url）HTTP $status" + describeBody(body).ifEmpty { "（响应体为空）" }
 
     private fun userResourceBody(): String {
         val format = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
@@ -857,9 +1036,28 @@ class CodeBuddyProvider(
 
     // ------------------------------------------------------------------ 工具
 
+    /**
+     * 区域判定：
+     * 1. access_token 的 JWT `iss` 是权威依据——上游两个 realm（国内 codebuddy.cn / 国际
+     *    workbuddy.ai）就靠它区分，而拿国际版 token 打国内站点会被直接回 500；
+     * 2. 否则看凭证里的 `domain`：`workbuddy.ai` / `codebuddy.ai`（国际历史域名）为国际，
+     *    其余非空值为国内；
+     * 3. 都没有时回退到供应商设置里的区域。
+     */
     private fun regionOf(credential: Credential?): String {
-        val domain = credential?.domain.orEmpty().lowercase()
-        if (domain.endsWith(".workbuddy.ai") || domain == "workbuddy.ai") return REGION_GLOBAL
+        val issuer = jwtClaim(credential?.accessToken.orEmpty(), "iss", "issuer").lowercase()
+        if (issuer.contains("workbuddy.ai") || issuer.contains("codebuddy.ai")) return REGION_GLOBAL
+
+        val domain = credential?.domain.orEmpty().trim().lowercase()
+        if (
+            domain == REGION_GLOBAL ||
+            domain == "workbuddy.ai" ||
+            domain.endsWith(".workbuddy.ai") ||
+            domain == "codebuddy.ai" ||
+            domain.endsWith(".codebuddy.ai")
+        ) {
+            return REGION_GLOBAL
+        }
         if (domain.isNotEmpty()) return REGION_CN
         return region()
     }
@@ -869,14 +1067,14 @@ class CodeBuddyProvider(
 
     override fun regions(): List<String> = listOf(REGION_CN, REGION_GLOBAL)
 
-    private fun chatBase(credential: Credential?): String =
-        if (regionOf(credential) == REGION_GLOBAL) GLOBAL_CHAT_BASE else CN_CHAT_BASE
+    /** 该凭证的区域端点；所有按区域分叉的 host / 路径 / 头都从这里取。 */
+    private fun endpoint(credential: Credential?): Endpoint = endpointOf(regionOf(credential))
 
-    private fun billingBase(credential: Credential?): String =
-        if (regionOf(credential) == REGION_GLOBAL) GLOBAL_BILLING_BASE else CN_BILLING_BASE
+    private fun chatBase(credential: Credential?): String = endpoint(credential).chatBase
 
-    private fun originFor(credential: Credential?): String =
-        if (regionOf(credential) == REGION_GLOBAL) GLOBAL_ORIGIN else CN_ORIGIN
+    private fun billingBase(credential: Credential?): String = endpoint(credential).billingBase
+
+    private fun originFor(credential: Credential?): String = endpoint(credential).origin
 
     private fun parse(account: ProviderAccount): Credential? {
         val obj = runCatching { JsonParser.parseString(account.secret).asJsonObject }.getOrNull() ?: return null
@@ -890,7 +1088,13 @@ class CodeBuddyProvider(
         return Credential(
             accessToken = accessToken,
             refreshToken = obj.firstString("refreshToken", "refresh_token"),
-            expiresAt = obj.firstLong("expiresAt", "expires_at"),
+            // 设备授权/刷新返回的是**相对的** expiresIn（秒），没有绝对时间戳。不换算成绝对时间的话
+            // expiresAt 恒为 0，[refreshAccount] 的「距过期还早就不刷」判断失效，
+            // 每个请求都会先做一次 token 刷新往返（首字延迟平白多一跳）。
+            expiresAt = obj.firstLong("expiresAt", "expires_at").takeIf { it > 0 }
+                ?: obj.firstLong("expiresIn", "expires_in").takeIf { it > 0 }
+                    ?.let { nowMillis() / 1000 + it }
+                ?: 0L,
             domain = obj.firstString("domain"),
             // 响应里没给时从 access_token（JWT）里解，旧的存量账号也能自动修好
             uid = obj.firstString("uid", "userId", "user_id")
@@ -942,22 +1146,6 @@ class CodeBuddyProvider(
     private fun matchesSessionDead(body: String): Boolean =
         SESSION_DEAD_MARKERS.any { body.contains(it) }
 
-    private fun readLimited(input: InputStream?): String {
-        if (input == null) return ""
-        val out = ByteArrayOutputStream()
-        val buffer = ByteArray(8192)
-        while (true) {
-            val read = input.read(buffer)
-            if (read < 0) break
-            if (out.size() + read > MAX_BODY_BYTES) {
-                out.write(buffer, 0, MAX_BODY_BYTES - out.size())
-                break
-            }
-            out.write(buffer, 0, read)
-        }
-        return out.toString("UTF-8")
-    }
-
     private fun requestedModel(body: String): String =
         runCatching { JsonParser.parseString(body).asJsonObject.get("model")?.asString.orEmpty() }
             .getOrDefault("")
@@ -984,12 +1172,48 @@ class CodeBuddyProvider(
         const val REGION_CN = "cn"
         const val REGION_GLOBAL = "global"
 
-        const val CN_CHAT_BASE = "https://copilot.tencent.com"
-        const val CN_BILLING_BASE = "https://www.codebuddy.cn"
-        const val CN_ORIGIN = "https://www.codebuddy.cn"
-        const val GLOBAL_CHAT_BASE = "https://www.workbuddy.ai"
-        const val GLOBAL_BILLING_BASE = "https://www.workbuddy.ai"
-        const val GLOBAL_ORIGIN = "https://www.workbuddy.ai"
+        /** 业务码：该模型已超限（换号无用，换模型立刻可用）。 */
+        const val CODE_MODEL_LIMITED = 6004L
+
+        /** 刷新失败后的冷却秒数：期间不再重打上游刷新端点。 */
+        const val REFRESH_COOLDOWN_SECONDS = 60L
+
+        /**
+         * 一个区域对应的出站端点。
+         *
+         * 按区域分叉的一切（host / Origin / 模型目录路径 / 附加头 / 展示名）都收在这里：
+         * 同一个账号的每个请求都必须从同一处取端点，否则会出现「一部分请求打到另一个站点」
+         * （见项目记忆 provider-region-consistency）。
+         */
+        internal data class Endpoint(
+            val label: String,
+            val chatBase: String,
+            val billingBase: String,
+            val origin: String,
+            val modelsPath: String,
+            val extraHeaders: Map<String, String> = emptyMap(),
+        )
+
+        internal val CN_ENDPOINT = Endpoint(
+            label = "国内版",
+            chatBase = "https://copilot.tencent.com",
+            billingBase = "https://www.codebuddy.cn",
+            origin = "https://www.codebuddy.cn",
+            modelsPath = PATH_MODELS_CN,
+        )
+
+        internal val GLOBAL_ENDPOINT = Endpoint(
+            label = "国际版",
+            chatBase = "https://www.workbuddy.ai",
+            billingBase = "https://www.workbuddy.ai",
+            origin = "https://www.workbuddy.ai",
+            modelsPath = PATH_MODELS_GLOBAL,
+            // WorkBuddy AI 客户端的客户端类型标识，国际版站点要求
+            extraHeaders = mapOf("X-Agent-Type" to "main"),
+        )
+
+        internal fun endpointOf(region: String): Endpoint =
+            if (region == REGION_GLOBAL) GLOBAL_ENDPOINT else CN_ENDPOINT
 
         const val CLIENT_UA = "CLI/2.63.2 CodeBuddy/2.63.2"
 
@@ -997,7 +1221,22 @@ class CodeBuddyProvider(
         const val PATH_AUTH_TOKEN = "/v2/plugin/auth/token"
         const val PATH_TOKEN_REFRESH = "/v2/plugin/auth/token/refresh"
         const val PATH_CHAT = "/v2/chat/completions"
-        const val PATH_MODELS = "/console/enterprises/personal/models"
+        const val PATH_MODELS_CN = "/console/enterprises/personal/models"
+
+        /**
+         * 国际版的模型目录来源：客户端 product config（`/v3/config`）。
+         *
+         * 国内那条 `/console/...` 只服务网页会话：无凭证时 302 跳 OIDC 登录页，拿 Bearer token 打
+         * 它会被后端直接 500；`/v2/enterprises/personal/models` 则会一直不返回（请求挂死）。
+         * 国际版客户端（CLI / 桌面端）实际读 `/v3/config` 的 `data.agents[cli].models`，
+         * 与国内那份响应同构，解析逻辑共用。
+         */
+        const val PATH_MODELS_GLOBAL = "/v3/config"
+
+        /**
+         * 模型目录路径：国内走网页控制台接口，国际版走客户端 product config。
+         */
+        internal fun modelsPath(region: String): String = endpointOf(region).modelsPath
         const val PATH_USER_RESOURCE = "/v2/billing/meter/get-user-resource"
         const val PATH_CHECKIN = "/v2/billing/meter/daily-checkin"
 
@@ -1035,23 +1274,168 @@ class CodeBuddyProvider(
             else value.toString().trimEnd('0').trimEnd('.')
         }
 
-
         private const val CONNECT_TIMEOUT_MS = 30_000
         private const val READ_TIMEOUT_MS = 300_000
-        private const val MAX_BODY_BYTES = 1 shl 20
+
+        /** 模型目录是普通 JSON 接口（非流式），给它一个短超时：
+         *  用对话那套 300s 会被网关侧的 20s 聚合超时盖掉，看不到真实错误。 */
+        private const val MODELS_READ_TIMEOUT_MS = 15_000
     }
 }
 
 /**
  * 改写发往 CodeBuddy 的请求体：
  * 1. 强制 `stream:true`（上游拒绝非流式）；
- * 2. `tool_choice` 归一化成字符串（上游该字段是 string，对象形式会 400）。
+ * 2. `tool_choice` 归一化成字符串（上游该字段是 string，对象形式会 400）；
+ * 3. 消息形状对齐上游要求（首条必须 system、`developer` 改叫 `system`）
+ *    与 `max_completion_tokens` → `max_tokens`；
+ * 4. 去掉上游会拦的特征文本（Claude Code / Codex CLI 的系统提示词片段）。
  */
-internal fun prepareCodeBuddyBody(src: String): String {
-    val obj = runCatching { JsonParser.parseString(src).asJsonObject }.getOrNull() ?: return src
+internal fun prepareCodeBuddyBody(src: String): String = prepareCodeBuddyRequest(src).body
+
+/** 归一化后的请求体 + 工具名还原表（空表 = 无需还原，响应可原样透传）。 */
+internal data class PreparedCodeBuddyRequest(
+    val body: String,
+    val toolNameRestore: Map<String, String>,
+)
+
+internal fun prepareCodeBuddyRequest(src: String): PreparedCodeBuddyRequest {
+    val obj = runCatching { JsonParser.parseString(src).asJsonObject }.getOrNull()
+        ?: return PreparedCodeBuddyRequest(src, emptyMap())
     obj.addProperty("stream", true)
     normalizeCodeBuddyToolChoice(obj)
-    return obj.toString()
+    normalizeCodeBuddyMessages(obj)
+    normalizeCodeBuddyMaxTokens(obj)
+    unflagCodeBuddyMessages(obj)
+    val restore = normalizeCodeBuddyTools(obj)
+    return PreparedCodeBuddyRequest(obj.toString(), restore)
+}
+
+/**
+ * 工具形状归一：schema 按上游能接受的形状改写，工具名里的非法字符换成 `_`。
+ *
+ * 不做这两件事时，国际版会直接回 400「Invalid request parameters」（11133）。
+ * 返回「改写后的名字 → 原名」，供响应侧还原调用名。
+ */
+private fun normalizeCodeBuddyTools(obj: JsonObject): Map<String, String> {
+    val tools = obj.arrayOrNull("tools") ?: return emptyMap()
+    val restore = LinkedHashMap<String, String>()
+    for (element in tools) {
+        val tool = runCatching { element.asJsonObject }.getOrNull() ?: continue
+        val function = tool.objOrNull("function") ?: continue
+        function.get("name")?.takeIf { it.isJsonPrimitive && it.asJsonPrimitive.isString }?.let { name ->
+            val original = name.asString
+            val sanitized = sanitizeToolName(original)
+            if (sanitized != original) {
+                function.addProperty("name", sanitized)
+                restore.putIfAbsent(sanitized, original)
+            }
+        }
+        function.get("parameters")?.let { function.add("parameters", normalizeToolParameters(it)) }
+    }
+    return restore
+}
+
+/** 上游不认 `max_completion_tokens`（新版 OpenAI 客户端会发它），只认 `max_tokens`。 */
+private fun normalizeCodeBuddyMaxTokens(obj: JsonObject) {
+    val legacy = obj.get("max_completion_tokens") ?: return
+    obj.remove("max_completion_tokens")
+    if (!obj.has("max_tokens")) obj.add("max_tokens", legacy)
+}
+
+/** 缺 system 消息时补的默认提示词（与公开实现一致的中性文本，能过上游的内容检查）。 */
+private const val DEFAULT_SYSTEM_PROMPT = "You are a helpful assistant."
+
+/**
+ * 消息形状归一。
+ *
+ * 上游把「首条消息不是 system」当成错误拒绝（HTTP 400 code=11128
+ * "first message is not system prompt"），所以缺就补一条；
+ * 只要不是 system 的 `developer` 角色也改叫 `system`。
+ */
+private fun normalizeCodeBuddyMessages(obj: JsonObject) {
+    val messages = obj.arrayOrNull("messages") ?: return
+    for (element in messages) {
+        val message = runCatching { element.asJsonObject }.getOrNull() ?: continue
+        if (message.get("role")?.asString == "developer") message.addProperty("role", "system")
+    }
+
+    // 11153「the conversation must end with a user message」：工具结果之后紧跟 user 消息
+    // （Claude Code 的提醒、任务中途输入、工具图片）会被上游拒；中间插一条空 assistant 即可通过。
+    // Gson 的 JsonArray 没有 add(index, e)，所以新数组重建。
+    val rebuilt = JsonArray()
+    var prevRole: String? = null
+    for (element in messages) {
+        val role = runCatching { element.asJsonObject.get("role")?.asString }.getOrNull()
+        if (prevRole == "tool" && role == "user") {
+            rebuilt.add(
+                JsonObject().apply {
+                    addProperty("role", "assistant")
+                    addProperty("content", "")
+                },
+            )
+        }
+        rebuilt.add(element)
+        prevRole = role
+    }
+    obj.add("messages", rebuilt)
+
+    val first = rebuilt.firstOrNull()?.let { runCatching { it.asJsonObject }.getOrNull() }
+    if (first != null && first.get("role")?.asString == "system") return
+    val withSystem = JsonArray()
+    withSystem.add(
+        JsonObject().apply {
+            addProperty("role", "system")
+            addProperty("content", DEFAULT_SYSTEM_PROMPT)
+        },
+    )
+    for (element in rebuilt) withSystem.add(element)
+    obj.add("messages", withSystem)
+}
+
+/**
+ * 上游会以「Illegal API invocation from an unapproved channel」拦下带第三方 CLI 特征文本的请求
+ * （Claude Code / Codex CLI 的系统提示词片段），这几处按等义写法替换即可通过。
+ *
+ * 替换表来自公开实现 magpie（MIT，yetone，https://github.com/yetone/magpie；
+ * 用真实客户端逐词实测得出），两套发行版都适用。
+ */
+private val FLAGGED_TEXT = listOf(
+    Regex("x-anthropic-billing-header:[^\\n]*\\n?", RegexOption.IGNORE_CASE) to "",
+    Regex("You are Claude Code, Anthropic['’]s official CLI for Claude", RegexOption.IGNORE_CASE) to
+        "You are Claude Code, Anthropic's CLI for Claude",
+    Regex("Main branch \\(you will usually use this for PRs\\)", RegexOption.IGNORE_CASE) to
+        "Main branch (usually the base for PRs)",
+    Regex("(?<!the )Codex CLI is an open source project led by OpenAI\\.", RegexOption.IGNORE_CASE) to
+        "The Codex CLI is an open source project led by OpenAI.",
+)
+
+/** 去掉消息里的敏感特征文本；字符串内容与多模态 parts 都处理。 */
+private fun unflagCodeBuddyMessages(obj: JsonObject) {
+    val messages = obj.arrayOrNull("messages") ?: return
+    for (element in messages) {
+        val message = runCatching { element.asJsonObject }.getOrNull() ?: continue
+        val content = message.get("content") ?: continue
+        when {
+            content.isJsonPrimitive && content.asJsonPrimitive.isString ->
+                message.addProperty("content", unflagText(content.asString))
+            content.isJsonArray -> {
+                for (part in content.asJsonArray) {
+                    val partObj = runCatching { part.asJsonObject }.getOrNull() ?: continue
+                    val text = partObj.get("text") ?: continue
+                    if (text.isJsonPrimitive && text.asJsonPrimitive.isString) {
+                        partObj.addProperty("text", unflagText(text.asString))
+                    }
+                }
+            }
+        }
+    }
+}
+
+internal fun unflagText(text: String): String {
+    var result = text
+    for ((pattern, replacement) in FLAGGED_TEXT) result = pattern.replace(result, replacement)
+    return result
 }
 
 internal fun normalizeCodeBuddyToolChoice(obj: JsonObject) {
@@ -1088,27 +1472,6 @@ internal fun normalizeCodeBuddyToolChoice(obj: JsonObject) {
 private fun jsonOf(body: String): JsonObject? =
     runCatching { JsonParser.parseString(body).asJsonObject }.getOrNull()
 
-/** 取第一个非空字段（兼容 camelCase / snake_case 两套命名）。 */
-internal fun JsonObject.firstString(vararg keys: String): String {
-    for (key in keys) {
-        val value = get(key) ?: continue
-        if (!value.isJsonPrimitive) continue
-        val text = runCatching { value.asString }.getOrNull().orEmpty()
-        if (text.isNotEmpty()) return text
-    }
-    return ""
-}
-
-internal fun JsonObject.firstLong(vararg keys: String): Long {
-    for (key in keys) {
-        val value = get(key) ?: continue
-        if (!value.isJsonPrimitive) continue
-        val number = runCatching { value.asLong }.getOrNull()
-        if (number != null && number > 0) return number
-    }
-    return 0L
-}
-
 /** 按顺序取第一个能解析成数字的字段（用于 credits / reward_credit 这类可能是字符串的字段）。 */
 internal fun JsonObject.firstNumber(vararg keys: String): Double? {
     for (key in keys) {
@@ -1139,20 +1502,3 @@ private fun describeBody(body: String): String {
     if (message.isNotEmpty()) return "：$message"
     return "：${body.trim().take(160)}"
 }
-
-/**
- * 从 access_token（JWT）的 payload 里取某个声明；取不到返回空串。
- *
- * 登录响应里不一定带 uid，但 access_token 是 JWT，里面通常有 user_id ——
- * 靠这个兜底，已经存进账号池的旧凭证也能自动补上 uid。
- */
-internal fun jwtClaim(accessToken: String, vararg keys: String): String {
-    val payload = accessToken.split('.').getOrNull(1) ?: return ""
-    if (payload.isEmpty()) return ""
-    val json = runCatching {
-        String(java.util.Base64.getUrlDecoder().decode(payload), Charsets.UTF_8)
-    }.getOrNull() ?: return ""
-    val obj = runCatching { JsonParser.parseString(json).asJsonObject }.getOrNull() ?: return ""
-    return obj.firstString(*keys)
-}
-

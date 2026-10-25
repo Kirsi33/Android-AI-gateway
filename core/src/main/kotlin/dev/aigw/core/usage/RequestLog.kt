@@ -27,12 +27,16 @@ data class LogLine(
  */
 class RequestLog(
     private val store: KeyValueStore,
-    private val capacity: Int = 300,
+    capacity: Int = 300,
     private val persistIntervalMillis: Long = 2_000,
     private val nowMillis: () -> Long = System::currentTimeMillis,
 ) {
     private val lines = ArrayDeque<LogLine>()
     private var lastPersistAt = 0L
+
+    /** 环形容量（可变）：设置里改小后经 [resize] 生效，缩小立即丢弃最旧行。 */
+    @Volatile
+    private var capacity = capacity.coerceAtLeast(1)
 
     /** 日志行序号：同一实例内单调递增，供 LazyColumn 稳定 key 使用。 */
     private var nextSeq = 0L
@@ -62,6 +66,13 @@ class RequestLog(
 
     @Synchronized
     fun flush() = persist()
+
+    /** 调整环形容量：缩小会丢弃最旧的行，调大则后续追加时生效。 */
+    @Synchronized
+    fun resize(newCapacity: Int) {
+        capacity = newCapacity.coerceAtLeast(1)
+        while (lines.size > capacity) lines.removeLast()
+    }
 
     private fun append(level: String, text: String) {
         val now = nowMillis()
@@ -97,6 +108,9 @@ class RequestLog(
                 ),
             )
         }
+        // 持久化文件可能来自容量更大的旧配置（或 setCapacity 调小前的写盘）：
+        // 载入后立即按当前 capacity 裁剪，避免首条 append 之前列表超容量展示。
+        while (lines.size > capacity) lines.removeLast()
     }
 
     companion object {

@@ -65,7 +65,9 @@ data class EntUsage(
  */
 class TraeCheckinClient(
     private val version: TraeVersion,
-    private val host: String = TraeConstants.UG_HOST,
+    private val host: String,
+    /** 该区域：额度接口版本段与 X-User-Region 头都要按它选，不能用 host 子串嗅探。 */
+    private val region: TraeRegion,
 ) {
 
     fun status(account: TraeAccount): CheckinStatus {
@@ -99,8 +101,8 @@ class TraeCheckinClient(
         var preview = ""
         var lastError: Exception? = null
 
-        // 国际版（host 含 trae.ai）只有 v1 接口；国内版走 v2 三个候选
-        val candidates = if (host.contains("trae.ai")) ENT_ENDPOINTS_INTL else ENT_ENDPOINTS_CN
+        // 国际版只有 v1 接口；国内版走 v2 三个候选
+        val candidates = if (region == TraeRegion.INTL) ENT_ENDPOINTS_INTL else ENT_ENDPOINTS_CN
         for (endpoint in candidates) {
             val raw = try {
                 post(account, endpoint.path, endpoint.body)
@@ -124,7 +126,7 @@ class TraeCheckinClient(
             body = body,
             connectTimeoutMs = TraeHttp.CONNECT_TIMEOUT_MS,
             readTimeoutMs = TraeHttp.READ_TIMEOUT_MS,
-        ) { TraeHeaders.ug(it, account, version) }
+        ) { TraeHeaders.ug(it, account, version, region) }
 
         val status = conn.responseCode
         val raw = TraeHttp.readBody(conn)

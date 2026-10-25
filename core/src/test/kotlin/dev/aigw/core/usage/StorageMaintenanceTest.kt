@@ -50,6 +50,28 @@ class StorageMaintenanceTest {
     }
 
     @Test
+    fun `日志开关与容量：旧配置回落默认且越界夹回`() {
+        // 存量配置没有这两个字段：必须得到默认值（归档开、容量 300），不得读成 0
+        val legacy = GatewaySettings().toJson().apply {
+            remove("callLoggingEnabled")
+            remove("requestLogCapacity")
+        }.toString()
+        assertEquals(true, GatewaySettings.fromJson(legacy).callLoggingEnabled)
+        assertEquals(GatewaySettings.DEFAULT_REQUEST_LOG_CAPACITY, GatewaySettings.fromJson(legacy).requestLogCapacity)
+
+        // 越界容量夹回合法区间，避免 0 条把日志全丢或天文数字无限占内存
+        assertEquals(GatewaySettings.MIN_REQUEST_LOG_CAPACITY, GatewaySettings.clampRequestLogCapacity(0))
+        assertEquals(GatewaySettings.MAX_REQUEST_LOG_CAPACITY, GatewaySettings.clampRequestLogCapacity(999999))
+
+        // 往返：toJson 后重新解析保持同值
+        val roundtrip = GatewaySettings.fromJson(
+            GatewaySettings(callLoggingEnabled = false, requestLogCapacity = 777).toJson().toString(),
+        )
+        assertEquals(false, roundtrip.callLoggingEnabled)
+        assertEquals(777, roundtrip.requestLogCapacity)
+    }
+
+    @Test
     fun `保留天数会被持久化并读回`() {
         val json = GatewaySettings(logRetentionDays = 7).toJson().toString()
         assertEquals(7, GatewaySettings.fromJson(json).logRetentionDays)

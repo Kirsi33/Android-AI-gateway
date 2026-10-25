@@ -1,9 +1,8 @@
 package dev.aigw.core.provider.loomy
 
-import java.io.ByteArrayOutputStream
+import dev.aigw.core.util.HttpSupport
 import java.io.InputStream
 import java.net.HttpURLConnection
-import java.net.URL
 
 /** 上游 HTTP 的小工具：只用到 Android 上同样存在的 `HttpURLConnection`。 */
 internal object LoomyHttp {
@@ -12,7 +11,7 @@ internal object LoomyHttp {
     const val READ_TIMEOUT_MS = 120_000
 
     /** 响应体读取上限，防止上游异常时撑爆内存。 */
-    const val MAX_BODY_BYTES = 1 shl 20
+    const val MAX_BODY_BYTES = HttpSupport.MAX_BODY_BYTES
 
     fun open(
         url: String,
@@ -21,49 +20,12 @@ internal object LoomyHttp {
         body: String?,
         connectTimeoutMs: Int = CONNECT_TIMEOUT_MS,
         readTimeoutMs: Int = READ_TIMEOUT_MS,
-    ): HttpURLConnection {
-        val conn = (URL(url).openConnection() as HttpURLConnection).apply {
-            requestMethod = method
-            connectTimeout = connectTimeoutMs
-            readTimeout = readTimeoutMs
-            instanceFollowRedirects = false
-            // 上游若对 SSE/JSON 做 gzip，流式解析会错乱，显式要求不压缩
-            setRequestProperty("Accept-Encoding", "identity")
-        }
-        for ((key, value) in headers) conn.setRequestProperty(key, value)
-        if (body != null) {
-            conn.doOutput = true
-            val bytes = body.toByteArray(Charsets.UTF_8)
-            conn.setFixedLengthStreamingMode(bytes.size)
-            conn.outputStream.use { it.write(bytes) }
-        }
-        return conn
-    }
+    ): HttpURLConnection =
+        HttpSupport.open(url, method, headers, body, connectTimeoutMs, readTimeoutMs)
 
     /** 读取响应体（非 2xx 时自动落到 errorStream）。 */
-    fun readBody(conn: HttpURLConnection, limit: Int = MAX_BODY_BYTES): String {
-        val stream = try {
-            conn.inputStream
-        } catch (_: Exception) {
-            conn.errorStream ?: return ""
-        }
-        return stream.use { readLimited(it, limit) }
-    }
-
-    fun readLimited(input: InputStream, limit: Int): String {
-        val buffer = ByteArrayOutputStream()
-        val chunk = ByteArray(8192)
-        while (true) {
-            val read = input.read(chunk)
-            if (read < 0) break
-            if (buffer.size() + read > limit) {
-                buffer.write(chunk, 0, limit - buffer.size())
-                break
-            }
-            buffer.write(chunk, 0, read)
-        }
-        return buffer.toString("UTF-8")
-    }
+    fun readBody(conn: HttpURLConnection, limit: Int = MAX_BODY_BYTES): String =
+        HttpSupport.readBody(conn, limit)
 }
 
 /**

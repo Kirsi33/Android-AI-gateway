@@ -3,6 +3,7 @@ package dev.aigw.core.protocol
 import com.google.gson.JsonArray
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
+import dev.aigw.core.provider.SSE_DONE
 import dev.aigw.core.util.arrayOrNull
 import dev.aigw.core.util.asObjectOrNull
 import dev.aigw.core.util.boolOrNull
@@ -17,13 +18,27 @@ import java.util.UUID
  * Antigravity 的 `cloudcode-pa.googleapis.com/v1internal:*` 只认 Gemini 的 `contents` 结构：
  * role 用 `user`/`model`（不是 `assistant`），`systemInstruction` 必须是带 `parts` 的对象，
  * 且 JSON Schema 里不支持 `const`/`$ref`/`$schema` 等字段（会 400）。这些坑都在这层处理。
+ *
+ * 多处字段口径对照 CLIProxyAPI（MIT，router-for-me，https://github.com/router-for-me/CLIProxyAPI）
+ * 的实现；来源汇总见仓库根目录 THIRD-PARTY-NOTICES.md。
  */
 object OpenAiGemini {
 
     const val THOUGHT_SIGNATURE = "skip_thought_signature_validator"
 
-    /** 把 OpenAI 请求体转成 Antigravity envelope 里的 `request` 对象。 */
-    fun toGeminiRequest(openAiBody: String): JsonObject {
+    /** 把 OpenAI 请求体转成 Antigravity envelope 里的 `request` 对象（Gemini 通道）。 */
+    fun toGeminiRequest(openAiBody: String): JsonObject = toGeminiRequest(openAiBody, model = "")
+
+    /**
+     * 同上前提，但按 [model] 区分通道：[model] 为 claude 时**不伪造 thought 签名**。
+     *
+     * [THOUGHT_SIGNATURE] 是占位符，Gemini 通道会跳过校验；而 Vertex 上的 Anthropic
+     * （Claude）通道会真去验签，把历史里的思考转成带它的 `thought` part 会被回
+     * `400 Invalid \`signature\` in \`thinking\` block`。我们没有上游真签名，所以对其
+     * 不构造 thought part（回传错误的签名比不回传更糟）。
+     */
+    fun toGeminiRequest(openAiBody: String, model: String): JsonObject {
+        val signThought = !model.contains("claude", ignoreCase = true)
         val obj = runCatching { JsonParser.parseString(openAiBody).asJsonObject }.getOrNull() ?: JsonObject()
         val request = JsonObject()
         val contents = JsonArray()
@@ -61,13 +76,15 @@ object OpenAiGemini {
                 hasEncounteredConversation = true
                 val partItems = JsonArray()
 
-                // 思维链（带 thoughtSignature，与 CLIProxyAPI 一致）
-                message.stringOrNull("reasoning_content")?.takeIf { it.isNotEmpty() }?.let {
-                    partItems.add(JsonObject().apply {
-                        addProperty("text", it)
-                        addProperty("thought", true)
-                        addProperty("thoughtSignature", THOUGHT_SIGNATURE)
-                    })
+                // 思维链（带 thoughtSignature，与 CLIProxyAPI 一致）；Claude 通道不伪造签名
+                if (signThought) {
+                    message.stringOrNull("reasoning_content")?.takeIf { it.isNotEmpty() }?.let {
+                        partItems.add(JsonObject().apply {
+                            addProperty("text", it)
+                            addProperty("thought", true)
+                            addProperty("thoughtSignature", THOUGHT_SIGNATURE)
+                        })
+                    }
                 }
 
                 // 文本内容与思维链合并在同一个 model content 内，严防连续相同 role
@@ -91,7 +108,7 @@ object OpenAiGemini {
                                 addProperty("name", fnName)
                                 add("args", runCatching { JsonParser.parseString(argsStr).asJsonObject }.getOrElse { JsonObject() })
                             })
-                            addProperty("thoughtSignature", THOUGHT_SIGNATURE)
+                            if (signThought) addProperty("thoughtSignature", THOUGHT_SIGNATURE)
                         })
                         toolCallsList.add(callId to fnName)
                     }
@@ -598,10 +615,6 @@ object OpenAiGemini {
                     })
                 }
             }
-        }
-
-        companion object {
-            const val SSE_DONE = "data: [DONE]\n\n"
         }
     }
 }

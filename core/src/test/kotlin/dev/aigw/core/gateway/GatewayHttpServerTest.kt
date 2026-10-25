@@ -84,8 +84,7 @@ class GatewayHttpServerTest {
             )
             assertTrue(response.startsWith("HTTP/1.1 200"), response.lineSequence().first())
             assertTrue(response.contains("\"object\":\"list\""), "应返回标准 list 结构")
-// 免登录型供应商（如 LongCat）无需凭证也能列模型，所以这里只验证
-            // 「登录后才拉取」的供应商（Trae / WorkBuddy）没有冒充内置快照。
+            // 登录后才拉取的供应商（Trae / WorkBuddy）没有账号时不该冒充内置快照。
             assertTrue(
                 !response.contains("\"trae-cn/") && !response.contains("\"trae-global/"),
                 "Trae 无账号时不该列出模型",

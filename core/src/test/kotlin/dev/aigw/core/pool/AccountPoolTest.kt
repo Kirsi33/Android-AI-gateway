@@ -23,6 +23,11 @@ class AccountPoolTest {
     private fun newPool(store: InMemoryKeyValueStore = InMemoryKeyValueStore()) =
         AccountPool(store, nowMillis = { now })
 
+    /** 直接往存储里塞凭证键（迁移用例需要绕过 upsert 预置旧数据）。 */
+    private fun seedAccount(store: InMemoryKeyValueStore, uid: String, providerId: String = TRAE) {
+        store.write("${AccountPool.ACCOUNT_PREFIX}$providerId/$uid", account(uid, providerId).toJson().toString())
+    }
+
     @Test
     fun `选号取可用账号中余额最高者`() {
         val pool = newPool()
@@ -121,33 +126,121 @@ class AccountPoolTest {
 
     @Test
     fun `旧版状态文件里的冷却字段被忽略`() {
-        // 历史数据带 untilMillis/errorCount/coolKind：新版直接忽略，不影响账号可用
+        // 历史数据带 untilMillis/errorCount/coolKind：迁移到新格式后直接忽略，不影响账号可用
         val store = InMemoryKeyValueStore()
-        val first = newPool(store)
-        first.upsert(account("a"))
-
-        val key = AccountPool.stateKey(TRAE)
-        val raw = store.read(key)!!
-        val patched = raw.replace(
-            "\"reason\":\"\"",
-            "\"reason\":\"\",\"untilMillis\":${now + 3_600_000},\"errorCount\":2,\"coolKind\":\"QUOTA\"",
+        store.write(
+            AccountPool.legacyStateKey(TRAE),
+            """{"accounts":{"a":{"credits":3,"creditsKnown":true,"detail":"","disabled":false,"enabled":true,"reason":"","untilMillis":${now + 3_600_000},"errorCount":2,"coolKind":"QUOTA"}}}""",
         )
-        store.write(key, patched)
+        seedAccount(store, "a")
 
-        val second = newPool(store)
-        val status = second.status(TRAE, "a")!!
+        val pool = newPool(store)
+        val status = pool.status(TRAE, "a")!!
         assertTrue(status.usable, "旧冷却字段不应再把账号挡在门外")
+        assertEquals(3L, status.credits)
     }
 
     @Test
-    fun `删除账号会清掉凭证键`() {
+    fun `状态写入落在每账号一个键`() {
         val store = InMemoryKeyValueStore()
         val pool = newPool(store)
         pool.upsert(account("a"))
+        pool.updateCredits(TRAE, "a", 888)
+
+        assertEquals("pool/state/trae/a.json", AccountPool.stateKey(TRAE, "a"))
+        val raw = store.read(AccountPool.stateKey(TRAE, "a"))
+        assertNotNull(raw)
+        assertTrue(raw.contains("\"credits\":888"), "状态应写在账号级键上")
+        assertNull(
+            store.read(AccountPool.legacyStateKey(TRAE)),
+            "新写入不应再落到 provider 级旧键",
+        )
+    }
+
+    @Test
+    fun `旧格式状态文件惰性迁移到新键`() {
+        val store = InMemoryKeyValueStore()
+        // 预置旧格式：一个 provider 一个文件，内含多个账号状态
+        store.write(
+            AccountPool.legacyStateKey(TRAE),
+            """{"accounts":{"a":{"credits":123,"creditsKnown":true,"detail":"d-a","disabled":false,"enabled":true,"reason":""},"b":{"credits":456,"creditsKnown":true,"detail":"d-b","disabled":true,"enabled":true,"reason":"凭证失效"}}}""",
+        )
+        seedAccount(store, "a")
+        seedAccount(store, "b")
+
+        val pool = newPool(store)
+
+        val a = pool.status(TRAE, "a")!!
+        assertEquals(123L, a.credits)
+        assertEquals("d-a", a.detail)
+        val b = pool.status(TRAE, "b")!!
+        assertEquals(456L, b.credits)
+        assertTrue(b.disabled)
+        assertEquals("凭证失效", b.reason)
+
+        // 各 uid 迁移完，旧键被清理
+        assertNull(store.read(AccountPool.legacyStateKey(TRAE)), "旧键应已清空删除")
+        assertNotNull(store.read(AccountPool.stateKey(TRAE, "a")))
+        assertNotNull(store.read(AccountPool.stateKey(TRAE, "b")))
+    }
+
+    @Test
+    fun `迁移可重复执行且不产生回退`() {
+        val store = InMemoryKeyValueStore()
+        store.write(
+            AccountPool.legacyStateKey(TRAE),
+            """{"accounts":{"a":{"credits":123,"creditsKnown":true,"detail":"","disabled":false,"enabled":true,"reason":""},"b":{"credits":456,"creditsKnown":false,"detail":"","disabled":false,"enabled":false,"reason":"手动停用"}}}""",
+        )
+        seedAccount(store, "a")
+        seedAccount(store, "b")
+
+        val first = newPool(store)
+        assertEquals(123L, first.status(TRAE, "a")!!.credits)
+        assertEquals(456L, first.status(TRAE, "b")!!.credits)
+        val afterMigrate = store.raw()
+
+        // 用同一份存储重新建池：已是新格式，不应再发生任何写入（含旧键复活）
+        val second = newPool(store)
+        assertEquals(123L, second.status(TRAE, "a")!!.credits)
+        assertEquals(456L, second.status(TRAE, "b")!!.credits)
+        assertFalse(second.status(TRAE, "b")!!.enabled)
+        assertEquals(afterMigrate, store.raw(), "重复加载不应改动存储内容")
+    }
+
+    @Test
+    fun `删除账号同时清掉凭证键与状态键`() {
+        val store = InMemoryKeyValueStore()
+        val pool = newPool(store)
+        pool.upsert(account("a"))
+        pool.updateCredits(TRAE, "a", 10)
+        assertNotNull(store.read(AccountPool.stateKey(TRAE, "a")))
+
         assertTrue(pool.remove(TRAE, "a"))
         assertFalse(pool.remove(TRAE, "a"))
         assertTrue(store.keys(AccountPool.ACCOUNT_PREFIX).isEmpty())
+        assertNull(store.read(AccountPool.stateKey(TRAE, "a")), "状态键也应被删除")
+        assertTrue(store.keys(AccountPool.STATE_PREFIX).isEmpty(), "不应残留任何状态键")
         assertNull(pool.account(TRAE, "a"))
+    }
+
+    @Test
+    fun `删除账号会摘除旧格式文件里的对应状态`() {
+        val store = InMemoryKeyValueStore()
+        // 旧文件里有 a、b 两个账号；仅 b 有凭证，load 只迁移 b，残留 {a}
+        store.write(
+            AccountPool.legacyStateKey(TRAE),
+            """{"accounts":{"a":{"credits":7,"creditsKnown":true,"detail":"","disabled":false,"enabled":true,"reason":""},"b":{"credits":8,"creditsKnown":true,"detail":"","disabled":false,"enabled":true,"reason":""}}}""",
+        )
+        seedAccount(store, "b")
+        val pool = newPool(store)
+        assertEquals(8L, pool.status(TRAE, "b")!!.credits)
+        assertTrue(store.read(AccountPool.legacyStateKey(TRAE))!!.contains("\"a\""))
+
+        // a 之后重新登录、又被删除：旧文件里残留的 a 必须一并摘掉，否则会在下一次 load 时把状态迁回来
+        pool.upsert(account("a"))
+        assertTrue(pool.remove(TRAE, "a"))
+        assertNull(store.read(AccountPool.legacyStateKey(TRAE)), "旧文件被摘空后应删除")
+        assertNull(store.read(AccountPool.stateKey(TRAE, "a")))
     }
 
     @Test
@@ -173,49 +266,6 @@ class AccountPoolTest {
         pool.updateCredits(TRAE, "nope", 1)
         assertNull(pool.status(TRAE, "nope"))
         assertEquals(0, pool.size())
-    }
-
-    @Test
-    fun `优先级高于余额：优先账号先用`() {
-        val pool = newPool()
-        pool.upsert(account("a"))
-        pool.upsert(account("b"))
-        pool.updateCredits(TRAE, "a", 900)
-        pool.updateCredits(TRAE, "b", 10)
-        assertEquals("a", pool.pick(TRAE)?.uid, "默认同级时按余额")
-
-        pool.setPriority(TRAE, "b", 1)
-        assertEquals("b", pool.pick(TRAE)?.uid, "b 提优先后应先用，哪怕余额少")
-    }
-
-    @Test
-    fun `上移下移调整显示顺序`() {
-        val pool = newPool()
-        pool.upsert(account("a"))
-        pool.upsert(account("b"))
-        pool.upsert(account("c"))
-        assertEquals(listOf("a", "b", "c"), pool.statuses(TRAE).map { it.uid })
-
-        assertTrue(pool.movePriority(TRAE, "c", up = true))
-        assertEquals(listOf("c", "a", "b"), pool.statuses(TRAE).map { it.uid })
-
-        assertTrue(pool.movePriority(TRAE, "c", up = false))
-        assertEquals(listOf("a", "b", "c"), pool.statuses(TRAE).map { it.uid })
-
-        assertFalse(pool.movePriority(TRAE, "a", up = true), "已在最前，不能上移")
-        assertFalse(pool.movePriority(TRAE, "nope", up = true), "未知账号空操作")
-    }
-
-    @Test
-    fun `优先级落盘并恢复`() {
-        val store = InMemoryKeyValueStore()
-        val pool = newPool(store)
-        pool.upsert(account("a"))
-        pool.setPriority(TRAE, "a", 5)
-
-        val second = newPool(store)
-        assertEquals(5, second.status(TRAE, "a")!!.priority)
-        assertEquals("a", second.pick(TRAE)?.uid)
     }
 
     private companion object {

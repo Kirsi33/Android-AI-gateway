@@ -89,3 +89,33 @@ data class ProviderTaskListView(
     /** 非空表示拉取失败（凭证失效、上游报错等），界面据此提示。 */
     val error: String = "",
 )
+
+/**
+ * 一笔积分/额度流水。
+ *
+ * 字段命名对齐小浣熊的 `/api/web/points/v1/bills`：`bill_id` / `event_name` /
+ * `biz_type` / `points` / `created_at`。
+ *
+ * 与 [QuotaPack] 的分工：额度包回答「还剩多少」，流水回答「每一笔怎么来的」。
+ */
+data class PointsBill(
+    val id: String,
+    /** 展示名（上游 `event_name`，缺失时回退业务类型）。 */
+    val title: String,
+    /** 正数入账、负数支出，符号与上游一致。 */
+    val points: Long,
+    /** 上游业务类型（如 `daily_grant` 发放 / `daily_expire` 过期）。 */
+    val bizType: String = "",
+    /** 发生时间（毫秒；0 表示上游没给或无法解析）。 */
+    val createdAtMillis: Long = 0,
+)
+
+/**
+ * 一个账号的积分流水快照。
+ *
+ * [error] 非空表示拉取失败，[bills] 为空不代表没有流水。
+ */
+data class PointsBillListView(
+    val bills: List<PointsBill>,
+    val error: String = "",
+)

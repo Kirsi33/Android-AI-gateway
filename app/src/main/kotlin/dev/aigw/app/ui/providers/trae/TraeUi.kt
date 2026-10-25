@@ -1,7 +1,5 @@
 package dev.aigw.app.ui.providers.trae
 
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -19,8 +17,6 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Icon as MaterialIcon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -34,9 +30,11 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.google.gson.JsonObject
-import dev.aigw.app.ui.AccountPriorityArrows
+import dev.aigw.app.ui.AccountCardShell
 import dev.aigw.app.ui.ChoiceChip
 import dev.aigw.app.ui.OutlineActionButton
+import dev.aigw.app.ui.PagedAccountList
+import dev.aigw.app.ui.RegionSelector
 import dev.aigw.app.ui.SectionCard
 import dev.aigw.app.ui.SectionLabel
 import dev.aigw.app.ui.accountStatusText
@@ -44,6 +42,7 @@ import dev.aigw.app.ui.providers.ProviderUi
 import dev.aigw.app.ui.providers.ProviderUiActions
 import dev.aigw.core.pool.AccountStatus
 import dev.aigw.core.provider.ACTION_CHECKIN
+import dev.aigw.core.provider.trae.TraeRegion
 
 object TraeUi : ProviderUi {
 
@@ -72,6 +71,7 @@ object TraeUi : ProviderUi {
         var global by rememberSaveable {
             mutableStateOf(actions.providerOptionOf(id, "region", "cn") == "global")
         }
+        val region = if (global) TraeRegion.INTL.id else TraeRegion.CN.id
 
         Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
             SectionCard(enterIndex = 0) {
@@ -102,7 +102,7 @@ object TraeUi : ProviderUi {
                 }
                 SectionLabel(if (global) "登录 · 国际版 trae.ai" else "登录 · 国内版 trae.cn")
                 Button(
-                    onClick = { actions.onWebLogin(id) },
+                    onClick = { actions.onWebLogin(id, region) },
                     modifier = Modifier.fillMaxWidth(),
                 ) {
                     Text(if (global) "在浏览器中打开 Trae 国际版登录页" else "在浏览器中打开 Trae 登录页")
@@ -156,7 +156,7 @@ object TraeUi : ProviderUi {
             }
             SectionCard(enterIndex = 1) {
                 SectionLabel("账号 · ${scoped.size} 个")
-                for (account in scoped) {
+                PagedAccountList(scoped, keyOf = { it.uid }) { _, account ->
                     AccountBlock(account, actions)
                 }
                 OutlineActionButton("刷新额度") { actions.onRefreshCredits(id, null) }
@@ -166,76 +166,12 @@ object TraeUi : ProviderUi {
 
     @Composable
     private fun AccountBlock(status: AccountStatus, actions: ProviderUiActions) {
-        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text(
-                        text = status.nickname.ifEmpty { status.uid },
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                    Text(
-                        text = accountStatusText(status),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                AccountPriorityArrows(
-                    priority = status.priority,
-                    onMove = { up -> actions.onMoveAccountPriority(id, status.uid, up) },
-                )
-                Switch(
-                    checked = status.enabled,
-                    onCheckedChange = { actions.onToggleAccount(id, status.uid, it) },
-                )
-            }
-            AccountExtra(status, actions)
-            Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                ChoiceChip("删除账号", false) { actions.onRemoveAccount(id, status.uid) }
-            }
-        }
-    }
-
-    /** 国内/国外分段滑块（与 CodeBuddy 同款）。 */
-    @Composable
-    private fun RegionSelector(
-        isGlobal: Boolean,
-        onSelectGlobal: (Boolean) -> Unit,
-    ) {
-        Surface(
-            shape = CircleShape,
-            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
-            modifier = Modifier.clip(CircleShape),
-        ) {
-            Row(
-                modifier = Modifier.padding(2.dp),
-                horizontalArrangement = Arrangement.spacedBy(2.dp),
-            ) {
-                listOf("国内", "国外").forEachIndexed { index, label ->
-                    val selected = (index == 1) == isGlobal
-                    val animProgress by animateFloatAsState(
-                        targetValue = if (selected) 1f else 0f,
-                        animationSpec = spring(dampingRatio = 0.72f, stiffness = 600f),
-                        label = "traeRegion$index",
-                    )
-                    Box(
-                        modifier = Modifier
-                            .clip(CircleShape)
-                            .background(MaterialTheme.colorScheme.primary.copy(alpha = animProgress))
-                            .clickable { onSelectGlobal(index == 1) }
-                            .padding(horizontal = 12.dp, vertical = 4.dp),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Text(
-                            text = label,
-                            style = MaterialTheme.typography.labelMedium,
-                            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
-                            color = if (selected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                }
-            }
-        }
+        AccountCardShell(
+            account = status,
+            providerId = id,
+            actions = actions,
+            extra = { AccountExtra(status, actions) },
+        )
     }
 
     @Composable

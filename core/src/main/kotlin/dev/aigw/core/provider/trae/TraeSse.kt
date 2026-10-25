@@ -6,6 +6,7 @@ import com.google.gson.JsonElement
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import com.google.gson.JsonPrimitive
+import dev.aigw.core.provider.SSE_DONE
 import dev.aigw.core.util.long
 import dev.aigw.core.util.objOrNull
 import dev.aigw.core.util.str
@@ -207,10 +208,6 @@ class OpenAiSseTranslator(
             out.add(call)
         }
         return if (out.size() == 0) null else out
-    }
-
-    companion object {
-        const val SSE_DONE = "data: [DONE]\n\n"
     }
 }
 

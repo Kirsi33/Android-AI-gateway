@@ -18,12 +18,10 @@ import dev.aigw.core.provider.ProviderModelCatalogView
 import dev.aigw.core.provider.StreamFailureChatCall
 import dev.aigw.core.provider.StreamingChatCall
 import dev.aigw.core.provider.UpstreamError
+import dev.aigw.core.util.HttpSupport
 import dev.aigw.core.util.arrayOrNull
 import dev.aigw.core.util.objOrNull
-import java.io.ByteArrayOutputStream
-import java.io.InputStream
 import java.net.HttpURLConnection
-import java.net.URL
 
 /**
  * 用户手动导入的 OpenAI 兼容供应商。
@@ -79,7 +77,7 @@ class CustomProvider(
             return FailedChatCall(0, e.message ?: "连接失败")
         }
         if (status !in 200..299) {
-            val body = runCatching { readLimited(conn.errorStream) }.getOrDefault("")
+            val body = runCatching { HttpSupport.readLimited(conn.errorStream) }.getOrDefault("")
             conn.disconnect()
             return FailedChatCall(status, body)
         }
@@ -101,7 +99,7 @@ class CustomProvider(
             return AggregatedChatCall(status, aggregated)
         }
 
-        val text = runCatching { stream.use { readLimited(it) } }.getOrDefault("")
+        val text = runCatching { stream.use { HttpSupport.readLimited(it) } }.getOrDefault("")
         conn.disconnect()
         // 200 但空 body（代理吞响应、上游静默拒绝）：当成功会让客户端「输出完成却什么都没有」
         if (text.isBlank()) return emptyUpstreamFailure(status, contentType, text)
@@ -219,7 +217,7 @@ class CustomProvider(
             }
             return try {
                 if (conn.responseCode !in 200..299) return emptyList()
-                val text = readLimited(conn.inputStream)
+                val text = HttpSupport.readLimited(conn.inputStream)
                 val obj = runCatching { JsonParser.parseString(text).asJsonObject }.getOrNull()
                     ?: return emptyList()
                 val data = obj.arrayOrNull("data") ?: return emptyList()
@@ -240,24 +238,12 @@ class CustomProvider(
             body: String?,
             method: String,
         ): HttpURLConnection {
-            val conn = (URL(url).openConnection() as HttpURLConnection).apply {
-                requestMethod = method
-                connectTimeout = CONNECT_TIMEOUT_MS
-                readTimeout = READ_TIMEOUT_MS
-                instanceFollowRedirects = false
-                // SSE 必须逐块到达，显式要求不压缩
-                setRequestProperty("Accept-Encoding", "identity")
-                setRequestProperty("Accept", "text/event-stream, application/json")
-                if (key.isNotEmpty()) setRequestProperty("Authorization", "Bearer $key")
+            val headers = buildMap {
+                put("Accept", "text/event-stream, application/json")
+                if (key.isNotEmpty()) put("Authorization", "Bearer $key")
+                if (body != null) put("Content-Type", "application/json")
             }
-            if (body != null) {
-                conn.doOutput = true
-                conn.setRequestProperty("Content-Type", "application/json")
-                val bytes = body.toByteArray(Charsets.UTF_8)
-                conn.setFixedLengthStreamingMode(bytes.size)
-                conn.outputStream.use { it.write(bytes) }
-            }
-            return conn
+            return HttpSupport.open(url, method, headers, body, CONNECT_TIMEOUT_MS, READ_TIMEOUT_MS)
         }
 
         private fun chatUrl(baseUrl: String): String {
@@ -274,22 +260,6 @@ class CustomProvider(
             }
         }
 
-        private fun readLimited(input: InputStream?): String {
-            if (input == null) return ""
-            val out = ByteArrayOutputStream()
-            val buffer = ByteArray(8192)
-            while (true) {
-                val read = input.read(buffer)
-                if (read < 0) break
-                if (out.size() + read > MAX_BODY_BYTES) {
-                    out.write(buffer, 0, MAX_BODY_BYTES - out.size())
-                    break
-                }
-                out.write(buffer, 0, read)
-            }
-            return out.toString("UTF-8")
-        }
-
         /** 自定义供应商的账号 uid 由 key 派生（只用于区分账号，不泄露完整 key）。 */
         fun uidOf(apiKey: String): String =
             KEY_PREFIX + apiKey.hashCode().toUInt().toString(16).padStart(8, '0')
@@ -299,6 +269,5 @@ class CustomProvider(
 
         private const val CONNECT_TIMEOUT_MS = 30_000
         private const val READ_TIMEOUT_MS = 300_000
-        private const val MAX_BODY_BYTES = 1 shl 20
     }
 }

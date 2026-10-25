@@ -24,26 +24,29 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -79,8 +82,8 @@ fun ModelsScreen(state: AppUiState, viewModel: AppViewModel) {
     // 换成纯值 Set 后 save/restore 不碰快照，问题消失；读取仍在组合作用域，
     // 折叠变化会正常触发列表重建。
     var collapsed by rememberSaveable { mutableStateOf(emptySet<String>()) }
-    val collapsedNow = collapsed
-
+    // 测试失败原文可能很长，行内只展示截断提示，全文点开弹窗查看
+    var failureDetail by remember { mutableStateOf<String?>(null) }
 
     // 刷新按钮旋转动效：仅在加载中才创建无限过渡，停止后不空转每帧插值
     val spinAngle = if (state.modelsLoading) {
@@ -122,14 +125,12 @@ fun ModelsScreen(state: AppUiState, viewModel: AppViewModel) {
             title = "模型",
             subtitle = subtitleText,
             actions = {
-                // 「只看可用模型」：隐藏上游的非对话内部条目（如 Trae 的内部 config）
-                val only = state.settings.onlyUsableModels
-                HeaderPillToggle(
-                    label = "全部模型",
-                    labelOn = "只看可用",
-                    enabled = only,
+                OnlyUsableToggle(
+                    enabled = state.settings.onlyUsableModels,
                     onClick = {
-                        viewModel.updateSettings(state.settings.copy(onlyUsableModels = !only))
+                        viewModel.updateSettings(
+                            state.settings.copy(onlyUsableModels = !state.settings.onlyUsableModels),
+                        )
                     },
                 )
                 ExposureToggle(
@@ -143,11 +144,10 @@ fun ModelsScreen(state: AppUiState, viewModel: AppViewModel) {
                     contentDescription = "刷新",
                     tint = MaterialTheme.colorScheme.primary,
                     modifier = Modifier
-                        .bouncyClick { viewModel.refreshModels() }
+                        .bouncyClick { viewModel.refreshModels(forceRefresh = true) }
                         .padding(6.dp)
                         .graphicsLayer { rotationZ = iconRotation },
                 )
-
             },
         )
 
@@ -202,11 +202,12 @@ fun ModelsScreen(state: AppUiState, viewModel: AppViewModel) {
                     }
                 }
             } else {
-                // 已加载的模型按组展示；点击分组标题折叠/展开该组。
+                // 已加载的模型按组展示
                 for ((routePrefix, models) in grouped) {
-                    val isCollapsed = routePrefix in collapsedNow
                     val title = models.firstOrNull()?.providerName ?: routePrefix
                     val allExposed = models.isNotEmpty() && models.all { exposure.allows(it.fullId) }
+                    // 这一组本轮没拉到上游、用的是上次成功的清单：明确标注，不能让旧清单冒充实时结果
+                    val cachedGroup = models.isNotEmpty() && models.all { it.cached }
                     item(key = "header-$routePrefix") {
                         Row(
                             modifier = Modifier
@@ -225,12 +226,33 @@ fun ModelsScreen(state: AppUiState, viewModel: AppViewModel) {
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             Icon(
-                                imageVector = if (isCollapsed) Icons.Filled.ExpandMore else Icons.Filled.ExpandLess,
-                                contentDescription = if (isCollapsed) "展开" else "折叠",
+                                imageVector = if (routePrefix in collapsed) Icons.Filled.ExpandMore else Icons.Filled.ExpandLess,
+                                contentDescription = if (routePrefix in collapsed) "展开" else "折叠",
                                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
                                 modifier = Modifier.size(18.dp),
                             )
                             SectionLabel(title)
+                            if (cachedGroup) {
+                                Row(
+                                    modifier = Modifier
+                                        .clip(CircleShape)
+                                        .background(MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.6f))
+                                        .padding(start = 6.dp, end = 8.dp, top = 2.dp, bottom = 2.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                ) {
+                                    Box(
+                                        Modifier.breathingDot(MaterialTheme.colorScheme.error, size = 6.dp),
+                                    )
+                                    Text(
+                                        text = "缓存",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onErrorContainer,
+                                    )
+                                }
+                            } else {
+                                Box(Modifier.breathingDot(MaterialTheme.colorScheme.tertiary, size = 6.dp))
+                            }
                             Box(Modifier.weight(1f))
                             if (exposure.filterEnabled) {
                                 Text(
@@ -259,7 +281,8 @@ fun ModelsScreen(state: AppUiState, viewModel: AppViewModel) {
                             }
                         }
                     }
-                    if (isCollapsed) continue
+                    // 折叠的分组跳过其模型行：只渲染分组头，模型行即时收起
+                    if (routePrefix in collapsed) continue
                     items(models, key = { it.fullId }) { model ->
                         val testStatus = state.modelTestLatencies[model.fullId]
                         ModelRow(
@@ -273,6 +296,7 @@ fun ModelsScreen(state: AppUiState, viewModel: AppViewModel) {
                                 Toast.makeText(context, "已复制模型名称：${model.fullId}", Toast.LENGTH_SHORT).show()
                             },
                             onTest = { viewModel.testModel(model) },
+                            onShowFailure = { failureDetail = it },
                         )
                     }
                 }
@@ -286,19 +310,34 @@ fun ModelsScreen(state: AppUiState, viewModel: AppViewModel) {
                 }
             }
         }
+
+        failureDetail?.let { reason ->
+            AlertDialog(
+                onDismissRequest = { failureDetail = null },
+                title = { Text("测试失败原因") },
+                text = {
+                    Text(
+                        text = reason,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.heightIn(max = 320.dp).verticalScroll(rememberScrollState()),
+                    )
+                },
+                confirmButton = {
+                    TextButton(onClick = { failureDetail = null }) { Text("关闭") }
+                },
+            )
+        }
     }
 }
 
 /**
- * 页头胶囊开关（「开放名单」「只看可用」共用）：开启时主色胶囊 + 填充圆点，关闭时描边中性。
+ * 「开放名单」开关：点击切换是否只对外暴露勾选的模型。
+ *
+ * 开启时用主色胶囊 + 填充圆点区分，关闭时用描边中性样式。
  */
 @Composable
-private fun HeaderPillToggle(
-    label: String,
-    enabled: Boolean,
-    onClick: () -> Unit,
-    labelOn: String = "$label 开",
-) {
+private fun ExposureToggle(enabled: Boolean, onClick: () -> Unit) {
     Row(
         modifier = Modifier
             .clip(CircleShape)
@@ -308,7 +347,7 @@ private fun HeaderPillToggle(
             )
             .border(
                 width = 1.dp,
-                color = if (enabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline,
+                color = if (enabled)rrangeialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline,
                 shape = CircleShape,
             )
             .bouncyClick(onClick = onClick)
@@ -326,7 +365,7 @@ private fun HeaderPillToggle(
                 ),
         )
         Text(
-            text = if (enabled) labelOn else label,
+            text = if (enabled) "开放名单 开" else "开放名单",
             style = MaterialTheme.typography.labelSmall,
             fontWeight = FontWeight.SemiBold,
             color = if (enabled) MaterialTheme.colorScheme.onPrimaryContainer
@@ -334,11 +373,6 @@ private fun HeaderPillToggle(
         )
     }
 }
-
-/** 「开放名单」开关：复用同一胶囊样式。 */
-@Composable
-private fun ExposureToggle(enabled: Boolean, onClick: () -> Unit) =
-    HeaderPillToggle(label = "开放名单", enabled = enabled, onClick = onClick)
 
 /** 单个模型行：左侧模型 id 与信息（点击复制），中部测速状态，右侧测速按钮。 */
 @Composable
@@ -350,6 +384,7 @@ private fun ModelRow(
     onToggleExposed: (Boolean) -> Unit,
     onCopy: () -> Unit,
     onTest: () -> Unit,
+    onShowFailure: (String) -> Unit,
 ) {
     Row(
         modifier = Modifier.fillMaxWidth(),
@@ -398,44 +433,6 @@ private fun ModelRow(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            // 能力标记：只有上游明确给了才显示
-            val tags = buildList {
-                if (model.model.extra["reasoning"] == "true") add("思考")
-                if (model.model.extra["search"] == "true") add("联网")
-                if (model.model.extra["vision"] == "true") add("识图")
-                if (model.model.extra["tools"] == "true") add("工具")
-                model.model.extra["maxOutput"]?.let { add("输出 ${it}") }
-                model.model.extra["vendor"]?.takeIf { it.isNotBlank() }?.let { add(it) }
-            }
-            if (tags.isNotEmpty()) {
-                Text(
-                    text = tags.joinToString(" · "),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f),
-                )
-            }
-            // 倍率：不是所有上游都有公开数据，没有就整行不渲染（不要编造）
-            val rateLabel = model.model.extra["rate"]
-            val rateDiscount = model.model.extra["rateDiscount"]
-            if (!rateLabel.isNullOrEmpty()) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(5.dp),
-                ) {
-                    Text(
-                        text = "倍率 $rateLabel",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.primary,
-                    )
-                    if (!rateDiscount.isNullOrEmpty()) {
-                        Text(
-                            text = "限时 $rateDiscount",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.tertiary,
-                        )
-                    }
-                }
-            }
         }
 
         // 按钮左侧显示延迟：<5000ms 绿色，>=5000ms 橙色，失败/超时 红色
@@ -464,7 +461,11 @@ private fun ModelRow(
                     color = MaterialTheme.colorScheme.error,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.widthIn(max = 200.dp),
+                    modifier = Modifier
+                        .widthIn(max = 200.dp)
+                        .clip(MaterialTheme.shapes.small)
+                        .clickable { onShowFailure(testStatus.reason) }
+                        .padding(2.dp),
                 )
             }
             null -> Unit
@@ -542,6 +543,21 @@ private fun ModelSkeletonCard(
                     )
                     Box(
                         modifier = Modifier
+                            .fillMaxWidth(0.35f)
+                            .height(12.dp)
+                            .shimmer(shimmerProgress, RoundedCornerShape(3.dp)),
+                    )
+                }
+                Box(
+                    modifier = Modifier
+                        .size(width = 46.dp, height = 26.dp)
+                        .shimmer(shimmerProgress, MaterialTheme.shapes.small),
+                )
+            }
+        }
+    }
+}
+     modifier = Modifier
                             .fillMaxWidth(0.35f)
                             .height(12.dp)
                             .shimmer(shimmerProgress, RoundedCornerShape(3.dp)),

@@ -62,7 +62,7 @@ fun ProviderListScreen(
             Brush.linearGradient(listOf(primaryContainer, secondaryContainer))
         }
         for ((index, provider) in state.providers.withIndex()) {
-            val ui = ProviderUiRegistry.of(provider.id)
+            val ui = remember(provider.id) { ProviderUiRegistry.of(provider.id) }
             SectionCard(modifier = Modifier.staggeredAppear(index).clickable { onOpen(provider.id) }) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
