@@ -5,7 +5,7 @@ package dev.aigw.core.provider.today
  *
  * 协议来自 today-proxy 系列项目的实测抓包（github.com/Main8986/today-proxy-android）：
  *
- *   session token ──GET /api/auth/token──> ES256 JWT（约 115s）──Bearer──> api.todayai.cn/v1/*
+ *   session token ──GET /api/auth/token──> ES256 JWT（约 115s）──Bearer──> api.todayai.cn/v1/…
  *
  * 与其它供应商不同，Today **没有 SSE 流式接口**：发一句话拿 threadId，再轮询
  * `/v1/conversations/messages` 直到 state=completed。所以 [TodayProvider] 的流式是
