@@ -20,6 +20,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import dev.aigw.app.ui.ConfirmDestructiveDialog
 import dev.aigw.app.ui.SectionCard
 import dev.aigw.app.ui.SectionLabel
 import dev.aigw.app.ui.accountStatusText
@@ -38,6 +39,9 @@ import dev.aigw.core.pool.AccountStatus
 object LongCatUi : ProviderUi {
 
     override val id: String = "longcat"
+
+    /** 账号卡由本组件自己渲染（带通道标识），页面骨架不要再包一层。 */
+    override val managesOwnAccounts: Boolean get() = true
 
     override fun description() = "美团 LongCat 龙猫，支持免登录通道"
 
@@ -131,6 +135,7 @@ object LongCatUi : ProviderUi {
 
     @Composable
     private fun AccountCard(status: AccountStatus, actions: ProviderUiActions) {
+        var confirmRemove by remember { mutableStateOf(false) }
         SectionCard {
             Text(
                 status.nickname.ifEmpty { status.uid },
@@ -158,10 +163,18 @@ object LongCatUi : ProviderUi {
                     modifier = Modifier.weight(1f),
                 ) { Text("刷新") }
                 OutlinedButton(
-                    onClick = { actions.onRemoveAccount(id, status.uid) },
+                    onClick = { confirmRemove = true },
                     modifier = Modifier.weight(1f),
                 ) { Text("删除") }
             }
+        }
+        if (confirmRemove) {
+            ConfirmDestructiveDialog(
+                title = "删除账号「{status.nickname.ifEmpty { status.uid }}」？",
+                body = "本地保存的凭证会被清除，之后要重新登录才能再用。此操作不可撤销。",
+                onConfirm = { actions.onRemoveAccount(id, status.uid) },
+                onDismiss = { confirmRemove = false },
+            )
         }
     }
 

@@ -190,8 +190,17 @@ private fun AccountRow(
         modifier = Modifier.fillMaxWidth().staggeredAppear(index),
         extra = { ui.AccountExtra(account, actions) },
         footer = {
+            var confirmRemove by remember { mutableStateOf(false) }
             Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                LinkText("删除账号") { actions.onRemoveAccount(account.providerId, account.uid) }
+                LinkText("删除账号") { confirmRemove = true }
+            }
+            if (confirmRemove) {
+                ConfirmDestructiveDialog(
+                    title = "删除账号「${account.nickname.ifEmpty { account.uid }}」？",
+                    body = "本地保存的凭证会被清除，之后要重新登录才能再用这个账号。此操作不可撤销。",
+                    onConfirm = { actions.onRemoveAccount(account.providerId, account.uid) },
+                    onDismiss = { confirmRemove = false },
+                )
             }
         },
     )

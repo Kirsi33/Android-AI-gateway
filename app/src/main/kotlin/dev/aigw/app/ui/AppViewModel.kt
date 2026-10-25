@@ -316,14 +316,6 @@ data class AppUiState(
     val updateDownload: UpdateDownload? = null,
     /** 是否自动检查更新（启动时每天最多一次）。 */
     val autoCheckUpdate: Boolean = true,
-    /** 待打开的内嵌登录页地址；非空时 UI 拉起 [CookieLoginActivity]。 */
-    val inAppLoginUrl: String = "",
-    /** 内嵌登录页标题。 */
-    val inAppLoginTitle: String = "",
-    /** 需要读取 Cookie 的域名（空表示不限制）。 */
-    val inAppLoginCookieHosts: List<String> = emptyList(),
-    /** 登录成功后要把 Cookie 导入到哪个供应商。 */
-    val inAppLoginImportTarget: String = "",
 ) {
     /** 某个供应商的账号。 */
     fun accountsOf(providerId: String): List<AccountStatus> = accounts.filter { it.providerId == providerId }
@@ -924,44 +916,18 @@ class AppViewModel(
     /**
      * 打开登录页。
      *
-     * 默认走 **App 内嵌 WebView**（[AppUiState.inAppLoginUrl] 交给 UI 层拉起），
-     * 全部流程在自己进程里完成，不依赖系统浏览器。
+     * 走**系统浏览器**：Trae / Antigravity / WorkBuddy 的登录结果由网关自己的本地回调端口
+     * 或 state 轮询接住，页面在哪打开不影响结果。原先这里改成过内嵌 WebView，
+     * 但状态里没人填 Cookie 域名，登录成功后会卡在「正在保存…」——那条链路已拆除。
      *
-     * 备注：Trae / Antigravity / WorkBuddy 的登录结果由网关自己的本地回调端口
-     * 或 state 轮询接住，所以这里只需要把页面打开。
+     * 只在 App 内完成的登录（LongCat / Today 这类「凭证就是 Cookie」的上游）走
+     * [dev.aigw.app.ui.providers.ProviderUiActions.onCookieLogin]，由供应商详情页自己拉起。
      */
-    private fun openBrowser(url: String): Boolean {
-        if (url.isEmpty()) return false
-        _state.value = _state.value.copy(inAppLoginUrl = url, inAppLoginTitle = "登录")
-        return true
-    }
-
-    /** 外部链接（项目主页、更新说明等）仍走系统浏览器。 */
-    private fun openExternal(url: String): Boolean = runCatching {
+    private fun openBrowser(url: String): Boolean = runCatching {
         app.startActivity(
             Intent(Intent.ACTION_VIEW, Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
         )
     }.isSuccess
-
-    /** UI 拉起内嵌登录页后调用，清掉待办状态。 */
-    fun consumeInAppLogin() {
-        _state.value = _state.value.copy(
-            inAppLoginUrl = "",
-            inAppLoginTitle = "",
-            inAppLoginCookieHosts = emptyList(),
-            inAppLoginImportTarget = "",
-        )
-    }
-
-    /** 内嵌登录页返回的 Cookie 处理（LongCat / Today 这类「凭证即 Cookie」的上游用）。 */
-    fun applyInAppLoginCookie(cookie: String) {
-        val target = _state.value.inAppLoginImportTarget
-        if (cookie.isNotEmpty() && target.isNotEmpty()) {
-            val json = JsonObject().apply { addProperty("cookie", cookie) }.toString()
-            importCredentials(target, json)
-        }
-        consumeInAppLogin()
-    }
 
     /**
      * 设备授权（WorkBuddy）：浏览器里登录完成后轮询换取 token，最长 5 分钟。

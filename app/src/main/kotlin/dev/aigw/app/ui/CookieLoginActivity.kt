@@ -229,7 +229,13 @@ class CookieLoginActivity : Activity() {
         if (builder.isEmpty()) {
             if (!fromAuto) {
                 Toast.makeText(this, "还没读到登录信息，请先在页面里完成登录", Toast.LENGTH_LONG).show()
+                return
             }
+            // 自动确认命中但读不到 Cookie：多半是登录还没真正落盘（或域名配错了）。
+            // 这里必须复位并给出可见提示，否则界面会永久停在「正在保存…」，
+            // 用户既不知道发生了什么，也没有第二次机会。
+            autoConfirmed = false
+            status?.text = "没读到登录信息，请确认已登录成功，再点右上角「完成」"
             return
         }
         setResult(

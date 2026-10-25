@@ -17,6 +17,9 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -93,11 +96,25 @@ fun AccountDeleteChipRow(
     onRemove: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    var confirm by remember { mutableStateOf(false) }
     Row(
         modifier = modifier,
         horizontalArrangement = Arrangement.spacedBy(16.dp),
     ) {
-        ChoiceChip(text = "删除账号", selected = false, onClick = onRemove)
+        ChoiceChip(
+            text = "删除账号",
+            selected = false,
+            // 删除是不可恢复的：这一步只开确认框，真正的删除在对话框的确认按钮里
+            onClick = { confirm = true },
+        )
+    }
+    if (confirm) {
+        ConfirmDestructiveDialog(
+            title = "删除这个账号？",
+            body = "本地保存的凭证会被清除，之后要重新登录才能再用。此操作不可撤销。",
+            onConfirm = onRemove,
+            onDismiss = { confirm = false },
+        )
     }
 }
 

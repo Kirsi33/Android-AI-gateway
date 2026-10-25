@@ -8,10 +8,8 @@ import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
-import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -63,7 +61,6 @@ import dev.aigw.app.ui.AppUiState
 import dev.aigw.app.ui.ApiSettingsScreen
 import dev.aigw.app.ui.AppViewModel
 import dev.aigw.app.ui.AppearanceThemeScreen
-import dev.aigw.app.ui.CookieLoginActivity
 import dev.aigw.app.ui.CustomProviderScreen
 import dev.aigw.app.ui.CreditCenterScreen
 import dev.aigw.app.ui.DataManagementScreen
@@ -108,38 +105,6 @@ class MainActivity : ComponentActivity() {
             val vm: AppViewModel = viewModel(factory = appViewModelFactory())
             viewModel = vm
             val state by vm.state.collectAsStateWithLifecycle()
-
-            // 内嵌登录页：ViewModel 把要打开的 URL 放进 state，这里负责拉起 Activity，
-            // 并把结果（Cookie / 取消）回传给 ViewModel。全部在 App 内完成，不跳系统浏览器。
-            val loginLauncher = rememberLauncherForActivityResult(
-                ActivityResultContracts.StartActivityForResult(),
-            ) { result ->
-                val cookie = result.data?.getStringExtra(CookieLoginActivity.EXTRA_RESULT_COOKIE).orEmpty()
-                vm.applyInAppLoginCookie(cookie)
-            }
-            LaunchedEffect(state.inAppLoginUrl) {
-                val url = state.inAppLoginUrl
-                if (url.isEmpty()) return@LaunchedEffect
-                val intent = Intent(this@MainActivity, CookieLoginActivity::class.java).apply {
-                    putExtra(CookieLoginActivity.EXTRA_START_URL, url)
-                    putExtra(CookieLoginActivity.EXTRA_TITLE, state.inAppLoginTitle)
-                    putExtra(
-                        CookieLoginActivity.EXTRA_COOKIE_HOSTS,
-                        state.inAppLoginCookieHosts.toTypedArray(),
-                    )
-                    // 成功信号按上游类型给，命中即自动收尾（用户不用点「完成」）：
-                    //  - Trae / Antigravity / WorkBuddy：登录完会跳到本地回调端口；
-                    //  - LongCat / Today：站内跳转、没有回调地址，靠关键 Cookie 判断。
-                    putExtra(
-                        CookieLoginActivity.EXTRA_SUCCESS_URL_PREFIXES,
-                        LocalHostCallbackPorts.map { "http://127.0.0.1:$it/" }.toTypedArray(),
-                    )
-                    if (state.inAppLoginCookieHosts.any { it.contains("longcat") }) {
-                        putExtra(CookieLoginActivity.EXTRA_SUCCESS_COOKIE, "passport_token_key")
-                    }
-                }
-                loginLauncher.launch(intent)
-            }
 
             AiGatewayTheme(
                 dynamicColor = state.dynamicColor,
@@ -442,6 +407,3 @@ private fun MainTabs(
         }
     }
 }
-
-/** 上游 OAuth 回环回调端口：命中这些 URL 前缀即认为登录完成。 */
-private val LocalHostCallbackPorts = listOf(51120, 51121)
