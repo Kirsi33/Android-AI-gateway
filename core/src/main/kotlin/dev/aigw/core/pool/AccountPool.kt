@@ -329,6 +329,7 @@ class AccountPool(
         reason = entry.reason,
         disabled = entry.disabled,
         enabled = entry.enabled,
+        priority = entry.priority,
     )
 
     private fun keyOf(providerId: String, uid: String) = "$providerId/$uid"
