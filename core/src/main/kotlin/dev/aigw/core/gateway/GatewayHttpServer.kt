@@ -128,6 +128,8 @@ class GatewayHttpServer(
                     aObj.addProperty("detail", current.detail)
                     aObj.addProperty("enabled", current.enabled)
                     aObj.addProperty("disabled", current.disabled)
+                    // 优先级对外也要能看到：CLI / 外部脚本读账号表时拿它排序
+                    aObj.addProperty("priority", current.priority)
 
                     if (current.creditsKnown) {
                         totalCredits += current.credits
