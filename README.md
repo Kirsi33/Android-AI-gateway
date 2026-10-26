@@ -1,22 +1,22 @@
-# AI 聚合网关
+# 网关助手
 
-> ## ⚠️ 已更新至 v2.13.1 版本的用户需点击项目仓库下载更新，因为应用内更新有 bug
->
-> v2.13.1 及应用内更新功能的早期版本：下载完成后点击「安装」不会跳转到系统安装器（缺少 `REQUEST_INSTALL_PACKAGES` 声明），因此**不要使用应用内更新**，请直接到 [Releases](https://github.com/xibai6668/Android-AI-gateway/releases/latest) 下载 APK 手动安装。该问题已在后续版本修复。
+Android 上运行的本地 AI 模型聚合网关：把多家私有 AI 服务账号统一翻译成 **OpenAI** 与 **Anthropic** 双协议接口，暴露在 `http://127.0.0.1:8790`。
 
-Android 上运行的本地 AI 模型聚合网关：把多家私有 AI 服务账号统一翻译成 OpenAI 兼容接口，暴露在 `http://127.0.0.1:8790/v1`。
+任何支持 OpenAI 协议的客户端（Cline、Cherry Studio、Continue、curl 脚本……）以及只认 Anthropic 协议的客户端（Claude Code、Anthropic SDK）都能直接接上手机里的所有账号额度。
 
-任何支持 OpenAI 协议的客户端（Cline、Cherry Studio、Continue、curl 脚本……）都能直接接上手机里的所有账号额度。
+`Kotlin` · `Jetpack Compose` · `NanoHTTPD` · `Gradle` · `minSdk 26 / targetSdk 36`
 
-`Kotlin` · `Jetpack Compose` · `NanoHTTPD` · `Gradle` · `minSdk 26 / targetSdk 36` · `MIT + 附加使用声明`
-
-> 改动代码前请先读 **[ARCHITECTURE.md](ARCHITECTURE.md)**——完整的架构地图、模块职责、协议陷阱清单与改动守则。
+> **本仓库是 [xibai6668/Android-AI-gateway](https://github.com/xibai6668/Android-AI-gateway) 的分支（fork）。**
+> 上游负责网关内核与大部分供应商协议，本分支在上游基础上补充了 LongCat / Today 两家供应商、Anthropic 协议门面、账号优先级与若干体验修正。
+> 版本号是独立序列（当前 **2.5.7**），与上游的 `2.x` 不是同一条线，**不要按版本号大小比较两者**。
+> 改动代码前请先读上游的 **[ARCHITECTURE.md](ARCHITECTURE.md)**——完整的架构地图、模块职责、协议陷阱清单与改动守则。
 
 ---
 
 ## 目录
 
 - [特性](#特性)
+- [与上游的差异](#与上游的差异)
 - [快速开始](#快速开始)
 - [架构总览](#架构总览)
 - [模块结构](#模块结构)
@@ -32,27 +32,62 @@ Android 上运行的本地 AI 模型聚合网关：把多家私有 AI 服务账�
 
 ## 特性
 
-- **OpenAI 兼容网关**：`/v1/chat/completions` + `/v1/models`，流式 SSE / 非流式 / 多模态识图。
-- **五家内置供应商**：Trae、WorkBuddy、Antigravity、Loomy、小浣熊（商汤），以及任意自定义 OpenAI 兼容中转站。
+**协议面**
+
+- **双协议入口**：`/v1/chat/completions`（OpenAI）与 `/v1/messages`（Anthropic），都支持流式 SSE 与非流式。
+- **一套供应商实现，两种协议同时受益**：Anthropic 请求在网关入口翻译成 OpenAI 形状后复用同一批 Provider，响应再翻回去。新增供应商不需要写两遍。
+- **多模态识图**、工具调用（`tool_use` / `tool_calls` 双向映射）。
+
+**供应商**
+
+- **八家内置**：Trae、WorkBuddy / CodeBuddy、Antigravity、Loomy、小浣熊（商汤）、**LongCat（美团）**、**Today**，以及任意自定义 OpenAI 兼容中转站。
 - **同款模型 Failover**：首选供应商失败或无可用账号时，自动切换到拥有同款模型的其他供应商。
-- **智能路由**：`供应商/模型` 前缀路由（含 `trae-cn/`、`codebuddy-global/` 这类区域前缀与 `google/`、`agy/` 等别名），兼支持无前缀的模型名自动推导。
-- **账号管理**：同一供应商多账号按余额选号、失败自动换号、额度查询与额度包明细、跨供应商容灾、批量签到与任务中心。
-- **模型开放名单**：只把勾选的模型暴露给 `/v1/models`，其余模型对客户端隐藏。
+- **智能路由**：`供应商/模型` 前缀路由（含 `trae-cn/`、`codebuddy-global/` 这类区域前缀与 `google/`、`agy/`、`lc/` 等别名），兼支持无前缀的模型名自动推导。
+
+**账号**
+
+- **账号池**：同一供应商多账号按余额选号、失败自动换号、跨供应商容灾。
+- **账号优先级**（本分支新增）：账号卡上 ↑↓ 手动排序，排在前面的先用，同级仍按余额；顺序落盘，重启不丢。
+- **额度与账本**：额度查询、额度包明细、积分流水、批量签到、任务中心。
+- **模型开放名单**：只把勾选的模型暴露给 `/v1/models`，其余对客户端隐藏。
+
+**运维**
+
 - **用量与日志**：调用记录（请求/转发/返回全链路）、今日与累计用量趋势、运行日志、按前缀统计存储占用与保留期自动清理。
+- **数据管理页**（本分支新增）：存储占用明细、保留期、截断超长正文、清理过期记录。
 - **网络代理**：HTTP / SOCKS5，支持按供应商与按地址排除；国内上游始终直连。
 - **安全防护**：system 提示词零宽字符脱敏 + 账号级最小间隔限速（带抖动）。
 - **后台保活**：前台服务 + WakeLock / WifiLock + 控制中心磁贴，锁屏仍可服务。
 
 ---
 
+## 与上游的差异
+
+本分支相对上游 `v2.14.6` 的增量（合并上游后重新实现，不是简单叠加）：
+
+| 能力 | 说明 |
+|---|---|
+| **Today 供应商** | 上游没有 SSE 接口，只能「发一句 → 轮询整段快照」。实现上先同步等到第一段内容再开流，这样 401 / 没配额时网关还能换号，不会吐了 `message_start` 才发现空。流式靠增量差分。登录支持**短信验证码**（大陆号 +86）与手动粘贴 session token，网页登录为备用。 |
+| **LongCat 供应商** | 美团龙猫，双通道：免登录（`chat-completion-oversea-V2`，有 IP 级限流）/ Cookie 登录（`session-create` + `chat-completion-V2`）。上游请求体没有 `model` 字段，靠 `agentId` + `reasonEnabled` + `searchEnabled` 表达。 |
+| **Anthropic 协议门面** | `POST /v1/messages` + `/v1/messages/count_tokens`。三条实测铁律：`message_start` 延迟到真有内容才写（空流才能换号）、`input_tokens` 必须在首帧就给（SDK 拿它算上下文余量）、收尾必须 `content_block_stop` → `message_delta` → `message_stop`（少一帧 SDK 当截断）。Anthropic 客户端不做重试，所以网关自己换号。 |
+| **账号优先级** | 账号池新增 `priority`，重做在上游的「账号级落盘串行锁 + 锁外写」结构上，没有回退上游的锁优化。 |
+| **内嵌登录** | LongCat / Today 这类「凭证即 Cookie / token」的上游，用 App 内 WebView 完成登录；除 Cookie 外还读 `localStorage` / `sessionStorage`（现在的网站多半把 token 放 Web Storage）。 |
+| **数据管理页** | 存储占用、保留期、截断、清理集中到一处。 |
+| **模型能力标记** | 模型列表显示「思考 · 联网 · 识图 · 工具 · 输出 N · vendor」与「倍率 / 限时折扣」——上游 core 一直在算 `extra["rate"]`，但界面不读。 |
+
+**刻意保留的上游行为**：上游 v2.14.6 的账号池锁优化、SSE 终止帧补齐、模型级冷却（`ModelCooldownTracker`）、并发闸门（`ConcurrencyGate`）、应用内更新、容错页、悬浮保活，均原样保留。
+
+---
+
 ## 快速开始
 
-1. 到 [Releases](https://github.com/xibai6668/Android-AI-gateway/releases) 下载最新的 `ai-gateway-<版本>-release.apk` 安装。
+1. 到 [Releases](https://github.com/x3284728970/Android-AI-gateway/releases) 下载最新的 `ai-gateway-<版本>-release.apk` 安装。
 2. 打开 App，首页点「启动网关服务」；首页显示「运行中」即表示端口已在监听。
-3. 到「供应商」页登录要用的账号（Trae / WorkBuddy / Antigravity / Loomy / 小浣熊），或添加自定义 OpenAI 兼容中转站。
+3. 到「供应商」页登录要用的账号，或添加自定义 OpenAI 兼容中转站。
 4. 客户端里填接入信息：
-   - Base URL：手机本机填 `http://127.0.0.1:8790/v1`；局域网内其它设备填首页复制的局域网地址（需先在「接入设置」里打开「同时监听局域网」）。
-   - 模型：可填 `供应商/模型`（如 `antigravity/gemini-3.8-flash-high`），也可直接填模型名由网关推导。
+   - Base URL（OpenAI）：手机本机填 `http://127.0.0.1:8790/v1`；局域网内其它设备填首页复制的局域网地址（需先在「接入设置」里打开「同时监听局域网」）。
+   - Base URL（Anthropic）：`http://127.0.0.1:8790`（不带 `/v1`，Claude Code 会自己拼 `/v1/messages`）。
+   - 模型：可填 `供应商/模型`（如 `antigravity/gemini-3.8-flash-high`、`today/glm-5.3`），也可直接填模型名由网关推导。
    - API Key：默认开启「无 Key 调用」，随意填；关掉后需与「接入设置」里的 Key 一致。
 
 ---
@@ -62,10 +97,11 @@ Android 上运行的本地 AI 模型聚合网关：把多家私有 AI 服务账�
 一次请求的生命周期：
 
 ```
-客户端 (Cline / Cherry Studio / curl)
+客户端 (Cline / Cherry Studio / Claude Code / curl)
    │  POST /v1/chat/completions  {model: "...", ...}
+   │  或 POST /v1/messages       {model: "...", ...}   ← Anthropic 形状
    ▼
-GatewayHttpServer   ① 鉴权   ② 解析 model
+GatewayHttpServer   ① 鉴权   ② 解析 model（Anthropic 入口先翻译成 OpenAI 形状）
    ▼
 GatewayEngine       ③ 解析候选路由
                     ④ 选号 → 预刷新凭证 → 发起上游请求
@@ -76,7 +112,7 @@ Provider 实现       上游私有协议 ⇄ OpenAI 协议（双向转换封死�
 上游 API
 ```
 
-**核心不变量**：Provider 的边界是「OpenAI 进、OpenAI 出」。上游私有协议的双向转换全部封死在 Provider 内部，网关层对供应商差异零感知。任何把上游协议细节泄漏到网关层的改动，都会破坏这套可维护性根基。
+**核心不变量**：Provider 的边界是「OpenAI 进、OpenAI 出」。上游私有协议的双向转换全部封死在 Provider 内部，网关层对供应商差异零感知。Anthropic 协议只在入口/出口各做一次翻译，不穿透到 Provider。任何把上游协议细节泄漏到网关层的改动，都会破坏这套可维护性根基。
 
 ---
 
@@ -84,29 +120,32 @@ Provider 实现       上游私有协议 ⇄ OpenAI 协议（双向转换封死�
 
 | 模块 | 类型 | 职责 |
 |---|---|---|
-| `:core` | 纯 JVM，无 Android 依赖 | 网关引擎、HTTP 服务、账号池、路由与 Failover、各供应商协议实现、存储抽象。可独立单测 |
+| `:core` | 纯 JVM，无 Android 依赖 | 网关引擎、HTTP 服务、账号池、路由与 Failover、各供应商协议实现、协议转换（`protocol/`）、存储抽象。可独立单测 |
 | `:cli` | 纯 JVM 命令行 | 在本机直接起网关做端到端联调，或不打开 App 也能导入账号 / 签到 / 查用量与日志；可执行名 `aigw` |
 | `:app` | Android 应用 | Compose UI、前台服务与保活、加密存储实现、控制中心磁贴 |
 
-供应商协议实现位于 `core/src/main/kotlin/dev/aigw/core/provider/`，每家的私有协议细节都封装在各自子包内（`trae/`、`codebuddy/`、`antigravity/`、`loomy/`、`raccoon/`、`custom/`），互不干扰。
+供应商协议实现位于 `core/src/main/kotlin/dev/aigw/core/provider/`，每家的私有协议细节都封装在各自子包内（`trae/`、`codebuddy/`、`antigravity/`、`loomy/`、`raccoon/`、`longcat/`、`today/`、`custom/`），互不干扰。
+
+协议转换层位于 `core/src/main/kotlin/dev/aigw/core/protocol/`：`OpenAiGemini.kt`（OpenAI ⇄ Gemini）、`AnthropicProtocol.kt`（Anthropic ⇄ OpenAI）。
 
 ---
 
 ## 数据存储
 
-账号凭证与状态**按账号独立存储**（v2.4.0 起）：
+账号凭证与状态**按账号独立存储**：
 
 ```
 account/<供应商>/<账号>            # 账号凭证（ProviderAccount.toJson）
-pool/state/<供应商>/<账号>.json    # 账号状态（额度 / 启用 / 禁用 / 原因）
+pool/state/<供应商>/<账号>.json    # 账号状态（额度 / 启用 / 禁用 / 原因 / 优先级）
 settings/...                      # 网关、代理、安全、供应商与自定义供应商等设置
 logs/calls/<id>                   # 调用记录，每条一个键
 logs/requests.json                # 运行日志（环形缓冲）
 usage/...                         # 用量统计
 ```
 
-- **一个账号一个状态文件**：改某个账号（刷新额度、启用/停用）只重写它自己的键，不再整包重写该供应商的全部账号。
-- **旧数据自动迁移**：v2.4.0 之前的状态是「一个供应商一个文件」（`pool/state/<供应商>.json`，内含该供应商全部账号）。新版首次读取时惰性迁移——迁一个账号即从旧文件摘除，旧文件清空后删除；迁移可重复执行，不会回退或丢状态，无需手工处理。
+- **一个账号一个状态文件**：改某个账号（刷新额度、启用/停用、调优先级）只重写它自己的键，不整包重写该供应商的全部账号。
+- **落盘在锁外**：内存状态在写锁内更新后，落盘移到锁外执行；同账号落盘用一把独立串行锁，避免「持写锁做整文件加密提交」把选号读全堵住。
+- **旧数据自动迁移**：更早版本的状态是「一个供应商一个文件」（`pool/state/<供应商>.json`，内含该供应商全部账号）。新版首次读取时惰性迁移——迁一个账号即从旧文件摘除，旧文件清空后删除；迁移可重复执行，不会回退或丢状态，无需手工处理。`priority` 字段随整对象原样迁移。
 - Android 端凭证经 Android Keystore 加密后存入应用私有目录；命令行端（`aigw`）以明文存于 `--data` 目录（默认 `~/.aigw`）。
 
 ---
@@ -124,6 +163,7 @@ usage/...                         # 用量统计
 - 产物：`app/build/outputs/apk/debug/app-debug.apk`（包名 `dev.aigw.app.debug`）。
 - 版本号硬编码在 `app/build.gradle.kts`（`versionCode` / `versionName`）；改后必须重新构建。
 - 本地**不产 release 包**：release 仅由云端 GitHub Actions 手动触发构建并发版，日常 push 不产生任何云端构建。
+- **改版本号必须同步检查自更新源**：自更新查的是**本仓库**的 Release，版本号是独立序列。查上游仓库会误判（上游 `2.14.6 > 2.5.7` 恒为真），且上游 APK 的 `versionCode` 比本分支小，会以 `INSTALL_FAILED_VERSION_DOWNGRADE` 装不上。
 
 命令行联调（`:cli`，无需 Android 设备）：
 
@@ -140,7 +180,9 @@ usage/...                         # 用量统计
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| `POST` | `/v1/chat/completions` | 对话补全，支持流式 SSE / 非流式 / 多模态 |
+| `POST` | `/v1/chat/completions` | OpenAI 对话补全，支持流式 SSE / 非流式 / 多模态 |
+| `POST` | `/v1/messages` | **Anthropic Messages**（本分支新增），支持流式 SSE / 非流式 |
+| `POST` | `/v1/messages/count_tokens` | **Anthropic token 估算**（本分支新增），按约 3 字符 1 token 估算 |
 | `GET` | `/v1/models` | 模型列表（并发拉取各供应商后聚合返回；按模型开放名单过滤） |
 | `GET` | `/v1/credits` | 额度查询（别名 `/credits`；本机免 Key） |
 | `GET` | `/healthz` | 健康检查，返回纯文本 `ok`（不带鉴权） |
@@ -151,10 +193,18 @@ usage/...                         # 用量统计
 默认只绑定 `127.0.0.1`；打开「接入设置」里的「同时监听局域网」后才会监听全部网卡。注意此时若仍开着「无 Key 调用」，同网段的任何设备都能直接调用网关，`/v1/credits`、`/healthz` 也一样可达。
 
 ```sh
+# OpenAI 形状
 curl http://127.0.0.1:8790/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer <key>" \
   -d '{"model":"gemini-3.8-flash","stream":true,"messages":[{"role":"user","content":"你好"}]}'
+
+# Anthropic 形状（Claude Code 用的就是这个）
+curl http://127.0.0.1:8790/v1/messages \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: <key>" \
+  -H "anthropic-version: 2023-06-01" \
+  -d '{"model":"today/glm-5.3","max_tokens":1024,"messages":[{"role":"user","content":"你好"}]}'
 ```
 
 ---
@@ -164,10 +214,12 @@ curl http://127.0.0.1:8790/v1/chat/completions \
 | id | 供应商 | 上游 | 备注 |
 |---|---|---|---|
 | `trae` | Trae（字节） | SOLO 私有通道 | 协议转换最重 |
-| `codebuddy` | WorkBuddy（腾讯） | 国内 `copilot.tencent.com` / 国际 `workbuddy.ai` | 上游拒绝非流式，强制 `stream:true` |
+| `codebuddy` | WorkBuddy / CodeBuddy（腾讯） | 国内 `copilot.tencent.com` / 国际 `workbuddy.ai` | 上游拒绝非流式，强制 `stream:true` |
 | `antigravity` | Antigravity（Google） | `cloudcode-pa.googleapis.com` | Gemini 风格协议；凭证策略有铁律，见 ARCHITECTURE.md 第 5 节 |
-| `loomy` | Loomy（讯飞） | `xfinfr.com` | 鉴权失败为 HTTP 200 + 业务码，而非 4xx |
+| `loomy` | Loomy（讯飞） | `xfinfr.com` | 鉴权失败为 HTTP 200 + 业务码，而非 4xx；登录用短信验证码 |
 | `raccoon` | 小浣熊（商汤） | `xiaohuanxiong.com` | OpenAI 结构被包在 `data` 里；字段用标准名（v2 LiteLLM 层不认 `max_new_tokens`） |
+| `longcat` | LongCat（美团） | `longcat.chat` | 双通道：免登录（IP 级限流）/ Cookie 登录；请求体无 `model` 字段 |
+| `today` | Today | `auth.todayai.cn` / `api.todayai.cn` | **无 SSE 接口**，轮询整段快照后本地差分出流；登录用短信验证码（+86） |
 | `custom:<key>` | 自定义 | 用户填写的 baseUrl | 任意 OpenAI 兼容中转站，一个 key = 一个账号 |
 
 ---
@@ -177,6 +229,7 @@ curl http://127.0.0.1:8790/v1/chat/completions \
 1. 改动前先读 [ARCHITECTURE.md](ARCHITECTURE.md)。
 2. **新增供应商**只需三步：`core` 实现 `Provider` 接口 → 在 `ProviderBootstrap` 登记 → `app` 实现并登记 `ProviderUi`。框架自动获得账号池、Failover、代理分流、日志与保活。
 3. 保持 `:core:test` 全绿。
+4. **合并上游时的纪律**：以上游为基线，只搬「功能」（新增文件 + 注册点 + 自己写的 UI），**不要整段贴旧分支的实现**。旧分支里有些 bug 上游已修，整段覆盖会把它们带回来。
 
 ---
 
@@ -184,7 +237,7 @@ curl http://127.0.0.1:8790/v1/chat/completions \
 
 ### 仅供学习与交流
 
-本项目是一个用于学习 HTTP 反向代理、SSE 流式透传、多上游协议适配与 Android 应用（Jetpack Compose）打包等技术主题的实践项目，**仅供个人学习与研究使用**。它不是官方产品，与腾讯公司及 WorkBuddy、商汤及小浣熊、字节跳动及 Trae、科大讯飞及 Loomy、Google 及 Antigravity 均无任何关联，未获得其授权、认可或赞助。
+本项目是一个用于学习 HTTP 反向代理、SSE 流式透传、多上游协议适配与 Android 应用（Jetpack Compose）打包等技术主题的实践项目，**仅供个人学习与研究使用**。它不是官方产品，与腾讯公司及 WorkBuddy、商汤及小浣熊、字节跳动及 Trae、科大讯飞及 Loomy、Google 及 Antigravity、美团及 LongCat 均无任何关联，未获得其授权、认可或赞助。
 
 ### 关于反向代理行为
 
@@ -196,7 +249,7 @@ curl http://127.0.0.1:8790/v1/chat/completions \
 
 ### 凭证与数据风险
 
-本项目会把账号凭证（`accessToken` / `refreshToken` 等）落盘保存：Android 端经 Android Keystore 加密后存入应用私有目录，命令行端（`aigw`）以**明文**文件存放于 `~/.aigw`（可用 `--data` 参数或 `AIGW_DATA` 环境变量改写）。请自行妥善保管，切勿提交到公开仓库、上传到网盘或分享给他人。因凭证泄露造成的损失由使用者自行承担。
+本项目会把账号凭证（`accessToken` / `refreshToken` / `session token` 等）落盘保存：Android 端经 Android Keystore 加密后存入应用私有目录，命令行端（`aigw`）以**明文**文件存放于 `~/.aigw`（可用 `--data` 参数或 `AIGW_DATA` 环境变量改写）。请自行妥善保管，切勿提交到公开仓库、上传到网盘或分享给他人。因凭证泄露造成的损失由使用者自行承担。
 
 ### 无担保与权利通知
 
@@ -206,6 +259,6 @@ curl http://127.0.0.1:8790/v1/chat/completions \
 
 ## 许可
 
-本项目基于 [MIT License](./LICENSE)，可自由使用、修改与分发，须保留版权声明。
+本项目基于 [MIT License](./LICENSE)，可自由使用、修改与分发，须保留版权声明。原始版权归上游作者 [xibai6668](https://github.com/xibai6668/Android-AI-gateway) 所有，本分支的修改同样置于该许可之下。
 
 需要留意的是：LICENSE 正文之后附有一份**使用声明**，其中第 3 条在 MIT 之上**追加了限制**（禁止商业用途、禁止二次分发牟利、禁止批量账号运营）。因此本项目**不是**纯粹的 MIT 项目——**MIT 条款与使用声明共同构成完整的授权与使用约定**，两者对同一行为给出不同结论时以更严格的一方为准。这也是本项目未在构建脚本中声明 SPDX `"MIT"` 许可标识、而以 [LICENSE](./LICENSE) 共同构成授权约定的原因。
