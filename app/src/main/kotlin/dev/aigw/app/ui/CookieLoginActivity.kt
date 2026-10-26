@@ -79,7 +79,7 @@ class CookieLoginActivity : Activity() {
             setPadding(dp(14), dp(10), dp(14), dp(10))
         }
         val label = TextView(this).apply {
-            text = "登录完成后点右侧按钮"
+            text = "若未自动跳转，请点右上角「完成」"
             textSize = 13f
             setTextColor(themeColor(android.R.attr.textColorPrimary))
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)

@@ -136,7 +136,10 @@ fun AppearanceThemeScreen(state: AppUiState, viewModel: AppViewModel, onBack: ()
         EditorialGroupHeader("03", "金色文字 · GOLD GRADIENT ACCENT", meta = "DUAL HUE WHEELS")
         SectionCard(enterIndex = 2) {
             Text(
-                text = "应用主色渐变由起始色与结束色插值生成，可拖动色相环或直接输入代码：",
+                text = "应用主色渐变由起始色与结束色插值生成，可拖动色相环或直接输入代码：
+" +
+                    "提示：选太浅的金（如 #D4A843）在浅色底上会看不清——文字色建议保持亮度在 40% 以下。",
+                style = MaterialTheme.typography.bodySmall,
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

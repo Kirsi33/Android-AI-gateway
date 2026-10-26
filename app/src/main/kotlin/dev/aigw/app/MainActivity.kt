@@ -23,6 +23,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Settings
@@ -142,8 +143,8 @@ class MainActivity : ComponentActivity() {
 
 private enum class Tab(val label: String, val icon: ImageVector) {
     Home("首页", Icons.Filled.Home),
-    Providers("供应商", Icons.Filled.Person),
-    Models("模型", Icons.Filled.Storage),
+    Providers("供应商", Icons.Filled.Hub),
+    Models("模型", Icons.AutoMirrored.Filled.List),
     Logs("记录", Icons.Filled.History),
     Me("我的", Icons.Filled.Settings),
 }
@@ -194,8 +195,8 @@ private fun AppRoot(viewModel: AppViewModel, state: AppUiState) {
                             indicatorColor = Color.Transparent,
                             selectedIconColor = selectedGold,
                             selectedTextColor = selectedGold,
-                            unselectedIconColor = Color(0xFF777777),
-                            unselectedTextColor = Color(0xFF777777),
+                            unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                            unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant,
                         ),
                     )
                 }

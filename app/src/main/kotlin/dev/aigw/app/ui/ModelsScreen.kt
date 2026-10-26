@@ -28,6 +28,8 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.lazy.rememberLazyListState
+import dev.aigw.app.ui.scrollFade
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -183,8 +185,10 @@ fun ModelsScreen(state: AppUiState, viewModel: AppViewModel) {
             }
         }
 
+        val listState = rememberLazyListState()
         LazyColumn(
-            modifier = Modifier.weight(1f).fillMaxWidth(),
+            state = listState,
+            modifier = Modifier.weight(1f).fillMaxWidth().scrollFade(listState),
             contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 20.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {

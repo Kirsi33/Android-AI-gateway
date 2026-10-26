@@ -91,8 +91,9 @@ fun HomeScreen(
     }
 
     PageScaffold(
-        title = "ai-gateway",
-        subtitle = "本地 OpenAI 兼容网关",
+        // 与桌面名（strings.xml）保持一致；「AI GATEWAY」作为版式装饰进副标题
+        title = "网关助手",
+        subtitle = "AI GATEWAY · 本地 OpenAI 兼容网关",
         actions = { StatusChip(state.running) },
     ) {
         ConsoleCard(
@@ -342,7 +343,7 @@ private fun TrendCard(state: AppUiState) {
                 horizontalArrangement = Arrangement.spacedBy(16.dp),
             ) {
                 LegendDot(gold, "输入")
-                LegendDot(Color(0xFF0D0D0D), "输出")
+                LegendDot(MaterialTheme.colorScheme.onSurface, "输出")
             }
         } else {
             Text(
@@ -369,7 +370,8 @@ private fun LegendDot(color: Color, text: String) {
 @Composable
 private fun TrendChart(daily: List<UsageStats>, todayStart: Long) {
     val gold = LocalAppColors.current.goldStart
-    val dark = Color(0xFF0D0D0D)
+    // 原来硬编码 #0D0D0D，深色卡片（#141414）上对比 1.05:1，整条曲线消失
+    val dark = MaterialTheme.colorScheme.onSurface
     val gridColor = MaterialTheme.colorScheme.surfaceContainerHighest
     val labelColor = MaterialTheme.colorScheme.onSurfaceVariant
     val n = daily.size

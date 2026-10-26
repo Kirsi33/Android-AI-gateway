@@ -40,6 +40,10 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -75,17 +79,23 @@ private enum class LevelFilter(val label: String) {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun LogsScreen(state: AppUiState, viewModel: AppViewModel) {
-    var tab by remember { mutableStateOf(LogTab.Calls) }
-    var filter by remember { mutableStateOf(StatusFilter.ALL) }
-    var levelFilter by remember { mutableStateOf(LevelFilter.ALL) }
-    var detail by remember { mutableStateOf<CallRecord?>(null) }
-    var showLogSettings by remember { mutableStateOf(false) }
+    // 筛选与抽屉状态用 rememberSaveable：转屏/进程回收后用户正在读的第 N 条记录不该消失
+    var tab by rememberSaveable { mutableStateOf(LogTab.Calls) }
+    var filter by rememberSaveable { mutableStateOf(StatusFilter.ALL) }
+    var levelFilter by rememberSaveable { mutableStateOf(LevelFilter.ALL) }
+    var detailId by rememberSaveable { mutableStateOf<String?>(null) }
+    var showLogSettings by rememberSaveable { mutableStateOf(false) }
+    // 抽屉存 id 而不是整个 record：CallRecord 带大段原文，不适合进保存状态
+    val detail = detailId?.let { id -> state.calls.firstOrNull { it.id == id } }
 
-    // 停留在本页时自动刷新（只刷记录，不动低频数据）
+    // 自动刷新只在页面可见时跑：原来 while(true) 进后台也每 5 秒解密一轮记录库
+    val lifecycleOwner = LocalLifecycleOwner.current
     LaunchedEffect(tab) {
-        while (true) {
-            delay(5_000)
-            viewModel.refreshRecords()
+        lifecycleOwner.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+            while (true) {
+                delay(5_000)
+                viewModel.refreshRecords()
+            }
         }
     }
 
@@ -233,7 +243,7 @@ fun LogsScreen(state: AppUiState, viewModel: AppViewModel) {
                         SectionCard {
                             CallRow(
                                 record,
-                                onClick = { detail = record },
+                                onClick = { detailId = record.id },
                                 // 长按只开确认框：删的是一条带完整原文的记录，误触代价太高
                                 onLongClick = { confirmDelete = true },
                             )
@@ -275,7 +285,7 @@ fun LogsScreen(state: AppUiState, viewModel: AppViewModel) {
     }
 
     detail?.let { record ->
-        ModalBottomSheet(onDismissRequest = { detail = null }) {
+        ModalBottomSheet(onDismissRequest = { detailId = null }) {
             CallDetailSheet(record, viewModel)
         }
     }
@@ -664,7 +674,7 @@ private fun statusLabel(status: CallStatus): String = when (status) {
 
 @Composable
 private fun levelColor(level: String): Color = when (level.uppercase()) {
-    "WARN" -> Color(0xFFC97F0A)
+    "WARN" -> Color(0xFF8A5A00)
     "ERROR" -> MaterialTheme.colorScheme.error
     else -> MaterialTheme.colorScheme.onSurface
 }
@@ -697,7 +707,7 @@ private fun LogCapacityField(current: Int, onCommit: (Int) -> Unit) {
 private fun statusColor(status: CallStatus): Color = when (status) {
     CallStatus.SUCCESS -> MaterialTheme.colorScheme.tertiary
     CallStatus.FAILED -> MaterialTheme.colorScheme.error
-    CallStatus.ABORTED -> Color(0xFFC97F0A)
+    CallStatus.ABORTED -> Color(0xFF8A5A00)
 }
 
 private val TIME_FORMAT = SimpleDateFormat("MM-dd HH:mm:ss", Locale.getDefault())

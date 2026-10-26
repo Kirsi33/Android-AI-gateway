@@ -20,7 +20,8 @@ import androidx.compose.ui.unit.dp
 
 // 黑金极简设计规范 Token（默认值；实际生效值见 Appearance.kt 的 LocalAppColors）
 val GoldAccent = Color(0xFFD4A843)
-val GoldText = Color(0xFFB88A20)
+/** 浅色模式下的金色文字：#B88A20 在白底上只有 3.14:1（不达 AA 4.5:1），压深到 4.9:1。 */
+val GoldText = Color(0xFF8A6410)
 val HairlineBorder = Color(0xFFEAEAEA)
 
 /** 用 [app] 的两端金构造浅色 scheme；其余语义色固定。 */
@@ -42,7 +43,8 @@ private fun lightScheme(app: AppColors): ColorScheme = lightColorScheme(
     surface = Color(0xFFFFFFFF),
     onSurface = Color(0xFF0D0D0D),
     surfaceVariant = Color(0xFFF8F8FA),
-    onSurfaceVariant = Color(0xFF777777),
+    // #777777 在白底 4.48:1 是 AA 擦边线，加深到 4.9:1；深色 scheme 用它自己的值
+    onSurfaceVariant = Color(0xFF6B6B6B),
     surfaceContainerHighest = Color(0xFFF0F0F2),
     outline = HairlineBorder,
     outlineVariant = Color(0xFFEDEDED),

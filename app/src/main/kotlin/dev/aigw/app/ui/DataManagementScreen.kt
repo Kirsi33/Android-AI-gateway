@@ -44,8 +44,9 @@ fun DataManagementScreen(state: AppUiState, viewModel: AppViewModel, onBack: () 
         subtitle = "存储与清理",
         leading = { BackButton(onBack) },
     ) {
+        // 与 AppearanceScreen 对齐：二级页用 EditorialGroupHeader 编号
+        EditorialGroupHeader("01", "使用记录 · RETENTION")
         SectionCard(enterIndex = 0) {
-            Text("使用记录", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
             Text(
                 text = "记录会保存每次请求的输入/输出/思考链，是应用数据体积的主要来源；服务运行时按保留天数每日自动清理。",
                 style = MaterialTheme.typography.bodySmall,
@@ -64,9 +65,10 @@ fun DataManagementScreen(state: AppUiState, viewModel: AppViewModel, onBack: () 
             )
         }
 
-        SectionLabel("清理")
+        EditorialGroupHeader("02", "清理动作 · PURGE")
         SectionCard(enterIndex = 1) {
-            OutlineActionButton("查看存储占用明细") { showDetail = !showDetail }
+            // 展开后按钮文案要变，否则第二次点像没反应
+            OutlineActionButton(if (showDetail) "收起存储明细" else "查看存储占用明细") { showDetail = !showDetail }
             if (showDetail) {
                 StorageDetail(state, viewModel)
             }
