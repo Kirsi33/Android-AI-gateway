@@ -10,6 +10,8 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -53,6 +55,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
@@ -291,7 +294,7 @@ fun LogsScreen(state: AppUiState, viewModel: AppViewModel) {
     }
 }
 
-@OptIn(ExperimentalFoundationApi::class)
+@OptIn(ExperimentalFoundationApi::class, ExperimentalLayoutApi::class)
 @Composable
 private fun CallRow(record: CallRecord, onClick: () -> Unit, onLongClick: () -> Unit) {
     Column(
@@ -305,7 +308,10 @@ private fun CallRow(record: CallRecord, onClick: () -> Unit, onLongClick: () -> 
             Text(
                 text = record.model.ifEmpty { "未指定模型" },
                 style = MaterialTheme.typography.titleMedium,
+                // 长模型名（如 vendor/xxx-yyy-zzz）会挤掉右侧状态标签
                 modifier = Modifier.weight(1f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
             )
             Text(
                 text = statusLabel(record.status),
@@ -322,7 +328,12 @@ private fun CallRow(record: CallRecord, onClick: () -> Unit, onLongClick: () -> 
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+        // FlowRow：芯片数量与宽度都随内容变（账号昵称可长可短），
+        // 用 Row 会把超出的芯片压成竖排单字。
+        FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
             MetricChip("耗时", "${record.durationMillis}ms", MaterialTheme.colorScheme.onSurfaceVariant)
             if (record.totalTokens > 0) {
                 MetricChip("tokens", formatTokens(record.totalTokens), MaterialTheme.colorScheme.primary)
@@ -365,6 +376,8 @@ private fun MetricChip(label: String, value: String, tone: Color) {
             style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
             color = tone,
             fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
         )
         Text(
             text = label,

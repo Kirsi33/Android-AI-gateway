@@ -5,6 +5,14 @@ import java.util.Locale
 /** 千分位计数（如 1,234,567）。 */
 fun formatCount(value: Long): String = String.format(Locale.US, "%,d", value)
 
+/** 统计格用的紧凑计数：189,304 → 189.3K；1,234,567 → 1.23M。 */
+fun formatCompact(value: Long): String = when {
+    value >= 1_000_000_000L -> String.format(Locale.US, "%.2fB", value / 1_000_000_000.0)
+    value >= 1_000_000L -> String.format(Locale.US, "%.2fM", value / 1_000_000.0)
+    value >= 10_000L -> String.format(Locale.US, "%.1fK", value / 1_000.0)
+    else -> formatCount(value)
+}
+
 /** 人类友好缩写：3.82M / 276.6K。 */
 fun formatTokens(tokens: Long): String = when {
     tokens >= 1_000_000_000L -> String.format(Locale.US, "%.2fB", tokens / 1_000_000_000.0)

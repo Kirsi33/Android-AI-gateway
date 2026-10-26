@@ -192,9 +192,11 @@ private fun ConsoleCard(
                 fontWeight = FontWeight.Light,
                 letterSpacing = 0.5.sp,
                 color = MaterialTheme.colorScheme.onSurface,
+                // 大字吃掉剩余宽度，右侧端口列按自身内容定宽；否则大字会把端口挤成 0 宽。
+                modifier = Modifier.weight(1f),
                 maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
             )
-            Spacer(Modifier.weight(1f))
             Column(horizontalAlignment = Alignment.End) {
                 Text(
                     text = "LISTEN PORT",
@@ -605,7 +607,7 @@ private fun ModelsTile(state: AppUiState, modifier: Modifier) {
 @Composable
 private fun RequestsTile(state: AppUiState, modifier: Modifier) {
     Tile(modifier, "今日请求 · REQUESTS") {
-        BigNumber(formatCount(state.today.requests))
+        BigNumber(formatCompact(state.today.requests))
         // 增长需要真实昨日数据：daily 末尾是今天，倒数第二个才是昨天。
         val yesterday = if (state.daily.size >= 2) state.daily[state.daily.size - 2] else null
         if (yesterday != null && yesterday.requests > 0) {
@@ -633,11 +635,12 @@ private fun CreditsTile(state: AppUiState, modifier: Modifier) {
     val known = state.pool.creditsKnown > 0
     val goldText = LocalAppColors.current.goldText
     Tile(modifier, "已知额度 · TOTAL CREDITS") {
+        // 三分之一宽的格子里放不下 189,304，用紧凑写法；精确值留在备注里
         BigNumber(
-            value = if (known) formatCount(state.pool.totalCredits) else "—",
+            value = if (known) formatCompact(state.pool.totalCredits) else "—",
             color = if (known) goldText else MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        TileNote(if (known) "已同步 ${state.pool.creditsKnown} 个账号" else "尚未同步额度")
+        TileNote(if (known) "共 ${formatCount(state.pool.totalCredits)} · ${state.pool.creditsKnown} 账号" else "尚未同步额度")
     }
 }
 
