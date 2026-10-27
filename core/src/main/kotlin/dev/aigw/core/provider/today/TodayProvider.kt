@@ -133,12 +133,14 @@ class TodayProvider(
             ?.let { runCatching { discoverOptions(it) }.getOrDefault(emptyList()) }
             .orEmpty()
 
-        val ids = LinkedHashSet<String>()
-        // 发现到的排前面（顺序按上游返回），兜底表补齐
-        discovered.forEach { ids += TodayConstants.displayNameOf(it) }
-        TodayConstants.MODEL_IDS.forEach { ids += it }
+        // 上游返回的 model.xxx 与内置常量可能只差一个分隔符（minimax-m3.1 对 minimax-m3-1），
+        // 字符串去重挡不住，会渲染成两行。这里按「归一化后的模型名」去重，并优先保留上游的写法
+        // ——它才是真实存在、下游请求能打通的 id。
+        val ids = LinkedHashMap<String, String>()
+        discovered.forEach { ids.putIfAbsent(normalizeModelName(it), TodayConstants.displayNameOf(it)) }
+        TodayConstants.MODEL_IDS.forEach { ids.putIfAbsent(normalizeModelName(it), it) }
 
-        val models = ids.map { name ->
+        val models = ids.values.map { name ->
             ProviderModel(
                 id = name,
                 name = name,
@@ -156,6 +158,14 @@ class TodayProvider(
             error = "",
         )
     }
+
+    /**
+     * 模型名归一化：去掉 `model.` 前缀，把 `.` `_` 统一成 `-`，其余小写。
+     *
+     * 只用于**去重**，不用作发给上游的 id——上游对分隔符是敏感的。
+     */
+    private fun normalizeModelName(name: String): String =
+        name.removePrefix("model.").lowercase().replace('.', '-').replace('_', '-')
 
     /**
      * 从 `/v1/pricing/status` 里发现可用模型选项。

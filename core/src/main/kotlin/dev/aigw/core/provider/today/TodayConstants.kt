@@ -84,10 +84,11 @@ object TodayConstants {
         if (s.isEmpty()) return OPT_DEEPSEEK
         // 允许带供应商前缀：today/deepseek-v4.1-flash
         val bare = s.substringAfter('/', s).substringAfter(':')
+        // 分隔符归一：用户可能写 minimax-m3.1 也可能写 minimax-m3-1（上游两种都出现过）
         return when {
             bare == "glm" || bare == MODEL_GLM || bare == OPT_GLM || bare.startsWith("glm-") -> OPT_GLM
             bare == "minimax" || bare == MODEL_MINIMAX || bare == OPT_MINIMAX ||
-                bare.startsWith("minimax") || bare == "m3.1" -> OPT_MINIMAX
+                bare.startsWith("minimax") || bare == "m3.1" || bare == "m3-1" -> OPT_MINIMAX
             bare == "deepseek" || bare == MODEL_DEEPSEEK || bare == OPT_DEEPSEEK ||
                 bare.startsWith("deepseek") -> OPT_DEEPSEEK
             // 上游随时可能上新模型：`model.xxx` 原样放行；其它看起来像模型名的短名
