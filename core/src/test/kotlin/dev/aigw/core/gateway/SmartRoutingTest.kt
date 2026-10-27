@@ -144,22 +144,38 @@ class SmartRoutingTest {
     }
 
     @Test
-    fun `关闭故障转移后不再产生跨供应商候选`() {
+    fun `显式前缀的请求不产生跨供应商候选`() {
         val engine = GatewayEngine(InMemoryKeyValueStore())
-        // 两家都提供同名模型且都有账号 —— 满足启发式回退产生候选的条件
+        // 两家都提供同名模型且都有账号 —— 这本是启发式回退产生候选的条件
         engine.registry.register(CatalogProvider("trae", listOf("gemini-2.5-flash")))
         engine.registry.register(CatalogProvider("antigravity", listOf("gemini-2.5-flash")))
         engine.pool.upsert(ProviderAccount("trae", "t1", "trae 账号", "{}"))
         engine.pool.upsert(ProviderAccount("antigravity", "a1", "反重力账号", "{}"))
 
-        val candidates = engine.resolveCandidateRoutes("trae/gemini-2.5-flash")
+        // 用户显式写了 trae/ —— 就只能落在 trae 上。
+        // 真实事故：用户在 today 上试限时免费模型，today 凭证失效，
+        // 网关悄悄换到 Trae 烧掉 400 积分，用户完全不知道请求去了哪。
+        val explicit = engine.resolveCandidateRoutes("trae/gemini-2.5-flash")
+        assertEquals(1, explicit.size, "显式指定的供应商不得产生候选：$explicit")
+        assertEquals("trae", explicit.single().providerId)
+    }
+
+    @Test
+    fun `无前缀的请求在开关开启时产生跨供应商候选`() {
+        val engine = GatewayEngine(InMemoryKeyValueStore())
+        engine.registry.register(CatalogProvider("trae", listOf("gemini-2.5-flash")))
+        engine.registry.register(CatalogProvider("antigravity", listOf("gemini-2.5-flash")))
+        engine.pool.upsert(ProviderAccount("trae", "t1", "trae 账号", "{}"))
+        engine.pool.upsert(ProviderAccount("antigravity", "a1", "反重力账号", "{}"))
+
+        // 不带前缀 = 交给网关推导，这时候 Failover 才是该发挥作用的场景
+        val candidates = engine.resolveCandidateRoutes("gemini-2.5-flash")
         assertTrue(candidates.size > 1, "开关开启时应能产生跨供应商候选：$candidates")
 
         // 关闭后只允许首选路由：此前 enabled 只在「显式路由表」分支生效，
         // 启发式回退照跑，表现为「界面关了故障转移、实际仍在自动换供应商」
         engine.updateFailoverSettings(engine.failoverSettings().copy(enabled = false))
-        val disabled = engine.resolveCandidateRoutes("trae/gemini-2.5-flash")
+        val disabled = engine.resolveCandidateRoutes("gemini-2.5-flash")
         assertEquals(1, disabled.size, "关闭后不得有跨供应商候选：$disabled")
-        assertEquals("trae", disabled.single().providerId)
     }
 }
