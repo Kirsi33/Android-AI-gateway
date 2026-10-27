@@ -15,6 +15,7 @@ import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import dev.aigw.app.data.ApkInstaller
 import dev.aigw.app.data.KeepAlive
+import dev.aigw.app.data.KeepAliveStatus
 import dev.aigw.app.data.UpdateNotifier
 import dev.aigw.app.gatewayEngine
 import dev.aigw.app.ui.theme.ThemeMode
