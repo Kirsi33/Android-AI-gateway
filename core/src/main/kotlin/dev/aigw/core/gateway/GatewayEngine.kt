@@ -1594,6 +1594,24 @@ class GatewayEngine(
 
     // ------------------------------------------------------------------ 数据管理
 
+    /**
+     * 逐账号问 provider 是否需要迁移（[Provider.migrateAccount]）：uid 变了就按新 key 重新登记、
+     * 旧条目删除（凭证与状态都保留）。返回迁移条数；只在启动后的后台跑一次。
+     */
+    fun migrateAccounts(): Int {
+        var moved = 0
+        for (account in pool.accounts()) {
+            val provider = registry.get(account.providerId) ?: continue
+            val migrated = runCatching { provider.migrateAccount(account) }.getOrNull() ?: continue
+            if (migrated.uid == account.uid) continue
+            pool.upsert(migrated)
+            pool.remove(account.providerId, account.uid)
+            moved++
+            log("账号标识迁移：${account.providerId} ${account.uid.take(12)}… → ${migrated.uid.take(12)}…")
+        }
+        return moved
+    }
+
     /** 存储占用明细。 */
     fun storageReport(): StorageReport = StorageAudit.audit(store)
 

@@ -414,6 +414,12 @@ class AppViewModel(
         engine.setStartupDataReadyListener { refresh() }
         refresh()
         // 自动检查更新：默认开启，每天最多一次，失败静默
+        // 历史遗留的账号标识自愈（如小浣熊早期把 JWT 的 iss 当 uid，导致多账号共用一个 key）：
+        // 后台跑一次，真搬了 key 再刷界面；没搬动就不打扰
+        viewModelScope.launch {
+            val moved = withContext(Dispatchers.IO) { engine.migrateAccounts() }
+            if (moved > 0) refresh()
+        }
         maybeAutoCheckUpdate()
     }
 
