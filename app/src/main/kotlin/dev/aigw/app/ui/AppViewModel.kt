@@ -15,7 +15,7 @@ import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import dev.aigw.app.data.ApkInstaller
 import dev.aigw.app.data.KeepAlive
-import dev.aigw.app.data.KeepAliveStatus
+import dev.aigw.app.data.UpdateNotifier
 import dev.aigw.app.gatewayEngine
 import dev.aigw.app.ui.theme.ThemeMode
 import dev.aigw.app.ui.theme.defaultAppColors
@@ -1608,8 +1608,16 @@ class AppViewModel(
                 onSuccess = { info ->
                     if (isNewer(info.version, installedVersionName())) {
                         _state.value = _state.value.copy(updateInfo = info)
-                    } else if (manual) {
-                        _state.value = _state.value.copy(notice = "已是最新版本（${installedVersionName()}）")
+                        // 主动发一条系统通知：autoCheck 只在 App 启动时跑，
+                        // 不发通知的话用户不开 App 永远不知道有新版本。
+                        // 同一版本只提醒一次（内部去重），手动检查时强制再提醒。
+                        runCatching { UpdateNotifier.notifyIfNeeded(app, info.version) }
+                    } else {
+                        // 已经是最新版本：顺手撤掉可能残留的更新提醒通知
+                        runCatching { UpdateNotifier.clear(app) }
+                        if (manual) {
+                            _state.value = _state.value.copy(notice = "已是最新版本（${installedVersionName()}）")
+                        }
                     }
                 },
                 onFailure = { e ->

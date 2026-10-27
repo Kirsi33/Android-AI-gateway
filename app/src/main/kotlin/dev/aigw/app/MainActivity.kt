@@ -92,6 +92,9 @@ class MainActivity : ComponentActivity() {
 
     private var viewModel: AppViewModel? = null
 
+    /** 是否需要在首帧后主动检查一次更新（由「有新版本」通知点击带入）。 */
+    private var triggerUpdateCheck = false
+
     private val gatewayToggledReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             // 磁贴启停后通知界面刷新（磁贴无法直接触达 ViewModel）
@@ -103,10 +106,22 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
         registerGatewayToggledReceiver()
+        // 从「有新版本」通知点进来：直接触发一次检查，让更新弹窗自己浮出来
+        if (intent?.getBooleanExtra(dev.aigw.app.data.UpdateNotifier.EXTRA_SHOW_UPDATE, false) == true) {
+            intent?.removeExtra(dev.aigw.app.data.UpdateNotifier.EXTRA_SHOW_UPDATE)
+            triggerUpdateCheck = true
+        }
         setContent {
             val vm: AppViewModel = viewModel(factory = appViewModelFactory())
             viewModel = vm
             val state by vm.state.collectAsStateWithLifecycle()
+            // 通知点进来时补一次手动检查（弹窗不受「每天一次」的自动检查节流影响）
+            LaunchedEffect(triggerUpdateCheck) {
+                if (triggerUpdateCheck) {
+                    triggerUpdateCheck = false
+                    vm.checkUpdate()
+                }
+            }
 
             AiGatewayTheme(
                 dynamicColor = state.dynamicColor,

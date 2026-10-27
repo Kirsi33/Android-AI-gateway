@@ -33,17 +33,30 @@ class AiGatewayApp : Application() {
             spillDir = java.io.File(cacheDir, "call-fulltext"),
         )
         engine = created
-        getSystemService<NotificationManager>()?.createNotificationChannel(
+        val manager = getSystemService<NotificationManager>()
+        manager?.createNotificationChannel(
             NotificationChannel(
                 CHANNEL_ID,
                 getString(R.string.channel_name),
                 NotificationManager.IMPORTANCE_LOW,
             ).apply { description = getString(R.string.channel_desc) },
         )
+        // 更新提醒单独一条渠道：让用户可以「只关更新提醒、保留网关常驻通知」。
+        // 用 DEFAULT 而不是 LOW——发到前台服务那个低优先级渠道里，用户根本不会注意到。
+        manager?.createNotificationChannel(
+            NotificationChannel(
+                UPDATE_CHANNEL_ID,
+                "版本更新",
+                NotificationManager.IMPORTANCE_DEFAULT,
+            ).apply { description = "发现新版本时提醒" },
+        )
     }
 
     companion object {
         const val CHANNEL_ID = "aigw"
+
+        /** 更新提醒渠道（与网关常驻通知分开，便于单独关闭）。 */
+        const val UPDATE_CHANNEL_ID = "aigw_update"
     }
 }
 
