@@ -8,7 +8,7 @@ Android 上运行的本地 AI 模型聚合网关：把多家私有 AI 服务账�
 
 > **本仓库是 [xibai6668/Android-AI-gateway](https://github.com/xibai6668/Android-AI-gateway) 的分支（fork）。**
 > 上游负责网关内核与大部分供应商协议，本分支在上游基础上补充了 LongCat / Today 两家供应商、Anthropic 协议门面、账号优先级与若干体验修正。
-> 版本号是独立序列（当前 **2.5.7**），与上游的 `2.x` 不是同一条线，**不要按版本号大小比较两者**。
+> 版本号是独立序列（当前 **2.5.10**），与上游的 `2.x` 不是同一条线，**不要按版本号大小比较两者**。
 > 改动代码前请先读上游的 **[ARCHITECTURE.md](ARCHITECTURE.md)**——完整的架构地图、模块职责、协议陷阱清单与改动守则。
 
 ---
@@ -67,13 +67,16 @@ Android 上运行的本地 AI 模型聚合网关：把多家私有 AI 服务账�
 
 | 能力 | 说明 |
 |---|---|
-| **Today 供应商** | 上游没有 SSE 接口，只能「发一句 → 轮询整段快照」。实现上先同步等到第一段内容再开流，这样 401 / 没配额时网关还能换号，不会吐了 `message_start` 才发现空。流式靠增量差分。登录支持**短信验证码**（大陆号 +86）与手动粘贴 session token，网页登录为备用。 |
+| **Today 供应商** | 上游没有 SSE 接口，只能「发一句 → 轮询整段快照」。实现上先同步等到第一段内容再开流，这样 401 / 没配额时网关还能换号，不会吐了 `message_start` 才发现空。流式靠增量差分。登录支持**短信验证码**（大陆号 +86）与手动粘贴 session token，网页登录为备用。模型**自动发现**：从套餐状态里递归捞 `model.*` 选项，上游上新不用改代码（内置兜底 DeepSeek V4.1 / MiniMax M3.1 Flash（限时免费）/ GLM 5.3）。 |
 | **LongCat 供应商** | 美团龙猫，双通道：免登录（`chat-completion-oversea-V2`，有 IP 级限流）/ Cookie 登录（`session-create` + `chat-completion-V2`）。上游请求体没有 `model` 字段，靠 `agentId` + `reasonEnabled` + `searchEnabled` 表达。 |
 | **Anthropic 协议门面** | `POST /v1/messages` + `/v1/messages/count_tokens`。三条实测铁律：`message_start` 延迟到真有内容才写（空流才能换号）、`input_tokens` 必须在首帧就给（SDK 拿它算上下文余量）、收尾必须 `content_block_stop` → `message_delta` → `message_stop`（少一帧 SDK 当截断）。Anthropic 客户端不做重试，所以网关自己换号。 |
 | **账号优先级** | 账号池新增 `priority`，重做在上游的「账号级落盘串行锁 + 锁外写」结构上，没有回退上游的锁优化。 |
 | **内嵌登录** | LongCat / Today 这类「凭证即 Cookie / token」的上游，用 App 内 WebView 完成登录；除 Cookie 外还读 `localStorage` / `sessionStorage`（现在的网站多半把 token 放 Web Storage）。 |
 | **数据管理页** | 存储占用、保留期、截断、清理集中到一处。 |
 | **模型能力标记** | 模型列表显示「思考 · 联网 · 识图 · 工具 · 输出 N · vendor」与「倍率 / 限时折扣」——上游 core 一直在算 `extra["rate"]`，但界面不读。 |
+| **能力字段透出** | `/v1/models` 输出 `capabilities` 数组与 `supports_vision` / `input_modalities` 等通用平铺字段，客户端（如 Minis）据此自动勾选「图片输入 / 思考」。能力解析统一在 `util/ModelCapabilities.kt`，各家上游字段写法五花八门，只有**明确为真**才写——「没说」不等于「不支持」。 |
+| **显式路由不跨供应商回退** | 请求带 `供应商/模型` 前缀时，失败只在这一家内换号，绝不悄悄换到别家。不带前缀才允许 Failover。起因是真实事故：用户在 Today 上试限时免费模型，凭证失效后网关自动切到 Trae 烧掉 400 积分，用户全程不知道请求去了哪。 |
+| **桌面 UA 登录** | 部分上游按 UA 判定「地区不开放」（Trae 国际版），手机 UA 被拒、桌面 UA 同网能进。内嵌登录支持「桌面模式」，用 Chrome 桌面 UA + 桌面视口打开登录页。 |
 
 **刻意保留的上游行为**：上游 v2.14.6 的账号池锁优化、SSE 终止帧补齐、模型级冷却（`ModelCooldownTracker`）、并发闸门（`ConcurrencyGate`）、应用内更新、容错页、悬浮保活，均原样保留。
 
@@ -111,6 +114,8 @@ Provider 实现       上游私有协议 ⇄ OpenAI 协议（双向转换封死�
    ▼
 上游 API
 ```
+
+**路由策略**：带 `供应商/模型` 前缀 = 用户显式指定，只在该供应商内换号；不带前缀 = 交给网关推导，才启用跨供应商 Failover。这条边界很重要——自动转移是功能，但它不能替用户花钱。
 
 **核心不变量**：Provider 的边界是「OpenAI 进、OpenAI 出」。上游私有协议的双向转换全部封死在 Provider 内部，网关层对供应商差异零感知。Anthropic 协议只在入口/出口各做一次翻译，不穿透到 Provider。任何把上游协议细节泄漏到网关层的改动，都会破坏这套可维护性根基。
 
@@ -163,7 +168,7 @@ usage/...                         # 用量统计
 - 产物：`app/build/outputs/apk/debug/app-debug.apk`（包名 `dev.aigw.app.debug`）。
 - 版本号硬编码在 `app/build.gradle.kts`（`versionCode` / `versionName`）；改后必须重新构建。
 - 本地**不产 release 包**：release 仅由云端 GitHub Actions 手动触发构建并发版，日常 push 不产生任何云端构建。
-- **改版本号必须同步检查自更新源**：自更新查的是**本仓库**的 Release，版本号是独立序列。查上游仓库会误判（上游 `2.14.6 > 2.5.7` 恒为真），且上游 APK 的 `versionCode` 比本分支小，会以 `INSTALL_FAILED_VERSION_DOWNGRADE` 装不上。
+- **改版本号必须同步检查自更新源**：自更新查的是**本仓库**的 Release，版本号是独立序列。查上游仓库会误判（上游 `2.14.6 > 2.5.10` 恒为真），且上游 APK 的 `versionCode` 比本分支小，会以 `INSTALL_FAILED_VERSION_DOWNGRADE` 装不上。
 
 命令行联调（`:cli`，无需 Android 设备）：
 
@@ -219,7 +224,7 @@ curl http://127.0.0.1:8790/v1/messages \
 | `loomy` | Loomy（讯飞） | `xfinfr.com` | 鉴权失败为 HTTP 200 + 业务码，而非 4xx；登录用短信验证码 |
 | `raccoon` | 小浣熊（商汤） | `xiaohuanxiong.com` | OpenAI 结构被包在 `data` 里；字段用标准名（v2 LiteLLM 层不认 `max_new_tokens`） |
 | `longcat` | LongCat（美团） | `longcat.chat` | 双通道：免登录（IP 级限流）/ Cookie 登录；请求体无 `model` 字段 |
-| `today` | Today | `auth.todayai.cn` / `api.todayai.cn` | **无 SSE 接口**，轮询整段快照后本地差分出流；登录用短信验证码（+86） |
+| `today` | Today | `auth.todayai.cn` / `api.todayai.cn` | **无 SSE 接口**，轮询整段快照后本地差分出流；登录用短信验证码（+86）；模型自动发现 |
 | `custom:<key>` | 自定义 | 用户填写的 baseUrl | 任意 OpenAI 兼容中转站，一个 key = 一个账号 |
 
 ---
