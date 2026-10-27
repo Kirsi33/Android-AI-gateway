@@ -392,10 +392,12 @@ class RaccoonProviderTest {
         block: (baseUrl: String, captured: () -> Map<String, List<String>>) -> Unit,
     ) {
         val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
-        val headers = AtomicReference<Map<String, List<String>>>(emptyMap())
+        // 按路径记录请求头：签到流程会打多个端点，captured() 取其中指定路径的那次
+        val requests = AtomicReference<List<Pair<String, Map<String, List<String>>>>>(emptyList())
         for ((path, body) in paths) {
             server.createContext(path) { exchange ->
-                headers.set(exchange.requestHeaders.entries.associate { it.key.lowercase() to it.value })
+                val entry = exchange.requestHeaders.entries.associate { it.key.lowercase() to it.value }
+                requests.set(requests.get() + (path to entry))
                 val bytes = body.toByteArray(Charsets.UTF_8)
                 exchange.responseHeaders.add("Content-Type", "application/json")
                 exchange.sendResponseHeaders(200, bytes.size.toLong())
@@ -404,7 +406,9 @@ class RaccoonProviderTest {
         }
         server.start()
         try {
-            block("http://127.0.0.1:${server.address.port}") { headers.get() }
+            block("http://127.0.0.1:${server.address.port}") {
+                requests.get().firstOrNull { it.first == path }?.second ?: emptyMap()
+            }
         } finally {
             server.stop(0)
         }
