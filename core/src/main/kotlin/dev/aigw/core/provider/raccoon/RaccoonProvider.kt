@@ -35,6 +35,7 @@ import dev.aigw.core.util.HttpSupport
 import dev.aigw.core.util.arrayOrNull
 import dev.aigw.core.util.boolOrNull
 import dev.aigw.core.util.firstLong
+import dev.aigw.core.util.jsonCapabilitiesOf
 import dev.aigw.core.util.firstString
 import dev.aigw.core.util.jwtClaim
 import dev.aigw.core.util.jwtClaimLong
@@ -468,6 +469,7 @@ class RaccoonProvider(
                     contextWindow = item.firstLong(
                         "context_window", "contextWindow", "max_input_tokens", "maxInputTokens", "max_context",
                     ),
+                    extra = jsonCapabilitiesOf(item),
                 ),
             )
         }

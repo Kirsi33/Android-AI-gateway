@@ -23,6 +23,7 @@ import dev.aigw.core.provider.queryParam
 import dev.aigw.core.protocol.OpenAiGemini
 import dev.aigw.core.util.HttpSupport
 import dev.aigw.core.util.arrayOrNull
+import dev.aigw.core.util.jsonCapabilitiesOf
 import dev.aigw.core.util.longOrNull
 import dev.aigw.core.util.newCompletionId
 import dev.aigw.core.util.objOrNull
@@ -144,7 +145,14 @@ class AntigravityProvider(
                     val displayName = meta?.stringOrNull("displayName").orEmpty().ifEmpty { modelId }
                     // 上游未给 maxTokens 时不填（0 = 界面不展示），不要拿一个常量冒充上下文窗口
                     val contextLength = meta?.longOrNull("maxTokens")?.takeIf { it > 0 } ?: 0L
-                    result.add(ProviderModel(modelId, displayName, contextLength))
+                    result.add(
+                        ProviderModel(
+                            id = modelId,
+                            name = displayName,
+                            contextWindow = contextLength,
+                            extra = meta?.let { jsonCapabilitiesOf(it) } ?: emptyMap(),
+                        ),
+                    )
                 }
                 if (result.isNotEmpty()) {
                     result.sortBy { it.id }

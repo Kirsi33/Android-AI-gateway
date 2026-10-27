@@ -48,8 +48,14 @@ class ModelFailoverTest {
         }
     }
 
+    /**
+     * 显式指定供应商时**不得**跨供应商回退。
+     *
+     * 这是真实事故的回归测试：用户在 today 上试限时免费的模型，today 凭证失效，
+     * 网关悄悄切到 Trae 把付费额度烧掉了，用户全程不知道请求去了哪。
+     */
     @Test
-    fun `首选供应商失败时自动故障转移到支持同款模型的备用供应商`() {
+    fun `显式指定供应商时失败不回退到别家`() {
         val engine = GatewayEngine(InMemoryKeyValueStore())
         // Provider A: 支持 glm-5.2，但上游崩了 (500)
         val providerA = TestProvider("providerA", listOf("glm-5.2"), shouldFail = true)
@@ -76,16 +82,17 @@ class ModelFailoverTest {
             val body = """{"model":"providerA/glm-5.2","messages":[{"role":"user","content":"hi"}]}"""
             conn.outputStream.write(body.toByteArray(Charsets.UTF_8))
 
-            assertEquals(200, conn.responseCode, "自动故障转移应成功返回 200")
-            val resp = conn.inputStream.bufferedReader().readText()
-            assertTrue(resp.contains("来自B的回复"), "响应内容应来自备用供应商 B：$resp")
+            // A 显式失败 → 直接报错，绝不能落到 B（B 可能要花真金白银）
+            assertTrue(conn.responseCode >= 500, "显式指定供应商失败时应返回错误，实际 ${conn.responseCode}")
+            val err = (conn.errorStream ?: conn.inputStream).bufferedReader().readText()
+            assertTrue(err.contains("providerA"), "错误里要指出是哪家失败：$err")
         } finally {
             server.stop()
         }
     }
 
     @Test
-    fun `首选供应商无可用账号时直接切换到备用供应商`() {
+    fun `显式指定的供应商没有可用账号时报错而不是换家`() {
         val engine = GatewayEngine(InMemoryKeyValueStore())
         // Provider A: 支持 gpt-4o，无可用账号
         val providerA = TestProvider("providerA", listOf("gpt-4o"), shouldFail = false)
@@ -110,9 +117,42 @@ class ModelFailoverTest {
             val body = """{"model":"providerA/gpt-4o","messages":[{"role":"user","content":"hi"}]}"""
             conn.outputStream.write(body.toByteArray(Charsets.UTF_8))
 
-            assertEquals(200, conn.responseCode, "A 无账号时应自动平滑切到 B")
+            assertTrue(conn.responseCode >= 500, "显式指定的 A 无账号时应报错，实际 ${conn.responseCode}")
+            val err = (conn.errorStream ?: conn.inputStream).bufferedReader().readText()
+            assertTrue(err.contains("providerA"), "错误里要指出是哪家：$err")
+        } finally {
+            server.stop()
+        }
+    }
+
+    /** 不带供应商前缀时（模型名推导），跨供应商 Failover 仍然生效。 */
+    @Test
+    fun `无前缀请求仍然跨供应商故障转移`() {
+        val engine = GatewayEngine(InMemoryKeyValueStore())
+        val providerA = TestProvider("providerA", listOf("gpt-4o"), shouldFail = true)
+        val providerB = TestProvider("providerB", listOf("gpt-4o"), shouldFail = false, responseContent = "来自B的回复")
+
+        engine.registry.register(providerA)
+        engine.registry.register(providerB)
+        engine.pool.upsert(ProviderAccount("providerA", "u1", "账号A", "{}"))
+        engine.pool.upsert(ProviderAccount("providerB", "u2", "账号B", "{}"))
+
+        val server = GatewayHttpServer(engine, "127.0.0.1", 0)
+        server.start(0, true)
+
+        try {
+            val conn = URL("http://127.0.0.1:${server.listeningPort}/v1/chat/completions")
+                .openConnection() as HttpURLConnection
+            conn.requestMethod = "POST"
+            conn.doOutput = true
+            conn.setRequestProperty("Content-Type", "application/json")
+            // 无前缀：交给网关推导，这时候 Failover 才是该发挥作用的场景
+            val body = """{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}"""
+            conn.outputStream.write(body.toByteArray(Charsets.UTF_8))
+
+            assertEquals(200, conn.responseCode, "无前缀请求应允许自动故障转移")
             val resp = conn.inputStream.bufferedReader().readText()
-            assertTrue(resp.contains("来自B的成功响应"), "响应内容：$resp")
+            assertTrue(resp.contains("来自B的回复"), "响应内容应来自备用供应商 B：$resp")
         } finally {
             server.stop()
         }

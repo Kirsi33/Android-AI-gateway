@@ -145,7 +145,18 @@ data class GatewayStatus(
  *
  * [region] 非空时（区域型前缀，如 `codebuddy-cn/xxx`）选号只在该区域的账号中进行。
  */
-data class Route(val providerId: String, val model: String, val region: String? = null)
+data class Route(
+    val providerId: String,
+    val model: String,
+    val region: String? = null,
+    /**
+     * 是否由用户**显式指定**（请求里带了 `供应商/模型` 前缀）。
+     *
+     * 显式指定的路由不做跨供应商 Failover：用户写 `today/xxx` 就是要在 today 上跑，
+     * 悄悄换到别家会花掉他没打算花的额度。同一供应商内换号仍然允许。
+     */
+    val explicit: Boolean = false,
+)
 
 /**
  * 浏览器登录入口的返回值。
@@ -1317,7 +1328,7 @@ class GatewayEngine(
                 // 区域型前缀（如 codebuddy-cn/glm-5.2）：路由到该供应商并把区域约束带上，
                 // 选号只在该区域的账号中进行
                 val region = regionPrefixOf(rawPrefix.lowercase(), normalized)
-                return Route(normalized, subModel, region)
+                return Route(normalized, subModel, region, explicit = true)
             }
         }
 
@@ -1397,8 +1408,25 @@ class GatewayEngine(
      * 2. 否则自动回退到启发式同名/同款探测逻辑；
      * 3. 熔断中或无可用账号的供应商会被合理标记或降级。
      */
+    /**
+     * 这次请求会跨供应商转移吗（首选 vs 候选）。
+     *
+     * 供网关在返回头里标注，让用户在客户端就能看到「请求实际去了哪一家」——
+     * 自动 failover 本身是功能，但它不该是隐形的。
+     */
+    fun willFailover(requested: String): Boolean {
+        val candidates = resolveCandidateRoutes(requested)
+        return candidates.size > 1 && candidates.first().providerId != candidates[1].providerId
+    }
+
     fun resolveCandidateRoutes(requested: String): List<Route> {
         val primary = resolveRoute(requested) ?: return emptyList()
+        // 用户显式指定了供应商（`today/xxx`）：只在这一家上跑，失败就如实报错。
+        // 否则会出现这种事故：用户在 today 上试限时免费的模型，today 凭证恰好失效，
+        // 网关自动切到 Trae 把付费额度烧掉，而用户完全不知道请求去了哪。
+        // 同一供应商内部的换号不受影响（那才是 Failover 该做的事）。
+        if (primary.explicit) return listOf(primary)
+
         // 开关关闭时**只**用首选路由：不得跨供应商转移。
         // 此前只在下面「显式路由表」分支判了 enabled，启发式回退照跑，
         // 导致界面上关了故障转移、实际仍会自动切到别的供应商。

@@ -87,6 +87,17 @@ fun ProviderDetailScreen(
                 }
                 cookieLogin.launch(intent)
             },
+            onDesktopCookieLogin = { id, url, hosts, title ->
+                pendingCookieProvider = id
+                val intent = Intent(context, CookieLoginActivity::class.java).apply {
+                    putExtra(CookieLoginActivity.EXTRA_START_URL, url)
+                    putExtra(CookieLoginActivity.EXTRA_COOKIE_HOSTS, hosts.toTypedArray())
+                    putExtra(CookieLoginActivity.EXTRA_TITLE, title)
+                    // 桌面 UA：Trae 国际版按 UA 拦「地区不开放」，桌面模式同网能进
+                    putExtra(CookieLoginActivity.EXTRA_DESKTOP_UA, true)
+                }
+                cookieLogin.launch(intent)
+            },
             onDeviceLogin = { id, region -> viewModel.beginDeviceLogin(id, region) },
             onSmsLogin = { id, phone, code, ccode, onResult ->
                 if (code.isEmpty()) {

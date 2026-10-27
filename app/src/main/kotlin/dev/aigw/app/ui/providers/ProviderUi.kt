@@ -31,6 +31,15 @@ class ProviderUiActions(
      */
     val onCookieLogin: (providerId: String, url: String, hosts: List<String>, title: String) -> Unit =
         { _, _, _, _ -> },
+
+    /**
+     * 内嵌网页登录（桌面 UA 版）。
+     *
+     * 部分上游按 UA 判断客户端平台，手机 UA 直接回「该地区不开放」，桌面 UA 同网却能进
+     * （Trae 国际版就是）。需要时用它，别去改全局 UA。
+     */
+    val onDesktopCookieLogin: (providerId: String, url: String, hosts: List<String>, title: String) -> Unit =
+        { _, _, _, _ -> },
     /** 设备授权登录（WorkBuddy）：拉起 WebView 并开始轮询；region 由组件按滑块传入。 */
     val onDeviceLogin: (providerId: String, region: String) -> Unit = { _, _ -> },
     /** 读供应商私有设置项（同步，取引擎内存值）。 */

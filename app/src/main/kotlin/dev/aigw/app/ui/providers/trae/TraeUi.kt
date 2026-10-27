@@ -16,6 +16,7 @@ import androidx.compose.material.icons.filled.SmartToy
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon as MaterialIcon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -106,6 +107,27 @@ object TraeUi : ProviderUi {
                     modifier = Modifier.fillMaxWidth(),
                 ) {
                     Text(if (global) "在浏览器中打开 Trae 国际版登录页" else "在浏览器中打开 Trae 登录页")
+                }
+                if (global) {
+                    // 国际版对手机 UA 常回「该地区不开放」，桌面 UA 同网却能进。
+                    // 这条走 App 内 WebView（桌面 UA），登录完直接读 Cookie，不依赖系统浏览器。
+                    OutlinedButton(
+                        onClick = {
+                            actions.onDesktopCookieLogin(
+                                id,
+                                "https://www.trae.ai/",
+                                listOf("trae.ai", "www.trae.ai", "api.trae.ai", "ug-normal.trae.ai"),
+                                "登录 Trae 国际版",
+                            )
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("用桌面模式登录国际版（地区受限时用）") }
+                    Text(
+                        text = "若提示「对此国家地区不开放」，改用上面这条：它在 App 内用电脑版页面登录，" +
+                            "登录完成后自动取回凭证。",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
                 OutlineActionButton(
                     text = if (expanded) "收起粘贴导入" else "粘贴凭证 JSON 导入",

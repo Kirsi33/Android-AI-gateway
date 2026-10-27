@@ -58,6 +58,7 @@ class CookieLoginActivity : Activity() {
         pendingHosts = cookieHosts
         cookieHostsForCheck = cookieHosts.toList()
         val title = intent.getStringExtra(EXTRA_TITLE).orEmpty().ifEmpty { "登录" }
+        val desktopUa = intent.getBooleanExtra(EXTRA_DESKTOP_UA, false)
 
         if (startUrl.isEmpty()) {
             Toast.makeText(this, "缺少登录地址", Toast.LENGTH_SHORT).show()
@@ -153,6 +154,15 @@ class CookieLoginActivity : Activity() {
         settings.builtInZoomControls = false
         settings.cacheMode = WebSettings.LOAD_DEFAULT
         settings.mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+
+        // 桌面 UA：部分上游按 UA 判断客户端平台，手机 UA 会直接回「该地区不开放」，
+        // 桌面 UA 同一个网络却能进。只在调用方显式要求时才改（默认保持移动端，
+        // 因为有些站点的网页登录流程在桌面模式下反而更麻烦）。
+        if (desktopUa) {
+            settings.userAgentString = DESKTOP_UA
+            settings.useWideViewPort = true
+            settings.loadWithOverviewMode = true
+        }
 
         CookieManager.getInstance().setAcceptCookie(true)
         CookieManager.getInstance().setAcceptThirdPartyCookies(view, true)
@@ -342,6 +352,14 @@ class CookieLoginActivity : Activity() {
         const val EXTRA_SUCCESS_URL_PREFIXES = "success_url_prefixes"
         /** 出现这个 Cookie 即视为登录完成（没有回调地址的上游）。 */
         const val EXTRA_SUCCESS_COOKIE = "success_cookie"
+
+        /** 桌面 UA：绕开「移动端不允许」的地域/客户端判定。 */
+        private const val DESKTOP_UA =
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+                "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+
+        /** 用桌面 UA + 桌面视口打开登录页（Trae 国际版这类按 UA 拦人的上游）。 */
+        const val EXTRA_DESKTOP_UA = "desktop_ua"
 
         /** 自动确认后等多久再收尾，给 Set-Cookie 落盘留时间。 */
         private const val AUTO_CONFIRM_DELAY_MS = 600L
