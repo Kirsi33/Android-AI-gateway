@@ -26,6 +26,7 @@ class RaccoonProviderTest {
 
     private companion object {
         const val GRANT_PATH = "/api/web/desktop/v1/login/points/grant"
+        const val MOBILE_GRANT_PATH = "/api/web/mobile/v1/login/points/grant"
         const val BILLS_PATH = "/api/web/points/v1/bills"
         const val BALANCE_PATH = "/api/web/points/v1/balance"
     }
@@ -278,14 +279,23 @@ class RaccoonProviderTest {
 
     @Test
     fun `签到携带桌面端请求头`() {
-        withUpstreamHeaders(GRANT_PATH, """{"code":0,"data":{"granted":true,"popup":{"source":"desktop_login","points":3000}}}""") { base, captured ->
+        withUpstreamHeaders(
+            mapOf(
+                GRANT_PATH to """{"code":0,"data":{"granted":true,"popup":{"source":"desktop_login","points":3000}}}""",
+                MOBILE_GRANT_PATH to """{"code":0,"data":{"granted":false}}""",
+                BILLS_PATH to """{"code":0,"data":{"items":[]}}""",
+            ),
+        ) { base, captured ->
             RaccoonProvider(host = base).performAction(account(), ACTION_CHECKIN, JsonObject())
             val headers = captured()
-            // 官方桌面客户端靠这两个头判定「是桌面端」，缺了上游不发放
-            assertEquals("desktop-windows", headers["x-client-platform"]?.firstOrNull(), "缺 X-Client-Platform：$headers")
+            // 官方桌面客户端靠这套组合判定「是桌面端」，缺了上游不发放
+            // （字段值来自 rsfree/xhx2api 的抓包实证）
+            assertEquals("desktop-windows-x64", headers["x-client-platform"]?.firstOrNull(), "缺 x-client-platform：$headers")
+            assertEquals("@raccoon/office-desktop", headers["x-client-name"]?.firstOrNull(), "缺 x-client-name：$headers")
+            assertEquals("official", headers["x-client-channel"]?.firstOrNull(), "缺 x-client-channel：$headers")
             assertTrue(
                 headers["x-client-version"]?.firstOrNull()?.startsWith("v") == true,
-                "缺 X-Client-Version（需带 v 前缀）：$headers",
+                "缺 x-client-version（需带 v 前缀）：$headers",
             )
         }
     }
@@ -302,11 +312,18 @@ class RaccoonProviderTest {
 
     @Test
     fun `未发放时不报成签到成功`() {
-        withUpstreamHeaders(GRANT_PATH, """{"code":0,"data":{"granted":false}}""") { base, _ ->
+        withUpstreamHeaders(
+            mapOf(
+                GRANT_PATH to """{"code":0,"data":{"granted":false}}""",
+                MOBILE_GRANT_PATH to """{"code":0,"data":{"granted":false}}""",
+                // 流水为空 = 既没有今天的 daily_grant，也没有历史 —— 如实报「未开通」
+                BILLS_PATH to """{"code":0,"data":{"items":[]}}""",
+            ),
+        ) { base, _ ->
             val result = RaccoonProvider(host = base).performAction(account(), ACTION_CHECKIN, JsonObject())
             assertTrue(result.ok, result.message)
             assertTrue(
-                result.message.contains("未发放"),
+                result.message.contains("未开通每日积分"),
                 "上游明确没发积分，不能报成签到成功：${result.message}",
             )
         }
@@ -358,20 +375,32 @@ class RaccoonProviderTest {
 
     // ------------------------------------------------------------------ 上游响应
 
-    /** 起一个临时上游，并把收到的请求头暴露给断言（签到协议头回归用）。 */
+    /**
+     * 起一个临时上游，并把收到的请求头暴露给断言（签到协议头回归用）。
+     *
+     * [paths] 支持多路径：新签到流程会打桌面 grant / 手机 grant / bills 三个端点，
+     * 没注册到的路径回 404——正好可以断言「不该发的请求没发」。
+     */
     private fun withUpstreamHeaders(
         path: String,
         body: String,
         block: (baseUrl: String, captured: () -> Map<String, List<String>>) -> Unit,
+    ) = withUpstreamHeaders(mapOf(path to body), block)
+
+    private fun withUpstreamHeaders(
+        paths: Map<String, String>,
+        block: (baseUrl: String, captured: () -> Map<String, List<String>>) -> Unit,
     ) {
         val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
         val headers = AtomicReference<Map<String, List<String>>>(emptyMap())
-        server.createContext(path) { exchange ->
-            headers.set(exchange.requestHeaders.entries.associate { it.key.lowercase() to it.value })
-            val bytes = body.toByteArray(Charsets.UTF_8)
-            exchange.responseHeaders.add("Content-Type", "application/json")
-            exchange.sendResponseHeaders(200, bytes.size.toLong())
-            exchange.responseBody.use { it.write(bytes) }
+        for ((path, body) in paths) {
+            server.createContext(path) { exchange ->
+                headers.set(exchange.requestHeaders.entries.associate { it.key.lowercase() to it.value })
+                val bytes = body.toByteArray(Charsets.UTF_8)
+                exchange.responseHeaders.add("Content-Type", "application/json")
+                exchange.sendResponseHeaders(200, bytes.size.toLong())
+                exchange.responseBody.use { it.write(bytes) }
+            }
         }
         server.start()
         try {
