@@ -23,11 +23,43 @@ object TodayConstants {
     const val OPT_DEEPSEEK = "model.deepseek-v4.1-flash"
     const val OPT_GLM = "model.glm-5.3"
 
+    /**
+     * MiniMax M3.1 Flash（限时免费，倍率 0×）。
+     *
+     * optionId 按上游的命名规则推得（`model.` + 短名小写）。万一猜错也不致命：
+     * [TodayProvider] 会从 `/v1/pricing/status` 的响应里**自动发现**真实存在的
+     * `model.*` 选项，这里的常量只是「没账号 / 拉取失败」时的兜底。
+     */
+    const val OPT_MINIMAX = "model.minimax-m3.1-flash"
+
     /** 暴露给客户端的短名。 */
     const val MODEL_DEEPSEEK = "deepseek-v4.1-flash"
     const val MODEL_GLM = "glm-5.3"
+    const val MODEL_MINIMAX = "minimax-m3.1-flash"
 
-    val MODEL_IDS = listOf(MODEL_DEEPSEEK, MODEL_GLM)
+    /** 兜底模型表（无账号或上游拉取失败时用）。 */
+    val MODEL_IDS = listOf(MODEL_DEEPSEEK, MODEL_MINIMAX, MODEL_GLM)
+
+    /** 倍率表：上游按「同类任务消耗倍数」计价，0 表示限时免费。界面据此标注。 */
+    private val RATES = mapOf(
+        MODEL_DEEPSEEK to "1×",
+        MODEL_MINIMAX to "0×（限时免费）",
+        MODEL_GLM to "4×",
+    )
+
+    fun rateOf(model: String): String = RATES[model].orEmpty()
+
+    /** 已知模型的展示说明。 */
+    private val NOTES = mapOf(
+        MODEL_DEEPSEEK to "DeepSeek V4.1 Flash",
+        MODEL_MINIMAX to "MiniMax M3.1 Flash",
+        MODEL_GLM to "智谱 GLM 5.3",
+    )
+
+    fun noteOf(model: String): String = NOTES[model].orEmpty()
+
+    /** optionId → 短名（去掉 `model.` 前缀）。 */
+    fun shortNameOf(optionId: String): String = optionId.removePrefix("model.")
 
     private const val CAPS =
         "chat.browser.v1,connectors.account_management.v1,chat.brief_card.v1," +
@@ -54,13 +86,24 @@ object TodayConstants {
         val bare = s.substringAfter('/', s).substringAfter(':')
         return when {
             bare == "glm" || bare == MODEL_GLM || bare == OPT_GLM || bare.startsWith("glm-") -> OPT_GLM
+            bare == "minimax" || bare == MODEL_MINIMAX || bare == OPT_MINIMAX ||
+                bare.startsWith("minimax") || bare == "m3.1" -> OPT_MINIMAX
             bare == "deepseek" || bare == MODEL_DEEPSEEK || bare == OPT_DEEPSEEK ||
                 bare.startsWith("deepseek") -> OPT_DEEPSEEK
+            // 上游随时可能上新模型：`model.xxx` 原样放行；其它看起来像模型名的短名
+            // 按上游命名规则补上 `model.` 前缀。真实是否存在交给上游校验——
+            // 拼错时会拿到一条带可用列表的错误，比这里静默回退到 DeepSeek 好排查。
+            bare.startsWith("model.") -> bare
+            bare.isNotEmpty() && bare.length <= 64 && bare.none { it.isWhitespace() } -> "model.$bare"
             else -> null
         }
     }
 
-    /** optionId → 短名。 */
-    fun displayNameOf(optionId: String): String =
-        if (optionId == OPT_GLM) MODEL_GLM else MODEL_DEEPSEEK
+    /** optionId → 短名；未知选项按上游命名规则去前缀，不再一律落到 DeepSeek。 */
+    fun displayNameOf(optionId: String): String = when (optionId) {
+        OPT_GLM -> MODEL_GLM
+        OPT_MINIMAX -> MODEL_MINIMAX
+        OPT_DEEPSEEK -> MODEL_DEEPSEEK
+        else -> shortNameOf(optionId)
+    }
 }

@@ -72,6 +72,13 @@ class TodayProvider(
     /** 账号当前选中的上游模型选项；切模型要 PUT 一次，能缓存就别重复发。 */
     private val selectedOption = ConcurrentHashMap<String, String>()
 
+    /** 从上游发现到的模型选项（进程内缓存，[DISCOVER_TTL_MS] 内不重复打网络）。 */
+    @Volatile
+    private var discoveredOptions: List<String> = emptyList()
+
+    @Volatile
+    private var discoveredAtMillis: Long = 0L
+
     // ------------------------------------------------------------------ 短信登录
 
     /**
@@ -119,15 +126,74 @@ class TodayProvider(
     // ------------------------------------------------------------------ 模型
 
     override fun listModels(account: ProviderAccount?): ProviderModelCatalogView {
-        val models = TodayConstants.MODEL_IDS.map { name ->
+        // 上游会随时上新模型（比如限时免费的 MiniMax），所以先试着从账号的套餐状态里
+        // 把真实存在的 `model.*` 选项捞出来，再和内置兜底表合并。
+        val discovered = account
+            ?.let { TodayAccount.parse(it.secret) }
+            ?.let { runCatching { discoverOptions(it) }.getOrDefault(emptyList()) }
+            .orEmpty()
+
+        val ids = LinkedHashSet<String>()
+        // 发现到的排前面（顺序按上游返回），兜底表补齐
+        discovered.forEach { ids += TodayConstants.displayNameOf(it) }
+        TodayConstants.MODEL_IDS.forEach { ids += it }
+
+        val models = ids.map { name ->
             ProviderModel(
                 id = name,
                 name = name,
                 contextWindow = 128_000,
-                extra = mapOf("note" to if (name == TodayConstants.MODEL_GLM) "智谱 GLM" else "DeepSeek V4.1"),
+                extra = buildMap {
+                    TodayConstants.noteOf(name).takeIf { it.isNotEmpty() }?.let { put("note", it) }
+                    TodayConstants.rateOf(name).takeIf { it.isNotEmpty() }?.let { put("rate", it) }
+                },
             )
         }
-        return ProviderModelCatalogView(models = models, fromFallback = false, error = "")
+        return ProviderModelCatalogView(
+            models = models,
+            // 没账号或上游没返回选项时，用的就是内置兜底表
+            fromFallback = discovered.isEmpty(),
+            error = "",
+        )
+    }
+
+    /**
+     * 从 `/v1/pricing/status` 里发现可用模型选项。
+     *
+     * 不去猜 `modelOptions` 的具体结构（上游字段名改过、也可能再改）：
+     * 递归遍历整份响应，凡是形如 `model.xxx` 的字符串都当作候选 optionId。
+     * 这样上游新增模型时不需要改代码。
+     */
+    private fun discoverOptions(credential: TodayAccount): List<String> {
+        val now = nowMillis()
+        if (now - discoveredAtMillis < DISCOVER_TTL_MS && discoveredOptions.isNotEmpty()) {
+            return discoveredOptions
+        }
+        val raw = runCatching {
+            apiCall(credential, "GET", "/v1/pricing/status", null, null, 30_000)
+        }.getOrNull() ?: return discoveredOptions
+        val root = runCatching { JsonParser.parseString(raw).asJsonObject }.getOrNull()
+            ?: return discoveredOptions
+
+        val found = LinkedHashSet<String>()
+        fun walk(element: com.google.gson.JsonElement?) {
+            when {
+                element == null || element.isJsonNull -> Unit
+                element.isJsonPrimitive -> {
+                    val text = runCatching { element.asString }.getOrDefault("")
+                    if (text.startsWith("model.") && text.length in 8..80) found += text
+                }
+                element.isJsonArray -> element.asJsonArray.forEach { walk(it) }
+                element.isJsonObject -> element.asJsonObject.entrySet().forEach { walk(it.value) }
+            }
+        }
+        walk(root)
+
+        if (found.isNotEmpty()) {
+            discoveredOptions = found.toList()
+            discoveredAtMillis = now
+        }
+        return discoveredOptions
     }
 
     override fun resolveModel(requested: String): String {
@@ -698,5 +764,8 @@ class TodayProvider(
         private const val TOTAL_TIMEOUT_MS = 300_000L
 
         private const val PIPE_BUFFER = 64 * 1024
+
+        /** 模型选项的发现结果缓存时长：上游上新不频繁，10 分钟足够。 */
+        private const val DISCOVER_TTL_MS = 10 * 60 * 1000L
     }
 }
