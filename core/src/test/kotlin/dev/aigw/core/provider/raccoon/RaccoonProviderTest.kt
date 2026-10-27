@@ -407,7 +407,8 @@ class RaccoonProviderTest {
         server.start()
         try {
             block("http://127.0.0.1:${server.address.port}") {
-                requests.get().firstOrNull { it.first == path }?.second ?: emptyMap()
+                // 签到流程第一个请求是桌面 grant（协议头断言的目标），取它的头
+                requests.get().firstOrNull()?.second ?: emptyMap()
             }
         } finally {
             server.stop(0)
