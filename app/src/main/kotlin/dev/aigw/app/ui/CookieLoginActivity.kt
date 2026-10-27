@@ -45,6 +45,9 @@ class CookieLoginActivity : Activity() {
     private var autoConfirmed = false
     /** 本次要读取 Cookie 的域名（保存下来给自动确认路径用）。 */
     private var pendingHosts: Array<String> = emptyArray()
+
+    /** 是否用桌面 UA 打开（部分上游按 UA 判定「地区不开放」）。 */
+    private var desktopUserAgent = false
     /** 判断「关键 Cookie 是否出现」时要查的域名。 */
     private var cookieHostsForCheck: List<String> = emptyList()
 
@@ -58,7 +61,7 @@ class CookieLoginActivity : Activity() {
         pendingHosts = cookieHosts
         cookieHostsForCheck = cookieHosts.toList()
         val title = intent.getStringExtra(EXTRA_TITLE).orEmpty().ifEmpty { "登录" }
-        val desktopUa = intent.getBooleanExtra(EXTRA_DESKTOP_UA, false)
+        desktopUserAgent = intent.getBooleanExtra(EXTRA_DESKTOP_UA, false)
 
         if (startUrl.isEmpty()) {
             Toast.makeText(this, "缺少登录地址", Toast.LENGTH_SHORT).show()
@@ -158,7 +161,7 @@ class CookieLoginActivity : Activity() {
         // 桌面 UA：部分上游按 UA 判断客户端平台，手机 UA 会直接回「该地区不开放」，
         // 桌面 UA 同一个网络却能进。只在调用方显式要求时才改（默认保持移动端，
         // 因为有些站点的网页登录流程在桌面模式下反而更麻烦）。
-        if (desktopUa) {
+        if (desktopUserAgent) {
             settings.userAgentString = DESKTOP_UA
             settings.useWideViewPort = true
             settings.loadWithOverviewMode = true
