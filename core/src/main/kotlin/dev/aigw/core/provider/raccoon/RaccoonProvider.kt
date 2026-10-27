@@ -33,6 +33,7 @@ import dev.aigw.core.provider.queryParam
 import dev.aigw.core.provider.requestedModelOf
 import dev.aigw.core.util.HttpSupport
 import dev.aigw.core.util.arrayOrNull
+import dev.aigw.core.util.asObjectOrNull
 import dev.aigw.core.util.boolOrNull
 import dev.aigw.core.util.firstLong
 import dev.aigw.core.util.jsonCapabilitiesOf
@@ -452,14 +453,16 @@ class RaccoonProvider(
             mobile.second?.let { lines += it }
 
             // 3) 今日每日积分的结算状态（以流水为准）
-            when (val daily = dailyGrantStatus(credential)) {
+            val daily = dailyGrantStatus(credential)
+            when (daily) {
                 is DailyStatus.Settled -> lines += "今日积分已在零点自动发放"
                 is DailyStatus.NotEligible -> lines += "该账号未开通每日积分（只有注册与登录奖励）"
                 is DailyStatus.Unknown -> Unit
             }
             if (lines.isEmpty()) {
                 // 两个奖励都领过、流水也查不到——不猜，把原始状态摆出来
-                lines += "今日已领取过登录奖励" + if (daily is DailyStatus.Settled) "" else "（每日积分状态未知）"
+                lines += "今日已领取过登录奖励" +
+                    if (daily is DailyStatus.Settled) "" else "（每日积分状态未知）"
             }
             ProviderActionResult.success(lines.joinToString("；"))
         } catch (e: Exception) {
@@ -472,14 +475,14 @@ class RaccoonProvider(
         val (status, text) = postJson(url, "{}", headers)
         if (status !in 200..299) {
             val msg = extractMessage(text).ifEmpty { "HTTP $status" }
-            return status to "$label领取失败：$msg"
+            return status to "${label}领取失败：$msg"
         }
         val data = runCatching { JsonParser.parseString(text).asJsonObject.objOrNull("data") }.getOrNull()
         val granted = data?.boolOrNull("granted") == true
         val points = data?.objOrNull("popup")?.firstLong("points") ?: 0L
         return when {
-            granted && points > 0 -> status to "$label奖励 +$points 积分"
-            granted -> status to "$label奖励已领取"
+            granted && points > 0 -> status to "${label}奖励 +$points 积分"
+            granted -> status to "${label}奖励已领取"
             else -> status to null // granted=false = 这笔已领过（幂等），不算新闻
         }
     }
