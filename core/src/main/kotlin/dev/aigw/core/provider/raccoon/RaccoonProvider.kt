@@ -511,7 +511,7 @@ class RaccoonProvider(
         var ever = false
         for (element in items) {
             val item = element.asObjectOrNull() ?: continue
-            if (item.str("biz_type") != "daily_grant") continue
+            if (item.stringOrNull("biz_type") != "daily_grant") continue
             ever = true
             // 流水按时间倒序，第一条命中今天就够
             val grantAt = item.firstString("grant_at", "created_at")
