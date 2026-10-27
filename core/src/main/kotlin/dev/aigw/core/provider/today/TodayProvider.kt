@@ -211,6 +211,28 @@ class TodayProvider(
         return TodayConstants.displayNameOf(option)
     }
 
+    /**
+     * 把客户端请求的模型名解析成上游 optionId。
+     *
+     * **发现列表优先于常量**：上游对 optionId 的拼写没有稳定规律（MiniMax 实证——
+     * 自动发现抓到的是 `model.minimax-m31-flash`，按规则猜的 `m3.1` 上游回 400），
+     * 所以只要自动发现里有归一化相等的选项，就用它的原样 id。
+     * 常量表只兜「没账号 / 尚未发现」的场景。
+     */
+    private fun resolveOptionId(requested: String, credential: TodayAccount?): String? {
+        val discovered = credential
+            ?.let { runCatching { discoverOptions(it) }.getOrDefault(emptyList()) }
+            .orEmpty()
+        if (discovered.isNotEmpty()) {
+            val bare = requested.trim().lowercase().substringAfter('/', "").ifEmpty { requested.trim().lowercase() }
+                .removePrefix("model.").replace('.', '-').replace('_', '-')
+            discovered.firstOrNull {
+                it.removePrefix("model.").replace('.', '-').replace('_', '-') == bare
+            }?.let { return it }
+        }
+        return TodayConstants.optionIdOf(requested)
+    }
+
     override fun hosts(): List<String> = listOf("todayai.cn")
 
     override fun importCredentials(raw: String): ProviderAccount? {
@@ -228,10 +250,11 @@ class TodayProvider(
     override fun openChat(account: ProviderAccount, openAiBody: String): ChatCall {
         val credential = TodayAccount.parse(account.secret)
             ?: return FailedChatCall(401, "凭证无法解析，重新粘贴 session token")
-        val option = TodayConstants.optionIdOf(requestedModelOf(openAiBody))
+        val requestedModel = requestedModelOf(openAiBody)
+        val option = resolveOptionId(requestedModel, credential)
             ?: return FailedChatCall(
                 400,
-                "Today 不支持的模型：${requestedModelOf(openAiBody)}；可用：${TodayConstants.MODEL_IDS.joinToString(", ")}",
+                "Today 不支持的模型：$requestedModel；可用：${TodayConstants.MODEL_IDS.joinToString(", ")}",
             )
         val prompt = buildPrompt(openAiBody)
         if (prompt.isEmpty()) return FailedChatCall(400, "请求里没有可发送的文本内容")
@@ -342,7 +365,11 @@ class TodayProvider(
         val token = obj.str("token")
         if (token.isEmpty()) throw UpstreamException(0, "登录态返回缺少 token 字段")
 
-        val exp = jwtExpiryMillis(token) ?: (now + 115_000)
+        // 有效期以响应为准（字段 expiresIn 秒；桌面实测 600，Android 线更短），
+        // JWT 的 exp claim 兜底，最后才用固定值——上游改 TTL 不用改代码
+        val exp = obj.get("expiresIn")?.takeIf { it.isJsonPrimitive }?.asLong
+            ?.takeIf { it > 0 }?.let { now + it * 1000 }
+            ?: (jwtExpiryMillis(token) ?: (now + 115_000))
         val userId = jwtSubject(token)
         jwts[key] = CachedJwt(token, exp, userId)
         return token
@@ -459,7 +486,21 @@ class TodayProvider(
         val key = credential.effectiveUid()
         if (selectedOption[key] == option) return
         val body = JsonObject().apply { addProperty("optionId", option) }.toString()
-        apiCall(credential, "PUT", "/v1/pricing/model-option", jwt, body, 30_000)
+        try {
+            apiCall(credential, "PUT", "/v1/pricing/model-option", jwt, body, 30_000)
+        } catch (e: UpstreamException) {
+            if (e.status == 400) {
+                // 400 多半是 optionId 与上游不符；把发现到的候选列出来帮排查
+                val discovered = runCatching { discoverOptions(credential) }.getOrDefault(emptyList())
+                if (discovered.isNotEmpty()) {
+                    throw UpstreamException(
+                        400,
+                        "切换模型失败（上游不认 $option）。上游现有选项：${discovered.joinToString(", ")}",
+                    )
+                }
+            }
+            throw e
+        }
         selectedOption[key] = option
     }
 

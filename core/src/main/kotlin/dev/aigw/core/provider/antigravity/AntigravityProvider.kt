@@ -667,6 +667,7 @@ class AntigravityProvider(
             expiresAt = obj.get("expiresAt")?.asLong ?: 0L,
             email = obj.get("email")?.asString.orEmpty(),
             projectId = obj.get("projectId")?.asString.orEmpty(),
+            tier = obj.get("tier")?.asString.orEmpty(),
         )
     }
 
@@ -677,6 +678,7 @@ class AntigravityProvider(
             addProperty("expiresAt", credential.expiresAt)
             addProperty("email", credential.email)
             addProperty("projectId", credential.projectId)
+            if (credential.tier.isNotEmpty()) addProperty("tier", credential.tier)
         }.toString()
         // 稳定 UID：已有账号严格沿用旧 UID，绝不因 Token 刷新而漂移；新账号优先 email，无 email 用稳定 refreshToken
         val uid = existingAccount?.uid?.takeIf { it.isNotEmpty() }
@@ -937,6 +939,11 @@ class AntigravityProvider(
         val expiresAt: Long,
         val email: String,
         val projectId: String,
+        /**
+         * Google 账号档位（agy2api 把它当凭证一等字段）：
+         * 决定可用模型面与配额水位；空 = 未上报/未识别。
+         */
+        val tier: String = "",
     )
 
     companion object {

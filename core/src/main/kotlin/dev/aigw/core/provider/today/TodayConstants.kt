@@ -5,7 +5,8 @@ package dev.aigw.core.provider.today
  *
  * 协议来自 today-proxy 系列项目的实测抓包（github.com/Main8986/today-proxy-android）：
  *
- *   session token ──GET /api/auth/token──> ES256 JWT（约 115s）──Bearer──> api.todayai.cn/v1/…
+ *   session token ──GET /api/auth/token──> ES256 JWT（有效期以响应 expiresIn 为准，
+ *   桌面实测 600s，Android 线更短）──Bearer──> api.todayai.cn/v1/…
  *
  * 与其它供应商不同，Today **没有 SSE 流式接口**：发一句话拿 threadId，再轮询
  * `/v1/conversations/messages` 直到 state=completed。所以 [TodayProvider] 的流式是
@@ -30,12 +31,13 @@ object TodayConstants {
      * [TodayProvider] 会从 `/v1/pricing/status` 的响应里**自动发现**真实存在的
      * `model.*` 选项，这里的常量只是「没账号 / 拉取失败」时的兜底。
      */
-    const val OPT_MINIMAX = "model.minimax-m3.1-flash"
+    // 实证 id（自动发现捕获）；此前猜的 model.minimax-m3.1-flash 上游 400
+    const val OPT_MINIMAX = "model.minimax-m31-flash"
 
     /** 暴露给客户端的短名。 */
     const val MODEL_DEEPSEEK = "deepseek-v4.1-flash"
     const val MODEL_GLM = "glm-5.3"
-    const val MODEL_MINIMAX = "minimax-m3.1-flash"
+    const val MODEL_MINIMAX = "minimax-m31-flash"
 
     /** 兜底模型表（无账号或上游拉取失败时用）。 */
     val MODEL_IDS = listOf(MODEL_DEEPSEEK, MODEL_MINIMAX, MODEL_GLM)

@@ -5,6 +5,22 @@ import dev.aigw.core.util.bool
 import dev.aigw.core.util.long
 import dev.aigw.core.util.objOrNull
 
+/**
+ * first-login（每日签到）的结构化结果；字段缺失记 -1，周期日期空串。
+ *
+ * 口径（rsfree/loomy2api 抓包）：每日赠送额度登录后自动刷新为 5000；
+ * 扣费顺序＝活动/兑换码积分 → 普通长期积分（permanentBalance）。
+ */
+data class LoomyCheckinResult(
+    val alreadyProcessed: Boolean,
+    val currentBalance: Long,
+    val permanentBalance: Long,
+    val dailyBalance: Long,
+    val dailyQuota: Long,
+    val dailyConsumed: Long,
+    val cycleDate: String,
+)
+
 /** 账号积分快照。字段缺失一律记 -1（未知），不要用 0 冒充「没有」。 */
 data class PointsSnapshot(
     /** 个人积分余额；-1 = 上游未返回该字段。 */
@@ -77,6 +93,25 @@ class LoomyPointsClient(
     }
 
     /** 用邀请码兑换积分（对应客户端「设置 → 邀请码 → 兑换积分」）。 */
+    /**
+     * 每日「签到」（官方客户端启动即调的 first-login，幂等）。
+     *
+     * 响应自带全部额度口径，**一次顶两次**：签到 + 余额刷新都可以用它。
+     * [LoomyCheckinResult.alreadyProcessed] = 本周期已领过（重复调用不重复给分）。
+     */
+    fun firstLogin(session: String): LoomyCheckinResult {
+        val data = post(LoomyConstants.PATH_POINTS_FIRST_LOGIN, session, "{}")
+        return LoomyCheckinResult(
+            alreadyProcessed = data.bool("alreadyProcessed", false),
+            currentBalance = data.long("currentBalance", -1L),
+            permanentBalance = data.long("permanentBalance", -1L),
+            dailyBalance = data.long("dailyBalance", -1L),
+            dailyQuota = data.long("dailyQuota", -1L),
+            dailyConsumed = data.long("dailyConsumed", -1L),
+            cycleDate = runCatching { data.get("dailyCycleDate")?.asString.orEmpty() }.getOrDefault(""),
+        )
+    }
+
     fun activate(session: String, inviteCode: String): Boolean {
         val body = JsonObject().apply { addProperty("inviteCode", inviteCode) }.toString()
         return post(LoomyConstants.PATH_POINTS_ACTIVATION, session, body).bool("activated", true)

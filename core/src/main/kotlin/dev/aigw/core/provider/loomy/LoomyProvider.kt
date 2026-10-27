@@ -2,6 +2,7 @@ package dev.aigw.core.provider.loomy
 
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
+import dev.aigw.core.provider.ACTION_CHECKIN
 import dev.aigw.core.provider.ACTION_TASKS
 import dev.aigw.core.provider.AggregatedChatCall
 import dev.aigw.core.provider.AuthKind
@@ -155,11 +156,20 @@ class LoomyProvider(
                 snapshot.dailyBalance >= 0 -> snapshot.dailyBalance
                 else -> 0L
             }
+            // records 只有三个余额字段；dailyQuota/dailyConsumed/dailyCycleDate 只有
+            // first-login 给（rsfree 实证：只读 records，「每日赠送额度/当日已用」恒为空）。
+            // first-login 幂等且官方客户端每次启动都调——每次刷额度顺手调一次，漏了它
+            // 当日 5000 赠送可能静默拿不到。
+            val checkin = runCatching { pointsClient.firstLogin(loomy.session) }.getOrNull()
+            val checkinDetail = checkin?.takeIf { it.dailyQuota > 0 }?.let {
+                val dailyLeft = if (it.dailyBalance >= 0) it.dailyBalance else it.dailyQuota - it.dailyConsumed
+                "，每日额度 $dailyLeft/${it.dailyQuota}" + if (it.cycleDate.isNotEmpty()) "（${it.cycleDate}）" else ""
+            }.orEmpty()
             CreditInfo(
                 balance = snapshot.balance + daily,
                 known = snapshot.known,
                 detail = when {
-                    snapshot.known -> "${snapshot.source}=${snapshot.balance}，当日剩余=${formatOrDash(if (daily > 0) daily else -1L)}"
+                    snapshot.known -> "${snapshot.source}=${snapshot.balance}，当日剩余=${formatOrDash(if (daily > 0) daily else -1L)}$checkinDetail"
                     // 两个账本都没拿到数：带响应片段，便于区分 session 失效与接口口径变化
                     else -> "未取到余额（响应片段：${snapshot.personalRaw.take(120)}）"
                 },
@@ -238,6 +248,32 @@ class LoomyProvider(
                     } else {
                         ProviderActionResult.success("$title：已完成")
                     }
+                }
+
+                /**
+                 * 每日签到 = 官方客户端启动即调的 points/first-login（幂等）。
+                 *
+                 * 每日 5000 赠送在「每日登录后自动刷新」，漏调不报错、只是当日赠送拿不到——
+                 * 之前没实现这个动作，用户在界面上找不到「签到」入口，赠送可能被静默漏领。
+                 * 响应自带全套额度口径，顺手把额度快照一并写回。
+                 */
+                ACTION_CHECKIN -> {
+                    val result = pointsClient.firstLogin(loomy.session)
+                    val message = when {
+                        result.alreadyProcessed -> buildString {
+                            append("今日已在登录时领取")
+                            if (result.dailyQuota > 0) {
+                                append("（当日剩余 ")
+                                append(if (result.dailyBalance >= 0) result.dailyBalance else result.dailyQuota - result.dailyConsumed)
+                                append("/${result.dailyQuota}）")
+                            }
+                        }
+                        else -> buildString {
+                            append("签到成功")
+                            if (result.dailyQuota > 0) append("，当日额度 ${result.dailyQuota}")
+                        }
+                    }
+                    ProviderActionResult.success(message)
                 }
 
                 // 同时认通用名 ACTION_TASKS 与私有名 ACTION_COMPLETE_ALL_TASKS：

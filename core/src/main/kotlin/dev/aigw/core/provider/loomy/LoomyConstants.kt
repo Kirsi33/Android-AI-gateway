@@ -39,6 +39,16 @@ object LoomyConstants {
     const val PATH_CHAT_COMPLETIONS = "/api/v1/chat/completions"
     const val PATH_POINTS_RECORDS = "/api/v1/points/records"
     const val PATH_POINTS_ACTIVATION = "/api/v1/points/activation"
+
+    /**
+     * 每日「签到」的真身：官方客户端**每次启动**都会调，幂等（本周期已领回 `alreadyProcessed`）。
+     * 响应 data 自带全套额度口径（currentBalance/permanentBalance/dailyBalance/dailyQuota/
+     * dailyConsumed/dailyCycleDate），dailyQuota/dailyConsumed 只有这个端点给。
+     *
+     * 每日 5000 赠送在「每日登录后自动刷新」——漏调不报错，只是当日赠送拿不到/看不到，
+     * 是静默型陷阱（rsfree/loomy2api 实证）。
+     */
+    const val PATH_POINTS_FIRST_LOGIN = "/api/v1/points/first-login"
     const val PATH_REDEMPTION_REDEEM = "/api/v1/points/redemption-codes/redeem"
 
     /** 团队积分余额（账号加入团队时，消耗走的是这里）。 */

@@ -651,25 +651,35 @@ class CodeBuddyProvider(
     private fun checkin(account: ProviderAccount): ProviderActionResult {
         val credential = parse(account) ?: return ProviderActionResult.failure("凭证无法解析")
         return try {
-            val (status, text) = postJson(
-                "${billingBase(credential)}$PATH_CHECKIN",
-                credential,
-                "{}",
-                billingHeaders(credential),
-            )
-            if (status !in 200..299) {
-                return ProviderActionResult.failure(
-                    failure("签到", endpoint(credential), "${billingBase(credential)}$PATH_CHECKIN", status, text),
+            // 双路径回退（misakano7545/workbuddy2api-panel 593★ 的 checkinMeterPaths 实证）：
+            // global 版有非版本化 `/billing/meter/daily-checkin`，V2 路径部分账号/时段 404。
+            // 两条都 404 才算失败；任一条 code=0 即成功。
+            val base = billingBase(credential)
+            var lastStatus = 0
+            var lastText = ""
+            for (path in CHECKIN_PATHS) {
+                val (status, text) = postJson(
+                    "$base$path",
+                    credential,
+                    "{}",
+                    billingHeaders(credential),
                 )
+                lastStatus = status
+                lastText = text
+                if (status !in 200..299) continue
+                val code = runCatching { JsonParser.parseString(text).asJsonObject.get("code")?.asLong }
+                    .getOrNull() ?: -1L
+                if (code == 0L) return ProviderActionResult.success("签到成功")
+                val message = extractMessage(text)
+                if (message.contains("已签到") || message.contains("already")) {
+                    return ProviderActionResult.success("今日已签到")
+                }
+                // 业务明确报错（如配额/风控）就不必再试另一条路径
+                if (code > 0) return ProviderActionResult.failure(message.ifEmpty { "签到失败（code=$code）" })
             }
-            val code = runCatching { JsonParser.parseString(text).asJsonObject.get("code")?.asLong }.getOrNull() ?: -1L
-            if (code == 0L) return ProviderActionResult.success("签到成功")
-            val message = extractMessage(text)
-            if (message.contains("已签到") || message.contains("already")) {
-                ProviderActionResult.success("今日已签到")
-            } else {
-                ProviderActionResult.failure(message.ifEmpty { "签到失败（code=$code）" })
-            }
+            ProviderActionResult.failure(
+                failure("签到", endpoint(credential), "$base${CHECKIN_PATHS.first()}", lastStatus, lastText),
+            )
         } catch (e: Exception) {
             ProviderActionResult.failure(e.message ?: "签到失败")
         }
@@ -1239,6 +1249,9 @@ class CodeBuddyProvider(
         internal fun modelsPath(region: String): String = endpointOf(region).modelsPath
         const val PATH_USER_RESOURCE = "/v2/billing/meter/get-user-resource"
         const val PATH_CHECKIN = "/v2/billing/meter/daily-checkin"
+
+        /** 签到双路径（global 首选非版本化路径，V2 回退）。 */
+        val CHECKIN_PATHS = listOf("/billing/meter/daily-checkin", PATH_CHECKIN)
 
         /** 成长中心：任务、Buddy 旅行、盲盒都在这个前缀下。 */
         const val PATH_GROWTH = "/v2/activity/growth"
