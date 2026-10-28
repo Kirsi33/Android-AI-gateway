@@ -129,6 +129,62 @@ class QwenChatClient(private val account: QwenAccount) {
     }
 
     /**
+     * 拉模型目录。**必须走 COSY 签名**（裸 Bearer 会被拒），
+     * 且响应字段是 `qwork` 数组（不是 OpenAI 风格的 data/models）。
+     */
+    fun fetchModels(): List<String>? {
+        val payloadB64 = Cosy.buildPayloadB64(session.info, QwenConstants.COSY_VERSION)
+        val date = (System.currentTimeMillis() / 1000).toString()
+        // 空 body 也要参与签名（pathSig 用去 /algo 前缀的路径）
+        val sig = Cosy.signRequest(payloadB64, session.cosyKey, date, "", MODELS_PATH_SIG)
+        val headers = buildMap {
+            put("cosy-data-policy", "agree")
+            put("cosy-clienttype", QwenConstants.CLIENT_TYPE)
+            put("cosy-date", date)
+            put("cosy-user", account.uid)
+            put("cosy-key", session.cosyKey)
+            put("cosy-version", QwenConstants.COSY_VERSION)
+            put("cosy-machineid", account.machineId)
+            put("cosy-scene", QwenConstants.SCENE)
+            put("cosy-business-product", QwenConstants.BUSINESS_PRODUCT)
+            put("cosy-business-type", QwenConstants.BUSINESS_TYPE)
+            put("login-version", QwenConstants.LOGIN_VERSION)
+            put("accept", "application/json")
+            put("accept-encoding", "identity")
+            put("authorization", Cosy.composeBearer(payloadB64, sig))
+            put("user-agent", QwenConstants.USER_AGENT)
+        }
+        val conn = try {
+            HttpSupport.open(
+                url = QwenConstants.GATEWAY + QwenConstants.MODELS_PATH,
+                method = "GET",
+                headers = headers,
+                body = null,
+                connectTimeoutMs = QwenConstants.CONNECT_TIMEOUT_MS,
+                readTimeoutMs = 20_000,
+            )
+        } catch (e: Exception) {
+            throw IllegalStateException("拉模型目录失败：${e.message}")
+        }
+        val status = conn.responseCode
+        val body = runCatching { HttpSupport.readBody(conn) }.getOrDefault("")
+        conn.disconnect()
+        if (status !in 200..299) {
+            throw IllegalStateException("拉模型目录失败：HTTP $status ${body.take(120)}")
+        }
+        val root = runCatching { JsonParser.parseString(body).asJsonObject }.getOrNull()
+            ?: throw IllegalStateException("模型目录响应不是 JSON：${body.take(120)}")
+        val list = root.arrayOrNull("qwork") ?: root.arrayOrNull("chat") ?: root.arrayOrNull("data")
+            ?: return null
+        val keys = list.mapNotNull { item ->
+            val obj = item.takeIf { it.isJsonObject }?.asJsonObject ?: return@mapNotNull null
+            if (obj.get("enable")?.let { it.isJsonPrimitive && !it.asBoolean } == true) return@mapNotNull null
+            obj.stringOrNull("key").orEmpty().takeIf { it.isNotEmpty() }
+        }
+        return keys.ifEmpty { null }
+    }
+
+    /**
      * 身份 JSON（字段与顺序对齐官方签名器）：
      * `uid / security_oauth_token / organization_id / organization_tags / data_policy_agreed`。
      */
@@ -231,6 +287,11 @@ class QwenChatClient(private val account: QwenAccount) {
             add("tools", tools)
             add("parameters", parameters)
         }.toString()
+    }
+
+    companion object {
+        /** 模型列表的 pathSig（同样去掉 /algo 前缀）。 */
+        private const val MODELS_PATH_SIG = "/api/v2/model/list"
     }
 
     /** 剥外层信封（`{"body":"<内层 chunk>"}`），空帧直接丢。 */

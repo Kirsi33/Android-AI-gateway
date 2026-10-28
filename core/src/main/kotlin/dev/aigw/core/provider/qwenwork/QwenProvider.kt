@@ -55,12 +55,16 @@ class QwenProvider(
         if (cached != null && now - cached.at < CATALOG_TTL_MS) {
             return ProviderModelCatalogView(cached.models, fromFallback = false, error = "")
         }
-        val live = runCatching { auth.fetchModels(parsed) }.getOrNull()
+        // 模型列表要 COSY 签名，走 ChatClient（它持有会话材料）
+        val fetched = runCatching { QwenChatClient(parsed).fetchModels() }
+        val error = fetched.exceptionOrNull()?.message.orEmpty()
+        val live = fetched.getOrNull()
         if (live.isNullOrEmpty()) {
             return ProviderModelCatalogView(
                 cached?.models ?: fallbackModels(),
                 fromFallback = true,
-                error = "拉取模型目录失败，显示兜底列表",
+                // 把上游原因带出去：只写「失败」用户没法排查
+                error = error.ifEmpty { "上游没有返回可用模型，显示兜底列表" },
             )
         }
         val models = live.map { key ->

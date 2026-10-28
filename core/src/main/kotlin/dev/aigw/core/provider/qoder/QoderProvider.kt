@@ -72,11 +72,14 @@ class QoderProvider(
         if (cached != null && now - cached.at < CATALOG_TTL_MS) {
             return ProviderModelCatalogView(cached.models, fromFallback = false, error = "")
         }
-        val live = runCatching { auth.fetchModels(parsed) }.getOrNull()
+        // 模型列表要 COSY 签名（裸 Bearer 会 401），交给 ChatClient
+        val fetched = runCatching { QoderChatClient(parsed) { acc -> sessionFor(acc) }.fetchModels() }
+        val live = fetched.getOrNull()
         if (live.isNullOrEmpty()) {
-            // 拉不到就用上次成功的（或兜底表），并把错误带出去让人看见
             val fallback = cached?.models ?: fallbackModels()
-            return ProviderModelCatalogView(fallback, fromFallback = true, error = "拉取模型目录失败，显示兜底列表")
+            val reason = fetched.exceptionOrNull()?.message.orEmpty()
+                .ifEmpty { "上游没有返回可用模型，显示兜底列表" }
+            return ProviderModelCatalogView(fallback, fromFallback = true, error = reason)
         }
         val models = live.map { key ->
             ProviderModel(

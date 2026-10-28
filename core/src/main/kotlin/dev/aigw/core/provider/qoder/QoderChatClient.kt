@@ -102,6 +102,57 @@ class QoderChatClient(
     }
 
     /**
+     * 拉模型目录。**必须走 COSY 签名**（裸 Bearer 会被 401 拒），
+     * 响应字段是 `chat` 数组，条目里 `key` 是模型名、`price_factor` 是倍率。
+     */
+    fun fetchModels(): List<String>? {
+        val sess = sessionProvider(account)
+        val payloadB64 = Cosy.buildPayloadB64(sess.info, QoderConstants.COSY_VERSION)
+        val date = (System.currentTimeMillis() / 1000).toString()
+        val sig = Cosy.signRequest(payloadB64, sess.cosyKey, date, "", MODELS_PATH_SIG)
+        val headers = mapOf(
+            "cosy-data-policy" to "agree",
+            "cosy-clienttype" to "5",
+            "cosy-date" to date,
+            "cosy-user" to account.uid,
+            "cosy-key" to sess.cosyKey,
+            "cosy-version" to QoderConstants.COSY_VERSION,
+            "cosy-machineid" to account.machineId,
+            "login-version" to "v2",
+            "accept" to "application/json",
+            "accept-encoding" to "identity",
+            "authorization" to Cosy.composeBearer(payloadB64, sig),
+            "user-agent" to "Go-http-client/2.0",
+        )
+        val conn = try {
+            HttpSupport.open(
+                url = account.region.gateway + QoderConstants.MODELS_PATH,
+                method = "GET",
+                headers = headers,
+                body = null,
+                connectTimeoutMs = QoderConstants.CONNECT_TIMEOUT_MS,
+                readTimeoutMs = 20_000,
+            )
+        } catch (e: Exception) {
+            throw IllegalStateException("拉模型目录失败：${e.message}")
+        }
+        val status = conn.responseCode
+        val body = runCatching { HttpSupport.readBody(conn) }.getOrDefault("")
+        conn.disconnect()
+        if (status !in 200..299) {
+            throw IllegalStateException("拉模型目录失败：HTTP $status ${body.take(120)}")
+        }
+        val root = runCatching { JsonParser.parseString(body).asJsonObject }.getOrNull()
+            ?: throw IllegalStateException("模型目录响应不是 JSON：${body.take(120)}")
+        val list = root.arrayOrNull("chat") ?: root.arrayOrNull("data") ?: return null
+        return list.mapNotNull { item ->
+            val obj = item.takeIf { it.isJsonObject }?.asJsonObject ?: return@mapNotNull null
+            if (obj.get("enable")?.let { it.isJsonPrimitive && !it.asBoolean } == true) return@mapNotNull null
+            obj.stringOrNull("key").orEmpty().takeIf { it.isNotEmpty() }
+        }.ifEmpty { null }
+    }
+
+    /**
      * 把上游的帧流转换成本项目其它供应商统一的「内层 OpenAI chunk」流。
      *
      * 上游每帧形如 `data: {"body":"{\"choices\":[...]}"}`；`body` 里才是真 chunk。
@@ -257,6 +308,9 @@ class QoderChatClient(
     companion object {
         /** pathSig 是去掉 `/algo` 前缀的 path（参考实现 constants.js:43）。 */
         private const val CHAT_PATH_SIG = "/api/v2/service/pro/sse/agent_chat_generation"
+
+        /** 模型列表的 pathSig。 */
+        private const val MODELS_PATH_SIG = "/api/v2/model/list"
 
         /**
          * 剥外层信封，返回内层 chunk 文本；空帧返回 null。
