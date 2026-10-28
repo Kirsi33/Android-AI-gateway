@@ -36,12 +36,16 @@ class TraeRegionTest {
     }
 
     @Test
-    fun `国际版 agent host 不是 OAuth host`() {
-        // 探测实测：api.trae.ai 上 /api/agent/v3/llm_utils_chat 与 /api/ide/v1/get_detail_param
-        // 都是 404（它是 OAuth/控制台 host），agent 集群在 -sg 域名上，错回 api.trae.ai
-        // 会让国际版账号的对话与模型目录全部 404。
-        assertEquals("https://trae-api-sg.mchost.guru", TraeRegion.INTL.agentHost)
-        assertEquals("https://api.trae.ai", TraeRegion.INTL.oauthHost)
+    fun `国际版 chat 与 auth 分属不同 host`() {
+        // wangqi233/trae2api 的 realms.js 实证：国际版是独立部署，
+        //   chat  coresg-normal.trae.ai（美区 coreva-normal.trae.ai）
+        //   auth  growsg-normal.trae.ai
+        // 混用会拿到 404 TLB 页（用户看到的「上游接口不存在」）。
+        assertEquals("https://coresg-normal.trae.ai", TraeRegion.INTL.agentHost)
+        assertEquals("https://growsg-normal.trae.ai", TraeRegion.INTL.oauthHost)
+        // client_id 也分区域：混用会 401「refresh token is invalid」
+        assertEquals("ono9krqynydwx5", TraeRegion.INTL.oauthClientId)
+        assertEquals("en1oxy7wnw8j9n", TraeRegion.CN.oauthClientId)
     }
 
     @Test

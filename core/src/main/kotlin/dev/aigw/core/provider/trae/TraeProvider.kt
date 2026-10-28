@@ -61,6 +61,12 @@ class TraeProvider(
     private fun chatClient(region: TraeRegion): TraeChatClient =
         chatClients.computeIfAbsent(region) { TraeChatClient(version(), region.agentHost) }
 
+    /** 国际版美区部署（coreva）。仅在新加坡 host 返回 404 时兜底使用。 */
+    private val usChatClients = ConcurrentHashMap<TraeRegion, TraeChatClient>()
+
+    private fun usChatClient(region: TraeRegion): TraeChatClient =
+        usChatClients.computeIfAbsent(region) { TraeChatClient(version(), US_AGENT_HOST) }
+
     // TraeAuthClient 读取账号自身的 apiHost，不按区域分实例
     private val authClientSingleton: TraeAuthClient get() = authClients.computeIfAbsent(TraeRegion.CN) { TraeAuthClient(version()) }
 
@@ -76,6 +82,7 @@ class TraeProvider(
     /** 客户端版本号变更后重建各客户端，并让模型目录缓存失效。 */
     fun reconfigure() {
         chatClients.clear()
+        usChatClients.clear()
         authClients.clear()
         checkinClients.clear()
         catalogs.clear()
@@ -173,10 +180,22 @@ class TraeProvider(
             hooks.onAccountUpdated(toProviderAccount(renewed))
         }
         val model = resolveModel(requestedModelOf(openAiBody))
+        val region = regionOfAccount(account)
         val call = try {
-            chatClient(regionOfAccount(account)).openStream(trae, openAiBody)
+            chatClient(region).openStream(trae, openAiBody)
         } catch (e: TraeHttpException) {
-            return FailedChatCall(e.status, e.body)
+            // 国际版有两个部署：新加坡 coresg / 美国 coreva。账号所在区决定哪个能答，
+            // 而我们只能从 token 里看 region，拿不到就默认 sg。这里用 404/连接失败做兜底切换：
+            // 换错区的表现正是 404（TLB 无路由），换对就正常。
+            if (region == TraeRegion.INTL && e.status == 404) {
+                try {
+                    usChatClient(region).openStream(trae, openAiBody)
+                } catch (retry: TraeHttpException) {
+                    return FailedChatCall(retry.status, retry.body)
+                }
+            } else {
+                return FailedChatCall(e.status, e.body)
+            }
         }
         if (call.status >= 400) return FailedChatCall(call.status, call.errorBody)
         // 上游 200 但没回 SSE（签名失效时常直接回 JSON 错误体）：errorBody 已带诊断信息
@@ -234,8 +253,21 @@ class TraeProvider(
         var account = ensureDeviceIds(TraeAccount.parse(raw))
         val region = TraeRegion.infer(account.domain, account.apiHost)
         if (account.refreshToken.isNotEmpty()) account = authClient(region).exchangeToken(account)
+        // getUserInfo 可能因区域/host 不通而拿不到 uid；accessToken 本身是 JWT，claim 里有 sub。
+        // 不补这条，导入会失败在「无法确定 uid」，明明 token 是好的。
+        if (account.uid.isEmpty() && account.accessToken.isNotEmpty()) {
+            account = account.withIdentity(
+                dev.aigw.core.util.jwtClaim(account.accessToken, "user_id", "userId", "uid", "sub"),
+                "",
+                "",
+            )
+        }
         account = authClient(region).getUserInfo(account)
-        if (account.uid.isEmpty()) throw IllegalStateException("无法确定账号 uid，请确认凭证完整")
+        if (account.uid.isEmpty()) {
+            throw IllegalStateException(
+                "无法确定账号 uid（GetUserInfo 未返回，token 里也没有 user_id）。请确认凭证完整。",
+            )
+        }
         return toProviderAccount(account)
     }
 
@@ -423,6 +455,13 @@ class TraeProvider(
             apiHost = region.oauthHost,
         )
         if (account.refreshToken.isNotEmpty()) account = authClient(region).exchangeToken(account)
+        if (account.uid.isEmpty() && account.accessToken.isNotEmpty()) {
+            account = account.withIdentity(
+                dev.aigw.core.util.jwtClaim(account.accessToken, "user_id", "userId", "uid", "sub"),
+                "",
+                "",
+            )
+        }
         account = authClient(region).getUserInfo(account)
         if (account.uid.isEmpty()) throw IllegalStateException("无法确定账号 uid，请确认登录已完成")
         return toProviderAccount(account)
@@ -471,6 +510,9 @@ class TraeProvider(
 
         /** 「签到」这个 provider 专属动作的名字，UI 组件与 provider 约定一致。 */
         const val ACTION_CHECKIN = dev.aigw.core.provider.ACTION_CHECKIN
+
+        /** 国际版美区 chat 部署（auth 仍走新加坡 growsg）。 */
+        private const val US_AGENT_HOST = "https://coreva-normal.trae.ai"
 
         private const val MAX_PENDING = 40
         private const val CHECKIN_BUSY_CODE = 9074L

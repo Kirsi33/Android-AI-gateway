@@ -65,7 +65,7 @@ object TraeLogin {
         val base = linkedMapOf(
             "auth_from" to "solo",
             "auth_type" to "local",
-            "client_id" to TraeConstants.CLIENT_ID,
+            "client_id" to region.oauthClientId,
             "login_channel" to "native_ide",
             "login_version" to "1",
             "plugin_version" to pluginVersion,
@@ -104,25 +104,34 @@ object TraeLogin {
         val query = trimmed.substringAfter('?', "").ifEmpty { trimmed }
         val params = parseQuery(query)
 
-        val refreshToken = params["refreshToken"].orEmpty()
-        val userInfo = parseJsonParam(params["userInfo"].orEmpty())
-        val userJwt = parseJsonParam(params["userJwt"].orEmpty())
+        // 国际版与国内版的回调参数名不完全一致（大小写、下划线、甚至只给 access_token），
+        // 这里一律按「归一化键名」取值：小写并去掉 _ 和 -。拿不到就把收到的参数名报出来，
+        // 免得用户只能看到一句「凭证为空的」而无从下手。
+        val refreshToken = paramValue(params, "refreshtoken")
+        val userInfo = parseJsonParam(paramValue(params, "userinfo"))
+        val userJwt = parseJsonParam(paramValue(params, "userjwt"))
 
         var effectiveRefresh = refreshToken
         if (effectiveRefresh.isEmpty()) {
-            effectiveRefresh = userJwt?.str("RefreshToken").orEmpty()
+            effectiveRefresh = jsonValue(userJwt, "refreshtoken")
         }
 
         var accessToken = ""
         var expiresAt = 0L
         if (effectiveRefresh.isEmpty()) {
-            accessToken = userJwt?.str("Token").orEmpty()
-            require(accessToken.isNotEmpty()) { "回调缺少 refreshToken 与 userJwt.Token" }
+            accessToken = jsonValue(userJwt, "token").ifEmpty { paramValue(params, "accesstoken") }
+            if (accessToken.isEmpty()) {
+                // 只报参数名，不报值：既能定位问题，也不会把凭证打进日志/截图
+                val keys = params.keys.joinToString(",").ifEmpty { "（无查询参数）" }
+                require(false) {
+                    "回调里没有 refreshToken / accessToken（收到参数：$keys）"
+                }
+            }
             val expireAt = userJwt?.long("TokenExpireAt") ?: 0L
             if (expireAt > 0L) expiresAt = normalizeExpireAt(expireAt)
         }
 
-        val uid = userInfo?.str("UserID").orEmpty()
+        val uid = jsonValue(userInfo, "userid")
         return CallbackAccount(
             refreshToken = effectiveRefresh,
             accessToken = accessToken,
@@ -191,10 +200,43 @@ object TraeLogin {
         value
     }
 
-    /** 回调里的 JSON 参数本身被 URL 编码过，可能要再解一层才可解析。 */
-    private fun parseJsonParam(raw: String) = runCatching {
-        com.google.gson.JsonParser.parseString(raw).asJsonObject
-    }.getOrNull() ?: runCatching {
-        com.google.gson.JsonParser.parseString(URLDecoder.decode(raw, "UTF-8")).asJsonObject
-    }.getOrNull()
+    /** 按归一化键名取查询参数（忽略大小写与下划线/连字符）。 */
+    private fun paramValue(params: Map<String, String>, normalizedKey: String): String {
+        params[normalizedKey]?.let { return it }
+        for ((k, v) in params) {
+            if (k.lowercase().replace("_", "").replace("-", "") == normalizedKey) return v
+        }
+        return ""
+    }
+
+    /** 按归一化键名取 JSON 字段，值必须是字符串或数字（对象/数组忽略）。 */
+    private fun jsonValue(obj: com.google.gson.JsonObject?, normalizedKey: String): String {
+        if (obj == null) return ""
+        for ((k, v) in obj.entrySet()) {
+            if (k.lowercase().replace("_", "").replace("-", "") != normalizedKey) continue
+            if (v.isJsonPrimitive) return v.asString
+        }
+        return ""
+    }
+
+    /**
+     * 回调里的 JSON 参数可能被 URL 编码、也可能被 base64 包一层（国际版实测出现过），
+     * 三种形态都试一遍，解析不出来就当没有。
+     */
+    private fun parseJsonParam(raw: String): com.google.gson.JsonObject? {
+        if (raw.isEmpty()) return null
+        val candidates = listOf(
+            raw,
+            runCatching { URLDecoder.decode(raw, "UTF-8") }.getOrDefault(raw),
+            runCatching { String(java.util.Base64.getUrlDecoder().decode(raw), Charsets.UTF_8) }
+                .getOrElse { runCatching { String(java.util.Base64.getDecoder().decode(raw), Charsets.UTF_8) }
+                    .getOrDefault("") },
+        )
+        for (text in candidates) {
+            if (text.isEmpty() || !text.trimStart().startsWith("{")) continue
+            val obj = runCatching { com.google.gson.JsonParser.parseString(text).asJsonObject }.getOrNull()
+            if (obj != null) return obj
+        }
+        return null
+    }
 }

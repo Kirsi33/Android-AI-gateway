@@ -20,25 +20,36 @@ enum class TraeRegion(
     val ugHost: String,
     val oauthHost: String,
     val consoleHost: String,
+    /** ExchangeToken 用的 OAuth client_id：**两个区域不同**，混用会 401。 */
+    val oauthClientId: String,
 ) {
     CN(
         id = "cn",
         label = "国内版",
         agentHost = "https://trae-api-cn.mchost.guru",
         ugHost = "https://api.trae.cn",
-        oauthHost = "https://api.trae.com.cn",
+        // ExchangeToken / GetUserInfo 在 auth host 上，**不是 chat host**（混用会得到 404）。
+        // api.trae.cn 实测 400（端点存在）；api.trae.com.cn 是控制台域名，历史上也能通，
+        // 但社区（wangqi233/trae2api realms.js）以 api.trae.cn 为准。
+        oauthHost = "https://api.trae.cn",
         consoleHost = "https://www.trae.cn",
+        oauthClientId = "en1oxy7wnw8j9n",
     ),
     INTL(
         id = "global",
         label = "国际版",
-        // 探测实测：api.trae.ai 上 /api/agent/v3/llm_utils_chat 与 /api/ide/v1/get_detail_param
-        // 都是 404（那是 OAuth/控制台 host），国际版的 agent 集群在 -sg 这个 mchost 域名上：
-        // 同一路径返回 401 + 与国内同构的 JSON，未知路径才 404。
-        agentHost = "https://trae-api-sg.mchost.guru",
+        // 国际版是独立部署（realm），chat 与 auth 分属两个 host（mingqi233/trae2api realms.js 实证）：
+        //   chat  coresg-normal.trae.ai（美区 coreva-normal.trae.ai）
+        //   auth  growsg-normal.trae.ai
+        // 混用会得到 404 TLB 页 —— 就是用户看到的「上游接口不存在」。
+        // trae-api-sg.mchost.guru 是旧猜测值，实测 chat 虽然 401（存在）但 auth 404。
+        agentHost = "https://coresg-normal.trae.ai",
         ugHost = "https://ug-normal.trae.ai",
-        oauthHost = "https://api.trae.ai",
+        oauthHost = "https://growsg-normal.trae.ai",
         consoleHost = "https://www.trae.ai",
+        // 国际版用**另一个 client_id**：拿国内的 en1oxy7wnw8j9n 去换 refresh token 会 401
+        // （「refresh token is invalid」），用户看到的就是「换不出 accessToken」。
+        oauthClientId = "ono9krqynydwx5",
     ),
     ;
 
@@ -64,7 +75,12 @@ enum class TraeRegion(
             val values = listOf(explicit, domain).map { it?.trim().orEmpty() }
             if (values.any { it.equals(CN.id, ignoreCase = true) }) return CN
             if (values.any { it.equals(INTL.id, ignoreCase = true) }) return INTL
-            return if (values.any { it.lowercase().contains("trae.ai") }) INTL else CN
+            return if (values.any {
+                    val v = it.lowercase()
+                    v.contains("trae.ai") || v.contains("growsg") || v.contains("coresg") ||
+                        v.contains("coreva") || v.contains("trae-api-sg")
+                }
+            ) INTL else CN
         }
     }
 }

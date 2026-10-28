@@ -22,8 +22,17 @@ class TraeAuthClient(private val version: TraeVersion) {
      */
     internal fun authHost(account: TraeAccount): String {
         val region = TraeRegion.infer(account.domain, account.apiHost)
-        val host = account.apiHost.ifEmpty { region.oauthHost }
-        return if (region == TraeRegion.INTL && host == TraeRegion.CN.oauthHost) region.oauthHost else host
+        val host = account.apiHost.trim()
+        // 自定义代理 host（非官方域名）优先，原样用
+        val official = host.isEmpty() ||
+            listOf("trae.cn", "trae.ai", "mchost.guru", "growsg", "coresg", "coreva")
+                .any { host.contains(it) }
+        if (!official) return host
+        // 官方 host 一律按区域重算：
+        //  - 国际版 auth 统一在 growsg-normal.trae.ai（美区也走它），
+        //    存量凭证里的 api.trae.ai / 国内 api 都是错的，留着就会 404/401；
+        //  - 国内版缺省 api.trae.cn。
+        return region.oauthHost
     }
 
     /** refreshToken → 新 accessToken，并轮换 refreshToken。 */
@@ -32,8 +41,10 @@ class TraeAuthClient(private val version: TraeVersion) {
             throw TraeHttpException(0, TraeErrorKind.SESSION_DEAD, "缺少 refreshToken，需要重新登录")
         }
         val host = authHost(account)
+        val region = TraeRegion.infer(account.domain, account.apiHost)
         val body = JsonObject().apply {
-            addProperty("ClientID", TraeConstants.CLIENT_ID)
+            // client_id 按区域取：国际版用国内的会 401「refresh token is invalid」
+            addProperty("ClientID", region.oauthClientId)
             addProperty("RefreshToken", account.refreshToken)
             addProperty("ClientSecret", "-")
             addProperty("UserID", "")
