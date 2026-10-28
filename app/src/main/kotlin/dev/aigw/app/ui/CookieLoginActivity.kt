@@ -169,6 +169,11 @@ class CookieLoginActivity : Activity() {
         settings.javaScriptEnabled = true
         settings.domStorageEnabled = true
         settings.databaseEnabled = true
+        // **必须允许三方 cookie**：部分登录态（如百度搭子的 bce-sessionid）由
+        // console.bce.baidu.com 等跨域请求种下。Android WebView 默认禁三方 cookie，
+        // 结果就是 passport 登录成功（BDUSS 在）、跨域会话没种上（bce- 系全缺），
+        // 上游判定登录失效——浏览器里能登成功、App 里登录「成功却抓不到」的差异就在这。
+        android.webkit.CookieManager.getInstance().setAcceptThirdPartyCookies(view, true)
         settings.setSupportMultipleWindows(false)
         settings.javaScriptCanOpenWindowsAutomatically = false
         // 缩放相关一律保持默认：项目里试过 useWideViewPort + loadWithOverviewMode，
