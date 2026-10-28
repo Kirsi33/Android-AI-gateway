@@ -100,9 +100,10 @@ object DumateUi : ProviderUi {
                 Text("在 App 内登录（取 Cookie）")
             }
             Text(
-                text = "登录完成后自动取回 cookie。页面上若弹出 console.bce.baidu.com 的" +
-                    "「网页无法打开」，那是站内嵌的控制台被浏览器拦了，不影响登录，关掉即可。" +
-                    "也可以从浏览器复制 cookie 粘贴导入。",
+                text = "打开页面后要在里面**登录百度账号**（点页面里的登录入口，跳到 " +
+                    "passport 登录完成并跳回来），只是看到页面打开不算登录。" +
+                    "登录完成点右上角「完成」。站内若弹出 console.bce.baidu.com 的" +
+                    "「网页无法打开」是嵌套控制台被拦，关掉即可。",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

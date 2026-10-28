@@ -127,12 +127,19 @@ class DumateClient {
             body = null,
             headers = webHeaders(account),
         )
-        if (status == 401) throw DumateExpiredException("登录态已失效，请重新获取 cookie")
+        if (status == 401) {
+            throw DumateExpiredException(
+                "登录态已失效，请重新获取 cookie。收到：" + cookieKeys(account.cookie),
+            )
+        }
         val root = runCatching { JsonParser.parseString(body).asJsonObject }.getOrNull()
             ?: throw IllegalStateException("换 token 响应无法解析：${body.take(120)}")
         if (!ok(root, status)) {
             val message = root.stringOrNull("message").orEmpty().ifEmpty { "HTTP $status" }
-            if (isExpired(root)) throw DumateExpiredException("登录态已失效：$message")
+            if (isExpired(root)) {
+                // 带 cookie 键名：能区分「没登录」与「登录了但缺关键键」
+                throw DumateExpiredException("登录态已失效：$message。收到：" + cookieKeys(account.cookie))
+            }
             throw IllegalStateException("换 token 失败：$message")
         }
         val result = root.objOrNull("result") ?: return account
@@ -275,6 +282,13 @@ class DumateClient {
         val code = root.get("code")?.takeIf { it.isJsonPrimitive }?.let { runCatching { it.asLong }.getOrNull() }
         return code != null && code in DumateConstants.EXPIRED_CODES
     }
+
+    /** cookie 里有哪些键（脱敏排查用：只报名字，不报值）。 */
+    private fun cookieKeys(cookie: String): String =
+        cookie.split(';').mapNotNull { part ->
+            val index = part.indexOf('=')
+            if (index <= 0) null else part.substring(0, index).trim()
+        }.filter { it.isNotEmpty() }.distinct().joinToString(",").ifEmpty { "（空）" }
 
     /** 结果体可能在 result / data / 顶层（上游三种都有）。 */
     private fun pick(root: JsonObject?): com.google.gson.JsonElement? {
