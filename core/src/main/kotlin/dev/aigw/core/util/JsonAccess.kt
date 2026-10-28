@@ -21,7 +21,16 @@ fun JsonObject.arrayOrNull(name: String): JsonArray? = get(name)?.takeIf { it.is
 
 fun JsonObject.stringOrNull(name: String): String? = get(name)?.takeIf { it.isJsonPrimitive }?.asString
 
-fun JsonObject.longOrNull(name: String): Long? = get(name)?.takeIf { it.isJsonPrimitive }?.asLong
+/**
+ * 取整数字段。
+ *
+ * **只在值确实是数字时返回**：上游/用户粘贴的 JSON 里 `expiresAt` 常写成
+ * ISO 字符串（`2026-11-27T16:30:01Z`），直接 `asLong` 会抛
+ * `NumberFormatException: For input string: "2026-11-27T16:30:01Z"`——
+ * 用户看到的是一句莫名其妙的英文，而不是「时间格式不支持」。
+ */
+fun JsonObject.longOrNull(name: String): Long? =
+    get(name)?.takeIf { it.isJsonPrimitive && it.asJsonPrimitive.isNumber }?.asLong
 
 fun JsonObject.intOrNull(name: String): Int? = get(name)?.takeIf { it.isJsonPrimitive }?.asInt
 

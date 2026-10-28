@@ -57,7 +57,7 @@ data class QoderAccount(
                 uid = root.stringOrNull("uid").orEmpty(),
                 accessToken = accessToken,
                 refreshToken = root.stringOrNull("refreshToken").orEmpty(),
-                expiresAt = root.longOrNull("expiresAt") ?: 0L,
+                expiresAt = expiresAtOf(root),
                 realm = root.stringOrNull("realm").orEmpty().ifEmpty { QoderRealm.CN.id },
                 nickname = root.stringOrNull("nickname").orEmpty(),
                 userType = root.stringOrNull("userType").orEmpty(),
@@ -65,6 +65,21 @@ data class QoderAccount(
                 machineId = root.stringOrNull("machineId").orEmpty().ifEmpty { newMachineId() },
             )
         }
+
+        /** 到期时间：数字（秒/毫秒）、ISO 字符串、或 `tokenExpiredAt` / `tokenExpiredISO` 都认。 */
+        private fun expiresAtOf(root: JsonObject): Long {
+            root.longOrNull("expiresAt")?.let { return normalize(it) }
+            root.longOrNull("tokenExpiredAt")?.let { return normalize(it) }
+            val iso = root.stringOrNull("expiresAt").orEmpty()
+                .ifEmpty { root.stringOrNull("tokenExpiredISO").orEmpty() }
+                .ifEmpty { root.stringOrNull("expires_at").orEmpty() }
+            if (iso.isNotEmpty()) {
+                runCatching { java.time.Instant.parse(iso).epochSecond }.getOrNull()?.let { return it }
+            }
+            return 0L
+        }
+
+        private fun normalize(raw: Long): Long = if (raw > 1e12) raw / 1000 else raw
 
         /** 32 字节 hex 的设备指纹（COSY 头 `cosy-machineid`）。 */
         fun newMachineId(): String {

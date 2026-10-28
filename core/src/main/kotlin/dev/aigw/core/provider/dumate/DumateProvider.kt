@@ -189,10 +189,15 @@ class DumateProvider(
         if (text.isEmpty()) return null
         var account = runCatching {
             if (text.startsWith("{")) DumateAccount.parse(text) else DumateAccount("", "", text)
-        }.getOrElse { return null }
-        if (account.cookie.isEmpty()) return null
+        }.getOrElse {
+            // 返回 null 会被上层当成「该供应商不支持粘贴导入」，用户就永远看不到真正原因
+            throw IllegalArgumentException("凭证解析失败：${it.message}。需要 cookie 串或 {\"cookie\":\"...\"}")
+        }
+        if (account.cookie.isEmpty()) throw IllegalArgumentException("cookie 为空")
         account = runCatching { client.userInfo(account) }.getOrDefault(account)
-        account = runCatching { client.fetchToken(account) }.getOrElse { return null }
+        account = runCatching { client.fetchToken(account) }.getOrElse {
+            throw IllegalArgumentException("Cookie 换取对话 token 失败：${it.message}")
+        }
         if (account.uid.isEmpty()) {
             account = account.copy(uid = "dumate-" + account.cookie.hashCode().toUInt())
         }
