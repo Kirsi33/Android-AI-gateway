@@ -68,12 +68,18 @@ data class TraeAccount(
             val account = if (nested) root.objOrNull("account") ?: JsonObject() else root
 
             val accessToken = auth.str("accessToken")
-            if (accessToken.isEmpty()) throw IllegalArgumentException("凭证缺少 accessToken")
+            val refreshToken = auth.str("refreshToken")
+            // 只要求「两把里有一把」：国际版登录回调有时只给 refreshToken（accessToken 靠
+            // ExchangeToken 换），旧逻辑在这里直接抛「凭证缺少 accessToken」，
+            // 用户看到的就是「登录成功但没有 accessToken」，账号根本进不了池子。
+            if (accessToken.isEmpty() && refreshToken.isEmpty()) {
+                throw IllegalArgumentException("凭证既没有 accessToken 也没有 refreshToken，请重新登录")
+            }
 
             return TraeAccount(
                 uid = account.str("uid"),
                 accessToken = accessToken,
-                refreshToken = auth.str("refreshToken"),
+                refreshToken = refreshToken,
                 expiresAt = auth.long("expiresAt"),
                 nickname = account.str("nickname"),
                 enterpriseId = account.str("enterpriseId"),

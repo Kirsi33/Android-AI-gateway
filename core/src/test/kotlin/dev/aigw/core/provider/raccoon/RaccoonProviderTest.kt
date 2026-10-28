@@ -29,6 +29,7 @@ class RaccoonProviderTest {
         const val MOBILE_GRANT_PATH = "/api/web/mobile/v1/login/points/grant"
         const val BILLS_PATH = "/api/web/points/v1/bills"
         const val BALANCE_PATH = "/api/web/points/v1/balance"
+        const val SETTING_INFO_PATH = "/api/web/office/v3/setting_info"
     }
 
     private fun account() = ProviderAccount(
@@ -316,15 +317,21 @@ class RaccoonProviderTest {
             mapOf(
                 GRANT_PATH to """{"code":0,"data":{"granted":false}}""",
                 MOBILE_GRANT_PATH to """{"code":0,"data":{"granted":false}}""",
-                // 流水为空 = 既没有今天的 daily_grant，也没有历史 —— 如实报「未开通」
+                // 流水为空 = 既没有今天的 daily_grant，也没有历史 —— 如实报「没有每日额度」
                 BILLS_PATH to """{"code":0,"data":{"items":[]}}""",
+                // 每日发放触发器（setting_info）：返回空 data = 本天已结算过、没有新弹窗
+                SETTING_INFO_PATH to """{"code":0,"data":{}}""",
             ),
         ) { base, _ ->
             val result = RaccoonProvider(host = base).performAction(account(), ACTION_CHECKIN, JsonObject())
             assertTrue(result.ok, result.message)
             assertTrue(
-                result.message.contains("未开通每日积分"),
+                result.message.contains("流水中从未出现每日积分"),
                 "上游明确没发积分，不能报成签到成功：${result.message}",
+            )
+            assertTrue(
+                result.message.contains("已触发每日发放"),
+                "签到动作必须先调 setting_info 触发发放：${result.message}",
             )
         }
     }

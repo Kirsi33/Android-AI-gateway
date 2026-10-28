@@ -159,7 +159,19 @@ class TraeProvider(
     // ------------------------------------------------------------------ 对话
 
     override fun openChat(account: ProviderAccount, openAiBody: String): ChatCall {
-        val trae = parseOrNull(account) ?: return FailedChatCall(401, "账号凭证无法解析")
+        var trae = parseOrNull(account) ?: return FailedChatCall(401, "账号凭证无法解析")
+        // 只有 refreshToken 的账号（国际版回调常见）：先用 ExchangeToken 换出 accessToken，
+        // 并通知账号池持久化——refreshToken 每次交换都会轮换，不回写下次就失效。
+        // 之前这里直接拿空 accessToken 去请求，用户看到的就是「上游接口不存在/401」。
+        if (trae.accessToken.isEmpty() && trae.refreshToken.isNotEmpty()) {
+            val renewed = try {
+                authClient(regionOfAccount(account)).exchangeToken(trae)
+            } catch (e: TraeHttpException) {
+                return FailedChatCall(e.status, "国际版凭证换取 token 失败：${e.body.ifEmpty { e.message.orEmpty() }}")
+            }
+            trae = renewed
+            hooks.onAccountUpdated(toProviderAccount(renewed))
+        }
         val model = resolveModel(requestedModelOf(openAiBody))
         val call = try {
             chatClient(regionOfAccount(account)).openStream(trae, openAiBody)
