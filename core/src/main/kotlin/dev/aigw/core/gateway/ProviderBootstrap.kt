@@ -3,6 +3,7 @@ package dev.aigw.core.gateway
 import dev.aigw.core.provider.ProviderRegistry
 import dev.aigw.core.provider.antigravity.AntigravityProvider
 import dev.aigw.core.provider.codebuddy.CodeBuddyProvider
+import dev.aigw.core.provider.dumate.DumateProvider
 import dev.aigw.core.provider.loomy.LoomyProvider
 import dev.aigw.core.provider.longcat.LongCatProvider
 import dev.aigw.core.provider.qoder.QoderProvider
@@ -71,6 +72,12 @@ internal fun registerBuiltinProviders(engine: GatewayEngine) {
 
     registry.register(
         LongCatProvider(
+            nowMillis = { engine.now() },
+        ),
+    )
+
+    registry.register(
+        DumateProvider(
             nowMillis = { engine.now() },
         ),
     )
