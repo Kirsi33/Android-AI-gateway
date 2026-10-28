@@ -265,6 +265,18 @@ class TraeProvider(
                 "无法确定账号 uid（GetUserInfo 未返回，token 里也没有 user_id）。请确认凭证完整。",
             )
         }
+        // 导入前先探一次模型目录：网页会话 token（浏览器 UserScript 抓的那种）能过
+        // GetUserInfo，但没有 IDE 权限——打 get_detail_param 一律 401 code 1001。
+        // 这种号塞进池子只会在模型页顶一个红错误，不如当场说清楚。
+        val probeError = runCatching { chatClient(region, account.userRegion).fetchModels(account) }
+            .exceptionOrNull()
+        if (probeError is TraeHttpException && probeError.status == 401) {
+            throw IllegalStateException(
+                "这份凭证没有模型调用权限（上游 401 code ${probeError.upstreamCode}）。" +
+                    "浏览器插件抓的是网页会话 token，只能读账号信息，不能对话。" +
+                    "请改用桌面客户端登录（需要 refreshToken），或在「粘贴凭证」里导入带 refreshToken 的 JSON。",
+            )
+        }
         return toProviderAccount(account)
     }
 
