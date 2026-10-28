@@ -91,7 +91,7 @@ fun ProviderDetailScreen(
                 }
                 cookieLogin.launch(intent)
             },
-            onDesktopCookieLogin = { id, url, hosts, title ->
+            onDesktopCookieLogin = { id, url, hosts, title, cookieName ->
                 pendingCookieProvider = id
                 val intent = Intent(context, CookieLoginActivity::class.java).apply {
                     putExtra(CookieLoginActivity.EXTRA_START_URL, url)
@@ -99,6 +99,9 @@ fun ProviderDetailScreen(
                     putExtra(CookieLoginActivity.EXTRA_TITLE, title)
                     // 桌面 UA：Trae 国际版按 UA 拦「地区不开放」，桌面模式同网能进
                     putExtra(CookieLoginActivity.EXTRA_DESKTOP_UA, true)
+                    if (cookieName.isNotEmpty()) {
+                        putExtra(CookieLoginActivity.EXTRA_SUCCESS_COOKIE, cookieName)
+                    }
                 }
                 cookieLogin.launch(intent)
             },
