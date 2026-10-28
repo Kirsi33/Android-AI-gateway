@@ -252,14 +252,22 @@ class CookieLoginActivity : Activity() {
     private fun collectAndFinish(hosts: Array<String>, fromAuto: Boolean) {
         val manager = CookieManager.getInstance()
         manager.flush()
-        val cookies = StringBuilder()
+        // 逐 host 收集后**按键去重**：子域与父域各有一份同名 cookie（如 dumate.baidu.com
+        // 与 .baidu.com 的 sessionid），拼在一起服务端拿到两份同名键、行为不确定。
+        // 保留先出现的（hosts 列表里具体域在前、父域在后）。
+        val seenKeys = LinkedHashSet<String>()
+        val pairs = ArrayList<String>()
         for (host in hosts) {
             val cookie = manager.getCookie(host).orEmpty()
-            if (cookie.isNotBlank()) {
-                if (cookies.isNotEmpty()) cookies.append("; ")
-                cookies.append(cookie)
+            if (cookie.isBlank()) continue
+            for (pair in cookie.split(';')) {
+                val trimmed = pair.trim()
+                if (trimmed.isEmpty()) continue
+                val key = trimmed.substringBefore('=').trim().lowercase()
+                if (seenKeys.add(key)) pairs.add(trimmed)
             }
         }
+        val cookies = StringBuilder(pairs.joinToString("; "))
         val view = web
         if (view == null) {
             deliver(cookies.toString(), fromAuto)

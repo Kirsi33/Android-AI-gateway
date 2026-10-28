@@ -164,15 +164,29 @@ class QoderAuthClient {
         if (status !in 200..299) {
             throw IllegalStateException("查询额度失败：HTTP $status ${body.take(120)}")
         }
+        // 结构（qoder2api-hub fetch_credits 实测）：
+        //   {"userQuota":{remaining,used,total}, "addOnQuota":{...}, "isQuotaExceeded":bool}
+        // **剩余 = 两桶 remaining 之和**——顶层没有 total/remaining 字段，
+        // 只在顶层找会全部 miss，额度就永远「未知」。
         val root = runCatching { JsonParser.parseString(body).asJsonObject }.getOrNull()
             ?: return QoderQuota(-1, -1, -1, "", body.take(200))
-        val data = root.objOrNull("data") ?: root.objOrNull("result") ?: root
-        val total = firstLong(data, "total", "limit", "quota", "total_amount", "totalAmount")
-        val used = firstLong(data, "used", "usage", "consumed", "used_amount", "usedAmount")
-        val remaining = firstLong(data, "remaining", "remain", "left", "balance")
-            .let { if (it >= 0) it else if (total >= 0 && used >= 0) total - used else -1L }
-        val plan = data.objOrNull("plan")?.stringOrNull("name").orEmpty()
-            .ifEmpty { data.stringOrNull("plan_name").orEmpty() }
+        val userQuota = root.objOrNull("userQuota")
+        val addOnQuota = root.objOrNull("addOnQuota")
+        if (userQuota == null && addOnQuota == null) {
+            // 两个桶都没有：可能 403 被 WAF 拦（参考实现会用桌面头重试），或字段又变了
+            val code = root.stringOrNull("errorCode").orEmpty()
+            val message = root.stringOrNull("errorMessage").orEmpty()
+            return QoderQuota(-1, -1, -1, "", "userQuota/addOnQuota 均缺失 ${code.ifEmpty { root.toString().take(100) }} $message")
+        }
+        fun num(obj: JsonObject?, key: String): Long =
+            obj?.get(key)?.takeIf { it.isJsonPrimitive }?.let { runCatching { it.asLong }.getOrDefault(-1L) } ?: -1L
+        val remaining = num(userQuota, "remaining").let { if (it >= 0) it else 0L } +
+            num(addOnQuota, "remaining").let { if (it >= 0) it else 0L }
+        val used = num(userQuota, "used").let { if (it >= 0) it else 0L } +
+            num(addOnQuota, "used").let { if (it >= 0) it else 0L }
+        val total = num(userQuota, "total").let { if (it >= 0) it else 0L } +
+            num(addOnQuota, "total").let { if (it >= 0) it else 0L }
+        val plan = root.objOrNull("plan")?.stringOrNull("name").orEmpty()
         return QoderQuota(total, used, remaining, plan, root.toString())
     }
 
@@ -201,7 +215,13 @@ class QoderAuthClient {
         }
     }
 
-    /** 领今日签到积分；返回 (是否成功, 展示文案)。 */
+    /**
+     * 领今日签到积分；返回 (是否成功, 展示文案)。
+     *
+     * 上游把「重复领取」以 **HTTP 409 + ALREADY_CLAIMED** 表达（qoder2api-hub
+     * `qoder_accounts.py` 归一化过的语义），不是错误。成功响应里 `rewardCredits`
+     * 是本次发放的积分数。
+     */
     fun claimCheckin(account: QoderAccount): Pair<Boolean, String> {
         val (status, body) = request(
             url = account.region.openapi + QoderConstants.PATH_CHECKIN_CLAIM,
@@ -214,17 +234,20 @@ class QoderAuthClient {
         )
         if (status == 404 || status == 405) return false to "该区没有签到接口"
         val root = runCatching { JsonParser.parseString(body).asJsonObject }.getOrNull()
-        val message = root?.stringOrNull("message").orEmpty()
-            .ifEmpty { root?.stringOrNull("msg").orEmpty() }
-            .ifEmpty { "HTTP $status" }
-        if (status !in 200..299) return false to "签到失败：$message"
-        val data = root?.objOrNull("data") ?: root
-        val credits = data?.let { firstLong(it, "credits", "credit", "points", "amount") } ?: -1L
-        val already = message.contains("已签") || message.contains("already")
+        val already = status == 409 ||
+            body.contains("ALREADY_CLAIMED") ||
+            root?.stringOrNull("result").orEmpty() == "ALREADY_CLAIMED"
+        if (already) return true to "今日已签到"
+        if (status !in 200..299) {
+            val message = root?.stringOrNull("message").orEmpty()
+                .ifEmpty { root?.stringOrNull("msg").orEmpty() }
+                .ifEmpty { body.take(120) }
+            return false to "签到失败：HTTP $status $message"
+        }
+        val reward = root?.get("rewardCredits")?.takeIf { it.isJsonPrimitive }?.asLong ?: -1L
         return when {
-            credits > 0 -> true to "签到成功，+$credits credits"
-            already -> true to "今日已签到"
-            else -> true to "签到请求已提交（$message）"
+            reward > 0 -> true to "签到成功，+$reward credits"
+            else -> true to "签到请求已提交"
         }
     }
 

@@ -49,7 +49,7 @@ class QwenProvider(
 
     override fun listModels(account: ProviderAccount?): ProviderModelCatalogView {
         val parsed = account?.let { runCatching { QwenAccount.parse(it.secret) }.getOrNull() }
-            ?: return ProviderModelCatalogView(fallbackModels(), fromFallback = true, error = "未选择账号")
+            ?: return ProviderModelCatalogView(fallbackModels(), fromFallback = true, error = "未登录，先登录后可显示真实模型目录")
         val cached = cachedCatalog
         val now = nowMillis()
         if (cached != null && now - cached.at < CATALOG_TTL_MS) {
