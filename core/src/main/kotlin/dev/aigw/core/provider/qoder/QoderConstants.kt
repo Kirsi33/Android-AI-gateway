@@ -82,8 +82,21 @@ enum class QoderRealm(
 
 /** Qoder 协议常量。改这里之前先看 research/qoder-spec.md。 */
 object QoderConstants {
-    /** COSY 签名版本（与 UA 里的 1.1.75 对齐）。 */
-    const val COSY_VERSION = "1.1.75"
+    /**
+     * COSY 签名版本：**Qoder 是 1.0.10，千问办公是 1.1.52**，两者不同。
+     * 取 dumate2api `src/qoder/constants.js:18`（实测值），
+     * 不要用 Python 版 qoder2api-hub 的 1.1.75——那是另一条产品线的版本号。
+     */
+    const val COSY_VERSION = "1.0.10"
+
+    /** Qoder 的客户端身份三元组（`src/qoder/cosy.js:56-76` 的固定头）。 */
+    const val CLIENT_TYPE = "5"
+    const val SCENE = "assistant"
+    const val BUSINESS_PRODUCT = "cli"
+    const val BUSINESS_TYPE = "agent"
+    const val LOGIN_VERSION = "v2"
+    const val MACHINE_TYPE = "5"
+    const val UA = "Go-http-client/2.0"
 
     // ---- 业务 REST（纯 Bearer，不走 COSY）----
     const val PATH_USER_INFO = "/api/v1/userinfo"

@@ -49,23 +49,28 @@ class QoderChatClient(
         val sig = Cosy.signRequest(payloadB64, session.cosyKey, date, body, CHAT_PATH_SIG)
         val bearer = Cosy.composeBearer(payloadB64, sig)
 
+        // 头清单逐条对齐 dumate2api `src/qoder/cosy.js:55-77`：
+        // scene/business/product 这三个缺了服务端会按别的产品线解读。
         val headers = mapOf(
             "cosy-data-policy" to "agree",
             "content-type" to "application/json",
-            "cosy-machinetype" to "5",
-            "cosy-clienttype" to "5",
+            "cosy-machinetype" to QoderConstants.MACHINE_TYPE,
+            "cosy-clienttype" to QoderConstants.CLIENT_TYPE,
             "cosy-date" to date,
             "cosy-user" to account.uid,
             "cosy-key" to session.cosyKey,
             "cosy-version" to QoderConstants.COSY_VERSION,
             "cosy-machineid" to account.machineId,
-            "login-version" to "v2",
+            "cosy-machinetoken" to "",
+            "login-version" to QoderConstants.LOGIN_VERSION,
+            "cosy-scene" to QoderConstants.SCENE,
+            "cosy-business-product" to QoderConstants.BUSINESS_PRODUCT,
+            "cosy-business-type" to QoderConstants.BUSINESS_TYPE,
             "cache-control" to "no-cache",
             "accept" to "text/event-stream",
             "accept-encoding" to "identity",
             "authorization" to bearer,
-            // 与参考实现一致：签名服务端按 Go 客户端校验，UA 必须匹配
-            "user-agent" to "Go-http-client/2.0",
+            "user-agent" to QoderConstants.UA,
         )
 
         val conn = try {
@@ -112,17 +117,22 @@ class QoderChatClient(
         val sig = Cosy.signRequest(payloadB64, sess.cosyKey, date, "", MODELS_PATH_SIG)
         val headers = mapOf(
             "cosy-data-policy" to "agree",
-            "cosy-clienttype" to "5",
+            "cosy-machinetype" to QoderConstants.MACHINE_TYPE,
+            "cosy-clienttype" to QoderConstants.CLIENT_TYPE,
             "cosy-date" to date,
             "cosy-user" to account.uid,
             "cosy-key" to sess.cosyKey,
             "cosy-version" to QoderConstants.COSY_VERSION,
             "cosy-machineid" to account.machineId,
-            "login-version" to "v2",
+            "cosy-machinetoken" to "",
+            "login-version" to QoderConstants.LOGIN_VERSION,
+            "cosy-scene" to QoderConstants.SCENE,
+            "cosy-business-product" to QoderConstants.BUSINESS_PRODUCT,
+            "cosy-business-type" to QoderConstants.BUSINESS_TYPE,
             "accept" to "application/json",
             "accept-encoding" to "identity",
             "authorization" to Cosy.composeBearer(payloadB64, sig),
-            "user-agent" to "Go-http-client/2.0",
+            "user-agent" to QoderConstants.UA,
         )
         val conn = try {
             HttpSupport.open(
