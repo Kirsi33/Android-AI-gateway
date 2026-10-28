@@ -101,36 +101,33 @@ object TraeUi : ProviderUi {
                         },
                     )
                 }
-                SectionLabel(if (global) "登录 · 国际版 trae.ai" else "登录 · 国内版 trae.cn")
-                Button(
-                    onClick = { actions.onWebLogin(id, region) },
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Text(if (global) "在浏览器中打开 Trae 国际版登录页" else "在浏览器中打开 Trae 登录页")
-                }
                 if (global) {
-                    // 国际版对手机 UA 常回「该地区不开放」，桌面 UA 同网却能进。
-                    // 这条走 App 内 WebView（桌面 UA），登录完直接读 Cookie，不依赖系统浏览器。
-                    OutlinedButton(
-                        onClick = {
-                            actions.onDesktopCookieLogin(
-                                id,
-                                "https://www.trae.ai/",
-                                listOf("trae.ai", "www.trae.ai", "api.trae.ai", "ug-normal.trae.ai"),
-                                "登录 Trae 国际版",
-                            )
-                        },
-                        modifier = Modifier.fillMaxWidth(),
-                    ) { Text("用桌面模式登录国际版（地区受限时用）") }
+                    // 国际版不给网页登录入口。实测（2026-10-28）：网页登录拿到的只有
+                    // passport 会话 cookie / 会话 token，CheckLogin 认它、GetUserToken 和
+                    // /api/ide 全部 401 code 1001——只能读账号，不能对话。
+                    // 社区项目（wangqi233/trae2api、autumnsentiment）也都不走这条路，
+                    // 一律读桌面客户端凭证或粘贴 Cloud-IDE-JWT。留个进不去的按钮只会浪费用户时间。
+                    SectionLabel("登录 · 国际版 trae.ai")
                     Text(
-                        text = "若提示「对此国家地区不开放」，改用上面这条：它在 App 内用电脑版页面登录，" +
-                            "登录完成后自动取回凭证。",
-                        style = MaterialTheme.typography.labelSmall,
+                        text = "国际版网页登录拿到的凭证没有模型调用权限，所以不提供网页登录。" +
+                            "请按下面任一方式取凭证后粘贴导入。",
+                        style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                    GlobalCredentialGuide()
+                } else {
+                    SectionLabel("登录 · 国内版 trae.cn")
+                    Button(
+                        onClick = { actions.onWebLogin(id, region) },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("在浏览器中打开 Trae 登录页") }
                 }
                 OutlineActionButton(
-                    text = if (expanded) "收起粘贴导入" else "粘贴凭证 JSON 导入",
+                    text = when {
+                        expanded -> "收起粘贴导入"
+                        global -> "粘贴 IDE JWT / 凭证 JSON"
+                        else -> "粘贴凭证 JSON 导入"
+                    },
                 ) { expanded = !expanded }
                 if (expanded) {
                     OutlinedTextField(
@@ -139,7 +136,9 @@ object TraeUi : ProviderUi {
                         modifier = Modifier.fillMaxWidth(),
                         minLines = 3,
                         maxLines = 8,
-                        label = { Text("回调链接 / 凭证 JSON") },
+                        label = {
+                            Text(if (global) "Cloud-IDE-JWT 或凭证 JSON" else "回调链接 / 凭证 JSON")
+                        },
                     )
                     Button(
                         onClick = {
@@ -159,6 +158,42 @@ object TraeUi : ProviderUi {
         }
     }
 
+    /**
+     * 国际版凭证获取教程。
+     *
+     * 只讲两条实测能走通的路：网页会话 cookie（sessionid/sid_tt）在 IDE 接口上
+     * 一律 401 code 1001，所以不再提供网页登录入口。
+     */
+    @Composable
+    private fun GlobalCredentialGuide() {
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text(
+                text = "① 浏览器取 IDE JWT（最快）",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+            Text(
+                text = "电脑浏览器打开 www.trae.ai 登录 → F12 → Network（钩 Fetch/XHR）→ " +
+                    "在网页里发起一次 AI 对话 → 找到请求头 " +
+                    "Authorization: Cloud-IDE-JWT eyJ… → 复制整串，粘贴到下面导入。",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+                text = "② 桌面客户端凭证（最稳，能长期用）",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+            Text(
+                text = "电脑装 Trae 国际版并登录，取 globalStorage/storage.json 里的凭证" +
+                    "（含 refreshToken）粘贴导入。带 refreshToken 可自动续期；" +
+                    "网页 token 约 17 小时过期，过期要重新取。",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+
     /** 按当前滑块区域过滤账号：国内版只列 trae.cn 账号，国际版只列 trae.ai 账号。 */
     @Composable
     private fun AccountRegionSection(global: Boolean, accounts: List<AccountStatus>, actions: ProviderUiActions) {
@@ -169,13 +204,22 @@ object TraeUi : ProviderUi {
                 SectionCard(enterIndex = 1) {
                     SectionLabel("账号")
                     Text(
-                        text = if (global) "还没有国际版账号，先登录" else "还没有国内版账号，先登录",
+                        text = if (global) "还没有国际版账号" else "还没有国内版账号，先登录",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     // 空态必须给出下一步：原来只有一行灰字，用户得自己去别的卡片里找登录按钮
-                    OutlineActionButton(if (global) "去登录国际版" else "去登录国内版") {
-                        actions.onWebLogin(id, current)
+                    if (global) {
+                        // 国际版没有可用的网页登录，指向上面的粘贴导入
+                        Text(
+                            text = "国际版请在卡片上方「粘贴 IDE JWT / 凭证 JSON」导入。",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    } else {
+                        OutlineActionButton("去登录国内版") {
+                            actions.onWebLogin(id, current)
+                        }
                     }
                 }
                 return
