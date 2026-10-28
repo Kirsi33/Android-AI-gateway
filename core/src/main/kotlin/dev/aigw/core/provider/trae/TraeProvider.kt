@@ -247,6 +247,54 @@ class TraeProvider(
 
     /** 粘贴 JSON 凭证导入：补齐设备指纹后换 token 并拉取用户信息。 */
     override fun importCredentials(raw: String): ProviderAccount {
+        // 网页「桌面模式登录」回传的是 {"cookie":"..."}，不是凭证 JSON。
+        // 走 Cookie → GetUserToken 换会话 token；两个国际区各试一次（凭证里没有区域信息）。
+        val cookieOnly = runCatching {
+            JsonParser.parseString(raw).asJsonObject.get("cookie")?.takeIf { it.isJsonPrimitive }?.asString
+        }.getOrNull()
+        if (!cookieOnly.isNullOrEmpty()) {
+            var lastError: Exception? = null
+            for (userRegion in listOf("US-East", "SG")) {
+                val seed = TraeAccount(
+                    uid = "",
+                    accessToken = "",
+                    refreshToken = "",
+                    expiresAt = 0L,
+                    nickname = "",
+                    enterpriseId = "",
+                    machineId = TraeLogin.newMachineId(),
+                    deviceId = TraeLogin.randomDeviceId(),
+                    domain = TraeRegion.INTL.id,
+                    apiHost = "",
+                    userRegion = userRegion,
+                )
+                val renewed = try {
+                    authClient(TraeRegion.INTL).fetchTokenByCookie(seed, cookieOnly)
+                        .copy(userRegion = userRegion)
+                } catch (e: Exception) {
+                    lastError = e
+                    continue
+                }
+                var filled = renewed
+                if (filled.uid.isEmpty() && filled.accessToken.isNotEmpty()) {
+                    filled = filled.withIdentity(
+                        dev.aigw.core.util.jwtClaim(filled.accessToken, "user_id", "userId", "uid", "sub"),
+                        "",
+                        "",
+                    )
+                }
+                val withInfo = authClient(TraeRegion.INTL).getUserInfo(filled)
+                if (withInfo.uid.isEmpty()) {
+                    lastError = IllegalStateException("Cookie 有效但拿不到 uid")
+                    continue
+                }
+                return toProviderAccount(withInfo)
+            }
+            throw IllegalStateException(
+                "Cookie 登录失败：${lastError?.message ?: "上游未返回 token"}" +
+                    "（Cookie 键：${TraeLogin.cookieKeys(cookieOnly).joinToString(",")}）",
+            )
+        }
         var account = ensureDeviceIds(TraeAccount.parse(raw))
         val region = TraeRegion.infer(account.domain, account.apiHost)
         if (account.refreshToken.isNotEmpty()) account = authClient(region).exchangeToken(account)
@@ -464,6 +512,17 @@ class TraeProvider(
             apiHost = region.oauthHost,
         )
         if (account.refreshToken.isNotEmpty()) account = authClient(region).exchangeToken(account)
+        // 网页「桌面模式登录」只给 Cookie：拿它换会话 token（官方网页就是这么做的）
+        if (account.accessToken.isEmpty() && account.refreshToken.isEmpty() && callback.cookie.isNotEmpty()) {
+            account = try {
+                authClient(region).fetchTokenByCookie(account, callback.cookie)
+            } catch (e: TraeHttpException) {
+                throw IllegalStateException(
+                    "Cookie 换 token 失败（HTTP ${e.status}）：${e.body.take(160).ifEmpty { e.message.orEmpty() }}。" +
+                        "Cookie 键：${TraeLogin.cookieKeys(callback.cookie).joinToString(",")}",
+                )
+            }
+        }
         if (account.uid.isEmpty() && account.accessToken.isNotEmpty()) {
             account = account.withIdentity(
                 dev.aigw.core.util.jwtClaim(account.accessToken, "user_id", "userId", "uid", "sub"),

@@ -142,6 +142,8 @@ object TraeConstants {
     const val EP_MODELS = "/api/ide/v1/get_detail_param"
     const val EP_EXCHANGE = "/cloudide/api/v3/trae/oauth/ExchangeToken"
     const val EP_USER_INFO = "/cloudide/api/v3/trae/GetUserInfo"
+    /** 网页会话用 Cookie 换会话 token（桌面模式登录后走这条）。 */
+    const val EP_GET_USER_TOKEN = "/cloudide/api/v3/common/GetUserToken"
     const val EP_CHECKIN_STATUS = "/trae/api/v2/ug/checkin_credits/status"
     const val EP_CHECKIN_CLAIM = "/trae/api/v2/ug/checkin_credits/claim"
 

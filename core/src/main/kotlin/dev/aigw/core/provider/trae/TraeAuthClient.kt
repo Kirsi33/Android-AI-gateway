@@ -77,6 +77,51 @@ class TraeAuthClient(private val version: TraeVersion) {
         )
     }
 
+    /**
+     * 用网页会话的 Cookie 换 accessToken。
+     *
+     * 网页「桌面模式登录」不回调 userJwt，只回一条 Cookie；官方网页拿它调
+     * `GetUserToken` 取会话 token（抓包里能看到这个请求）。
+     * cookie 里通常有 sessionid / sid_guard 等，服务端认 Cookie 头。
+     */
+    fun fetchTokenByCookie(account: TraeAccount, cookie: String): TraeAccount {
+        val host = authHost(account)
+        val body = JsonObject().apply {
+            addProperty("UserID", account.uid)
+            addProperty("TenantID", account.enterpriseId)
+        }
+        val conn = TraeHttp.post(
+            url = host + TraeConstants.EP_GET_USER_TOKEN,
+            body = body.toString(),
+            connectTimeoutMs = TraeHttp.CONNECT_TIMEOUT_MS,
+            readTimeoutMs = TraeHttp.READ_TIMEOUT_MS,
+        ) {
+            TraeHeaders.oauth(it, version)
+            it.setRequestProperty("Cookie", cookie)
+        }
+
+        val status = conn.responseCode
+        val raw = TraeHttp.readBody(conn)
+        if (status >= 400) {
+            throw TraeHttpException(status, TraeErrors.fromStatus(status, raw), raw, TraeErrors.extractCode(raw))
+        }
+        val result = runCatching { JsonParser.parseString(raw).asJsonObject.objOrNull("Result") }.getOrNull()
+            ?: throw TraeHttpException(status, TraeErrorKind.SERVER, "GetUserToken 响应无法解析: ${raw.take(200)}")
+        val token = result.str("Token")
+        if (token.isEmpty()) {
+            throw TraeHttpException(
+                status,
+                TraeErrorKind.SESSION_DEAD,
+                "Cookie 换不到 token（GetUserToken 未返回 Token）。Cookie 键：${TraeLogin.cookieKeys(cookie).joinToString(",")}",
+            )
+        }
+        return account.withTokens(
+            accessToken = token,
+            refreshToken = "",
+            expiresAt = expiresAtOf(result.long("ExpiredAt"), 0L, nowSeconds()),
+        ).withIdentity(result.str("UserID"), "", result.str("TenantID"))
+    }
+
     /** 补全 / 刷新账号身份信息。 */
     fun getUserInfo(account: TraeAccount): TraeAccount {
         val host = authHost(account)

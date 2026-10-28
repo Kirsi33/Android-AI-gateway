@@ -15,6 +15,11 @@ data class CallbackAccount(
     val nickname: String,
     val enterpriseId: String,
     val expiresAt: Long,
+    /**
+     * 网页「桌面模式登录」拿到的是 Cookie 会话，不是 OAuth 回调的 userJwt。
+     * 有值时由调用方拿它去换 token（[TraeAuthClient.fetchTokenByCookie]）。
+     */
+    val cookie: String = "",
 )
 
 /**
@@ -121,6 +126,20 @@ object TraeLogin {
         if (effectiveRefresh.isEmpty()) {
             accessToken = jsonValue(userJwt, "token").ifEmpty { paramValue(params, "accesstoken") }
             if (accessToken.isEmpty()) {
+                // 网页版登录完成后只交回一条 Cookie 串（没有 userJwt）：先交给上层去换 token，
+                // 换不到再把 Cookie 的键名列出来——报键名不报值，能定位又不会泄露会话。
+                val cookie = paramValue(params, "cookie")
+                if (cookie.isNotEmpty()) {
+                    return CallbackAccount(
+                        refreshToken = "",
+                        accessToken = "",
+                        uid = "",
+                        nickname = "",
+                        enterpriseId = "",
+                        expiresAt = 0L,
+                        cookie = cookie,
+                    )
+                }
                 // 只报参数名，不报值：既能定位问题，也不会把凭证打进日志/截图
                 val keys = params.keys.joinToString(",").ifEmpty { "（无查询参数）" }
                 require(false) {
@@ -199,6 +218,16 @@ object TraeLogin {
     } catch (_: Exception) {
         value
     }
+
+    /** 把 Cookie 串解析成键值对；值不对外暴露，只用于取 sessionid 等。 */
+    fun parseCookie(raw: String): Map<String, String> =
+        raw.split(';').mapNotNull { part ->
+            val index = part.indexOf('=')
+            if (index <= 0) null else part.substring(0, index).trim() to part.substring(index + 1).trim()
+        }.toMap()
+
+    /** Cookie 里出现了哪些键（脱敏用，报错时只说键名）。 */
+    fun cookieKeys(raw: String): List<String> = parseCookie(raw).keys.toList()
 
     /** 按归一化键名取查询参数（忽略大小写与下划线/连字符）。 */
     private fun paramValue(params: Map<String, String>, normalizedKey: String): String {
