@@ -128,7 +128,7 @@ class DumateClient {
             headers = webHeaders(account),
         )
         if (status == 401) {
-            val keys = cookie.split(';').map { it.substringBefore('=').trim().lowercase() }
+            val keys = account.cookie.split(';').map { it.substringBefore('=').trim().lowercase() }
             val hint = if (keys.any { it == "bduss" } && keys.none { it.startsWith("bce-") }) {
                 "（BDUSS 已收到，但缺 bce- 系会话 cookie——登录跳转链没走完。" +
                     "请重新登录，并在页面完全跳回搭子、不再有跳转动作后再点完成）"
