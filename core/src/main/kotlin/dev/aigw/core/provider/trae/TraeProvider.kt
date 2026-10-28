@@ -290,9 +290,12 @@ class TraeProvider(
                 }
                 return toProviderAccount(withInfo)
             }
+            // 只报关键键的存在性：完整键列表有三十多个，糊满一屏反而看不清
+            val keys = TraeLogin.parseCookie(cookieOnly).keys
+            val important = listOf("sessionid", "sid_tt", "sid_guard", "uid_tt")
+                .joinToString(", ") { key -> "$key=" + if (keys.any { it.equals(key, true) }) "有" else "无" }
             throw IllegalStateException(
-                "Cookie 登录失败：${lastError?.message ?: "上游未返回 token"}" +
-                    "（Cookie 键：${TraeLogin.cookieKeys(cookieOnly).joinToString(",")}）",
+                "Cookie 登录失败：${lastError?.message ?: "上游未返回 token"}（关键 Cookie：$important）",
             )
         }
         var account = ensureDeviceIds(TraeAccount.parse(raw))

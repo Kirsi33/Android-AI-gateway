@@ -86,9 +86,23 @@ class TraeAuthClient(private val version: TraeVersion) {
      */
     fun fetchTokenByCookie(account: TraeAccount, cookie: String): TraeAccount {
         val host = authHost(account)
+        // 第一步必须是 CheckLogin：网页登录态就在这批 cookie 里（sessionid/sid_tt/sid_guard），
+        // 而 GetUserToken 只认 Cloud-IDE-JWT。CheckLogin 还能回传 Host / UserID / Region，
+        // 正好补上 Cookie 里缺的区域信息。
+        val login = checkLoginByCookie(host, cookie)
+        if (!login.loggedIn) {
+            throw TraeHttpException(
+                login.status,
+                TraeErrorKind.SESSION_DEAD,
+                "Cookie 未被上游接受（CheckLogin IsLogin=false）。" +
+                    "关键 Cookie：sessionid=${hasKey(cookie, "sessionid")}, " +
+                    "sid_tt=${hasKey(cookie, "sid_tt")}, sid_guard=${hasKey(cookie, "sid_guard")}",
+            )
+        }
+        val seeded = account.withIdentity(login.uid, "", login.tenantId)
         val body = JsonObject().apply {
-            addProperty("UserID", account.uid)
-            addProperty("TenantID", account.enterpriseId)
+            addProperty("UserID", seeded.uid.ifEmpty { account.uid })
+            addProperty("TenantID", seeded.enterpriseId.ifEmpty { account.enterpriseId })
         }
         val conn = TraeHttp.post(
             url = host + TraeConstants.EP_GET_USER_TOKEN,
@@ -115,12 +129,48 @@ class TraeAuthClient(private val version: TraeVersion) {
                 "Cookie 换不到 token（GetUserToken 未返回 Token）。Cookie 键：${TraeLogin.cookieKeys(cookie).joinToString(",")}",
             )
         }
-        return account.withTokens(
+        return seeded.withTokens(
             accessToken = token,
             refreshToken = "",
             expiresAt = expiresAtOf(result.long("ExpiredAt"), 0L, nowSeconds()),
-        ).withIdentity(result.str("UserID"), "", result.str("TenantID"))
+        ).withIdentity(result.str("UserID").ifEmpty { seeded.uid }, "", result.str("TenantID"))
     }
+
+    private data class CookieLogin(
+        val loggedIn: Boolean,
+        val uid: String,
+        val tenantId: String,
+        val status: Int,
+    )
+
+    /** 用 Cookie 查网页登录态（官方网页每次打开都会调，走的正是 passport cookie）。 */
+    private fun checkLoginByCookie(host: String, cookie: String): CookieLogin {
+        val body = JsonObject().apply { addProperty("ReqSource", "IDE") }
+        val conn = TraeHttp.post(
+            url = host + TraeConstants.EP_CHECK_LOGIN,
+            body = body.toString(),
+            connectTimeoutMs = TraeHttp.CONNECT_TIMEOUT_MS,
+            readTimeoutMs = TraeHttp.READ_TIMEOUT_MS,
+        ) {
+            TraeHeaders.oauth(it, version)
+            it.setRequestProperty("Cookie", cookie)
+        }
+        val status = conn.responseCode
+        val raw = TraeHttp.readBody(conn)
+        if (status >= 400) return CookieLogin(false, "", "", status)
+        val result = runCatching { JsonParser.parseString(raw).asJsonObject.objOrNull("Result") }
+            .getOrNull() ?: return CookieLogin(false, "", "", status)
+        val loggedIn = result.get("IsLogin")?.takeIf { it.isJsonPrimitive }?.asBoolean ?: false
+        return CookieLogin(
+            loggedIn = loggedIn,
+            uid = result.str("UserID"),
+            tenantId = result.str("TenantID"),
+            status = status,
+        )
+    }
+
+    private fun hasKey(cookie: String, key: String): Boolean =
+        TraeLogin.parseCookie(cookie).keys.any { it.equals(key, ignoreCase = true) }
 
     /** 补全 / 刷新账号身份信息。 */
     fun getUserInfo(account: TraeAccount): TraeAccount {
