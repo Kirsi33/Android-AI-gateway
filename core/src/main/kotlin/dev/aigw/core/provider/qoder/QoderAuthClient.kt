@@ -259,10 +259,24 @@ class QoderAuthClient {
     )
 
     private fun expiresAtOf(data: JsonObject): Long {
+        // expires_at 可能是 ISO 字符串（实测："2026-11-27T16:40:36Z"）
+        val iso = data.stringOrNull("expires_at").orEmpty()
+        if (iso.isNotEmpty()) {
+            runCatching { java.time.Instant.parse(iso).epochSecond }.getOrNull()?.let { return it }
+        }
         val raw = data.longOrNull("expires_at") ?: data.longOrNull("expiresAt") ?: 0L
         if (raw > 0) return if (raw > 1e12) raw / 1000 else raw
-        val ttl = data.longOrNull("expires_in") ?: 0L
-        return if (ttl > 0) System.currentTimeMillis() / 1000 + ttl else 0L
+        // **expires_in 实测是毫秒**（2591999998 ≈ 30 天，与 expires_at 对得上），
+        // 按秒加会算出 82 年后，界面永远显示「不会过期」
+        val ttlMs = data.longOrNull("expires_in") ?: 0L
+        if (ttlMs > 0) {
+            return if (ttlMs > 1e9) {
+                System.currentTimeMillis() / 1000 + ttlMs / 1000
+            } else {
+                System.currentTimeMillis() / 1000 + ttlMs
+            }
+        }
+        return 0L
     }
 
     private fun firstLong(obj: JsonObject, vararg keys: String): Long {
