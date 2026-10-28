@@ -295,11 +295,6 @@ class QwenChatClient(private val account: QwenAccount) {
         }.toString()
     }
 
-    companion object {
-        /** 模型列表的 pathSig（同样去掉 /algo 前缀）。 */
-        private const val MODELS_PATH_SIG = "/api/v2/model/list"
-    }
-
     /** 剥外层信封（`{"body":"<内层 chunk>"}`），空帧直接丢。 */
     private class UnwrapStream(private val source: InputStream) : InputStream() {
         private val buffer = ArrayDeque<Byte>()
