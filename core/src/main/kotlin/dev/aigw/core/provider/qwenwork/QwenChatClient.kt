@@ -135,8 +135,11 @@ class QwenChatClient(private val account: QwenAccount) {
     fun fetchModels(): List<String>? {
         val payloadB64 = Cosy.buildPayloadB64(session.info, QwenConstants.COSY_VERSION)
         val date = (System.currentTimeMillis() / 1000).toString()
-        // 空 body 也要参与签名（pathSig 用去 /algo 前缀的路径）
-        val sig = Cosy.signRequest(payloadB64, session.cosyKey, date, "", MODELS_PATH_SIG)
+        // **千问与 Qoder 在这里不一样**（dumate2api `qwenwork/index.js:289-302`）：
+        // 千问的模型列表直接复用**聊天**签名——pathSig 用聊天路径、body 用 encode('{}')，
+        // 再把 URL 换成 MODELS_PATH。按 models 路径自己算会 403 "Signature invalid"。
+        val body = Cosy.encode("{}")
+        val sig = Cosy.signRequest(payloadB64, session.cosyKey, date, body, CHAT_PATH_SIG)
         val headers = buildMap {
             put("cosy-data-policy", "agree")
             put("cosy-clienttype", QwenConstants.CLIENT_TYPE)
@@ -153,6 +156,9 @@ class QwenChatClient(private val account: QwenAccount) {
             put("accept-encoding", "identity")
             put("authorization", Cosy.composeBearer(payloadB64, sig))
             put("user-agent", QwenConstants.USER_AGENT)
+            // 复用聊天签名时这两条也要带（参考实现直接沿用 prepareInfer 的头）
+            put("x-model-key", QwenConstants.DEFAULT_MODEL)
+            put("x-model-source", "system")
         }
         val conn = try {
             HttpSupport.open(
