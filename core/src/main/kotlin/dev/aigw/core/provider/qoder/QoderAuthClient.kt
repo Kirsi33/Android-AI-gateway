@@ -7,7 +7,6 @@ import dev.aigw.core.util.arrayOrNull
 import dev.aigw.core.util.longOrNull
 import dev.aigw.core.util.objOrNull
 import dev.aigw.core.util.stringOrNull
-import java.net.URLEncoder
 
 /**
  * Qoder 认证与业务 REST。
@@ -28,22 +27,20 @@ class QoderAuthClient {
         val verifier = QoderAccount.newVerifier()
         val challenge = QoderAccount.challengeOf(verifier)
         val nonce = QoderAccount.newNonce(realm.dashedNonce)
-        val machineId = QoderAccount.newMachineId()
+        // machineId 仍要生成：它是 COSY 签名头 `cosy-machineid` 的一部分，
+        // 只是**不进授权 URL**。
+        QoderAccount.newMachineId()
 
-        val params = linkedMapOf(
+        // **只带这四个参数**：nonce / challenge / challenge_method / client_id。
+        // 加 machine_id、redirect_uri 会让授权页与取票端点对不上，表现为轮询永远 404
+        // （用户只看到「等到超时」，完全猜不到原因）。
+        val params = listOf(
+            "nonce" to nonce,
             "challenge" to challenge,
             "challenge_method" to "S256",
-            "nonce" to nonce,
+            "client_id" to realm.clientId,
         )
-        if (realm.sendRedirectUri && realm.redirectUri.isNotEmpty()) {
-            params["redirect_uri"] = realm.redirectUri
-        }
-        params["client_id"] = realm.clientId
-        params["machine_id"] = machineId
-
-        val query = params.entries.joinToString("&") { (k, v) ->
-            enc(k) + "=" + enc(v)
-        }
+        val query = params.joinToString("&") { (k, v) -> enc(k) + "=" + enc(v) }
         val url = realm.website + QoderConstants.DEVICE_AUTH_PAGE + "?" + query
         return QoderLoginTicket(
             state = "qd-" + System.nanoTime(),
@@ -69,7 +66,8 @@ class QoderAuthClient {
             body = null,
             headers = mapOf(
                 "Accept" to "application/json",
-                "User-Agent" to "QoderWork",
+                // 参考实现取票用 qoder/1.0.0（不是 QoderWork），UA 不匹配会被当未知客户端
+                "User-Agent" to "qoder/1.0.0",
             ),
         )
         // 404 / 202 = 尚未授权，继续等
@@ -272,7 +270,7 @@ class QoderAuthClient {
         return -1L
     }
 
-    private fun enc(value: String): String = URLEncoder.encode(value, "UTF-8")
+    private fun enc(value: String): String = dev.aigw.core.util.percentEncode(value)
 
     private fun request(
         url: String,

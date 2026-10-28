@@ -81,7 +81,9 @@ object DumateUi : ProviderUi {
                     actions.onCookieLogin(
                         id,
                         DumateConstants.WEB_BASE + "/app",
-                        listOf("dumate.cn", "www.dumate.cn"),
+                        // 登录发生在 passport.baidu.com，会话 cookie 在 .baidu.com 域；
+                        // 只收 dumate.cn 会拿到空串（「取不到 cookie」就是这么来的）
+                        listOf("www.dumate.cn", "dumate.cn", "passport.baidu.com", "baidu.com", ".baidu.com"),
                         "登录百度搭子",
                     )
                 },

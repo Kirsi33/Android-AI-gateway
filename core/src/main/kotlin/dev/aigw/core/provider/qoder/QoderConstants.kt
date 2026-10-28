@@ -34,7 +34,9 @@ enum class QoderRealm(
         openapi = "https://openapi.qoder.com.cn",
         gateway = "https://gateway.qoder.com.cn",
         website = "https://qoder.com.cn",
-        clientId = "1c5e33e1-364d-4ce6-b02c-acaa81274a5c",
+        // dumate2api `src/qoder/constants.js:22` 实测：国内与国际**同一个 client_id**
+        // （与千问办公也是同一个，同一平台）。Python 版里的 1c5e33e1-… 是另一条产品线的值。
+        clientId = "e883ade2-e6e3-4d6d-adf7-f92ceff5fdcb",
         redirectUri = "qoder-work-cn://",
         userAgent = "QoderWork/1.1.75",
         dashedNonce = true,

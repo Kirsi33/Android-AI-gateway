@@ -7,7 +7,6 @@ import dev.aigw.core.util.arrayOrNull
 import dev.aigw.core.util.longOrNull
 import dev.aigw.core.util.objOrNull
 import dev.aigw.core.util.stringOrNull
-import java.net.URLEncoder
 
 /** 设备授权票据。 */
 data class QwenLoginTicket(
@@ -233,7 +232,7 @@ class QwenAuthClient {
         return if (ttl > 0) System.currentTimeMillis() / 1000 + ttl else 0L
     }
 
-    private fun enc(value: String): String = URLEncoder.encode(value, "UTF-8")
+    private fun enc(value: String): String = dev.aigw.core.util.percentEncode(value)
 
     private fun request(
         url: String,
