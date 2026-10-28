@@ -17,6 +17,7 @@ import dev.aigw.core.provider.ProviderActionResult
 import dev.aigw.core.provider.ProviderCapability
 import dev.aigw.core.provider.ProviderModel
 import dev.aigw.core.provider.ProviderModelCatalogView
+import dev.aigw.core.provider.RegionAwareSupport
 import dev.aigw.core.provider.UpstreamError
 import dev.aigw.core.provider.cosy.Cosy
 import dev.aigw.core.util.arrayOrNull
@@ -37,7 +38,7 @@ import java.util.concurrent.ConcurrentHashMap
  */
 class QoderProvider(
     private val nowMillis: () -> Long = { System.currentTimeMillis() },
-) : Provider, DeviceCodeSupport {
+) : Provider, DeviceCodeSupport, RegionAwareSupport {
 
     private val auth = QoderAuthClient()
 
@@ -269,6 +270,14 @@ class QoderProvider(
         }
         return UpstreamError(kind, message)
     }
+
+    // ------------------------------------------------------------------ 区域
+
+    /** 账号属哪个区：凭证里的 `realm`（cn / global）。 */
+    override fun regionOf(account: ProviderAccount): String? =
+        runCatching { QoderAccount.parse(account.secret).realm }.getOrNull()
+
+    override fun regions(): List<String> = QoderRealm.entries.map { it.id }
 
     override fun hosts(): List<String> =
         QoderRealm.entries
