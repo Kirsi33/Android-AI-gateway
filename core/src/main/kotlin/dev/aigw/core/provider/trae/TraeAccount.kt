@@ -70,8 +70,8 @@ data class TraeAccount(
             // 归一化取值：accessToken / access_token / token / Token 都认，
             // refreshToken / refresh_token / rt 都认。用户从不同地方导出的 JSON 字段名不一致，
             // 之前只认驼峰，粘进来就报「两把都没有」。
-            val accessToken = pick(auth, "accesstoken", "token", "jwt", "cloudidejwt")
-            val refreshToken = pick(auth, "refreshtoken", "rt")
+            val accessToken = auth.pick("accesstoken", "token", "jwt", "cloudidejwt")
+            val refreshToken = auth.pick("refreshtoken", "rt")
             // 只要求「两把里有一把」：国际版登录回调有时只给 refreshToken（accessToken 靠
             // ExchangeToken 换），旧逻辑在这里直接抛「凭证缺少 accessToken」，
             // 用户看到的就是「登录成功但没有 accessToken」，账号根本进不了池子。

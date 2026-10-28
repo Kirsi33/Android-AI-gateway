@@ -381,13 +381,113 @@ fun UsageScreen(state: AppUiState, viewModel: AppViewModel, onBack: () -> Unit) 
             }
         }
 
-        SectionCard(enterIndex = 5) {
+        BreakdownCard(
+            title = "今日 · 按供应商",
+            dimensions = state.todayBreakdown.byProvider,
+            providerNames = state.providers.associate { it.id to it.displayName },
+            enterIndex = 5,
+        )
+
+        BreakdownCard(
+            title = "今日 · 按模型",
+            dimensions = state.todayBreakdown.byModel,
+            providerNames = emptyMap(),
+            enterIndex = 5,
+        )
+
+        BreakdownCard(
+            title = "累计 · 按供应商",
+            dimensions = state.totalBreakdown.byProvider,
+            providerNames = state.providers.associate { it.id to it.displayName },
+            enterIndex = 6,
+        )
+
+        BreakdownCard(
+            title = "累计 · 按模型",
+            dimensions = state.totalBreakdown.byModel,
+            providerNames = emptyMap(),
+            enterIndex = 6,
+        )
+
+        SectionCard(enterIndex = 6) {
             SectionLabel("存储")
             Text(
                 text = "调用记录 ${state.storedCalls} 条，占用约 ${StorageAudit.formatSize(state.storage?.totalChars ?: 0L)}",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+        }
+    }
+}
+
+/**
+ * 按维度（供应商 / 模型）拆分的用量列表。
+ *
+ * 数据只从本版本起累计：更早的日聚合没有维度字段，用最近 100 条记录反推会与总数矛盾。
+ * 因此空列表时如实说明，不显示一个「0」让人以为是统计坏了。
+ */
+@Composable
+private fun BreakdownCard(
+    title: String,
+    dimensions: List<dev.aigw.core.usage.UsageDimension>,
+    providerNames: Map<String, String>,
+    enterIndex: Int,
+) {
+    SectionCard(enterIndex = enterIndex) {
+        SectionLabel(title)
+        if (dimensions.isEmpty()) {
+            Text(
+                text = "本版本起开始按维度统计，之前的记录没有明细。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            return@SectionCard
+        }
+        dimensions.forEach { dimension ->
+            val stats = dimension.stats
+            val percent = stats.cacheHitPercent
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        text = providerNames[dimension.key] ?: dimension.key,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        text = "请求 ${formatCount(stats.requests)} · 成功 ${formatCount(stats.success)}" +
+                            if (stats.failed + stats.aborted > 0) {
+                                " · 失败 ${formatCount(stats.failed)} · 中断 ${formatCount(stats.aborted)}"
+                            } else {
+                                ""
+                            },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                Column(horizontalAlignment = Alignment.End) {
+                    Text(
+                        text = formatTokens(stats.promptTokens) + " / " + formatTokens(stats.completionTokens),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Text(
+                        text = if (percent == null) "命中 —" else "命中 " + String.format(Locale.US, "%.0f%%", percent),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (percent != null && percent >= 50) {
+                            MaterialTheme.colorScheme.tertiary
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                    )
+                }
+            }
         }
     }
 }

@@ -59,6 +59,8 @@ import dev.aigw.core.usage.CallRecord
 import dev.aigw.core.usage.LogLine
 import dev.aigw.core.usage.StorageAudit
 import dev.aigw.core.usage.StorageReport
+import dev.aigw.core.usage.UsageBreakdown
+import dev.aigw.core.usage.UsageDimension
 import dev.aigw.core.usage.UsageStats
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -255,6 +257,10 @@ data class AppUiState(
     val daily: List<UsageStats> = emptyList(),
     /** 全部记录汇总（今日 + 历史）。 */
     val total: UsageStats = UsageStats(),
+    /** 今日按供应商 / 模型的细分（本版本起累计，见 UsageBreakdown 注释）。 */
+    val todayBreakdown: UsageBreakdown = UsageBreakdown(),
+    /** 累计按供应商 / 模型的细分。 */
+    val totalBreakdown: UsageBreakdown = UsageBreakdown(),
     val providers: List<ProviderInfo> = emptyList(),
     val accounts: List<AccountStatus> = emptyList(),
     val customProviders: List<CustomProviderConfig> = emptyList(),
@@ -333,6 +339,8 @@ private class Snapshot(
     val today: UsageStats,
     val daily: List<UsageStats>,
     val total: UsageStats,
+    val todayByProvider: UsageBreakdown,
+    val totalByProvider: UsageBreakdown,
     val providers: List<ProviderInfo>,
     val accounts: List<AccountStatus>,
     val customProviders: List<CustomProviderConfig>,
@@ -445,6 +453,8 @@ class AppViewModel(
                     today = engine.callLogStore.todayStats(System.currentTimeMillis()),
                     daily = engine.callLogStore.dailyStats(System.currentTimeMillis()),
                     total = engine.callLogStore.totalStats(),
+                    todayByProvider = engine.callLogStore.breakdownToday(System.currentTimeMillis()),
+                    totalByProvider = engine.callLogStore.breakdownTotal(),
                     providers = engine.providers(),
                     accounts = engine.accounts(),
                     customProviders = engine.settingsRepository.loadCustomProviders(),
@@ -470,6 +480,8 @@ class AppViewModel(
                 today = snapshot.today,
                 daily = snapshot.daily,
                 total = snapshot.total,
+                todayBreakdown = snapshot.todayByProvider,
+                totalBreakdown = snapshot.totalByProvider,
                 providers = snapshot.providers,
                 accounts = snapshot.accounts,
                 customProviders = snapshot.customProviders,
