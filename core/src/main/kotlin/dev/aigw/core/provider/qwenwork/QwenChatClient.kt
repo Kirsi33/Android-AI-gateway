@@ -138,8 +138,8 @@ class QwenChatClient(private val account: QwenAccount) {
         // **千问与 Qoder 在这里不一样**（dumate2api `qwenwork/index.js:289-302`）：
         // 千问的模型列表直接复用**聊天**签名——pathSig 用聊天路径、body 用 encode('{}')，
         // 再把 URL 换成 MODELS_PATH。按 models 路径自己算会 403 "Signature invalid"。
-        val body = Cosy.encode("{}")
-        val sig = Cosy.signRequest(payloadB64, session.cosyKey, date, body, CHAT_PATH_SIG)
+        val signBody = Cosy.encode("{}")
+        val sig = Cosy.signRequest(payloadB64, session.cosyKey, date, signBody, QwenConstants.CHAT_PATH_SIG)
         val headers = buildMap {
             put("cosy-data-policy", "agree")
             put("cosy-clienttype", QwenConstants.CLIENT_TYPE)
