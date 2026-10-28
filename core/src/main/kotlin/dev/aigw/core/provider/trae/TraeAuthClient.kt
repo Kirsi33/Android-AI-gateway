@@ -96,7 +96,8 @@ class TraeAuthClient(private val version: TraeVersion) {
                 TraeErrorKind.SESSION_DEAD,
                 "Cookie 未被上游接受（CheckLogin IsLogin=false）。" +
                     "关键 Cookie：sessionid=${hasKey(cookie, "sessionid")}, " +
-                    "sid_tt=${hasKey(cookie, "sid_tt")}, sid_guard=${hasKey(cookie, "sid_guard")}",
+                    "sid_tt=${hasKey(cookie, "sid_tt")}, sid_guard=${hasKey(cookie, "sid_guard")}。" +
+                    "上游响应：${login.raw.take(160).ifEmpty { "（空）" }}",
             )
         }
         val seeded = account.withIdentity(login.uid, "", login.tenantId)
@@ -141,11 +142,16 @@ class TraeAuthClient(private val version: TraeVersion) {
         val uid: String,
         val tenantId: String,
         val status: Int,
+        val raw: String = "",
     )
 
     /** 用 Cookie 查网页登录态（官方网页每次打开都会调，走的正是 passport cookie）。 */
     private fun checkLoginByCookie(host: String, cookie: String): CookieLogin {
         val body = JsonObject().apply { addProperty("ReqSource", "IDE") }
+        // 字节系接口的 CSRF 是「cookie 里一份 + 请求头一份」，缺头会被判未登录
+        val csrf = TraeLogin.parseCookie(cookie).entries
+            .firstOrNull { it.key.contains("csrf", ignoreCase = true) }
+            ?.value
         val conn = TraeHttp.post(
             url = host + TraeConstants.EP_CHECK_LOGIN,
             body = body.toString(),
@@ -154,18 +160,20 @@ class TraeAuthClient(private val version: TraeVersion) {
         ) {
             TraeHeaders.oauth(it, version)
             it.setRequestProperty("Cookie", cookie)
+            if (!csrf.isNullOrEmpty()) it.setRequestProperty("X-Csrf-Token", csrf)
         }
         val status = conn.responseCode
         val raw = TraeHttp.readBody(conn)
-        if (status >= 400) return CookieLogin(false, "", "", status)
+        if (status >= 400) return CookieLogin(false, "", "", status, raw)
         val result = runCatching { JsonParser.parseString(raw).asJsonObject.objOrNull("Result") }
-            .getOrNull() ?: return CookieLogin(false, "", "", status)
+            .getOrNull() ?: return CookieLogin(false, "", "", status, raw)
         val loggedIn = result.get("IsLogin")?.takeIf { it.isJsonPrimitive }?.asBoolean ?: false
         return CookieLogin(
             loggedIn = loggedIn,
             uid = result.str("UserID"),
             tenantId = result.str("TenantID"),
             status = status,
+            raw = raw,
         )
     }
 
