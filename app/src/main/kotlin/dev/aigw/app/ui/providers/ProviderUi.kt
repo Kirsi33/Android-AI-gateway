@@ -29,8 +29,16 @@ class ProviderUiActions(
      * 与 [onWebLogin] 的分工：这个在 **App 内**用 WebView 完成，不跳系统浏览器、
      * 也不需要网关在本地开回调端口。适合「凭证就是 Cookie」的上游（LongCat / Today）。
      */
-    val onCookieLogin: (providerId: String, url: String, hosts: List<String>, title: String) -> Unit =
-        { _, _, _, _ -> },
+    /**
+     * 内嵌网页登录：打开 [url]，用户登录完成后读取 [hosts] 的 Cookie 交回。
+     *
+     * [cookieName] 非空时，必须等到这个 cookie 出现才自动完成——
+     * 用于「登录跳转链很长、最后一跳才种下关键会话」的上游
+     * （百度搭子：BDUSS 在 passport 登录后就有，但 bce-sessionid
+     * 要等整个跳转链走完才种上，提前收就只能拿到半套）。
+     */
+    val onCookieLogin: (providerId: String, url: String, hosts: List<String>, title: String, cookieName: String) -> Unit =
+        { _, _, _, _, _ -> },
 
     /**
      * 内嵌网页登录（桌面 UA 版）。

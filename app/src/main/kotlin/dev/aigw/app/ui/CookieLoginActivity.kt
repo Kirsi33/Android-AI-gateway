@@ -63,6 +63,7 @@ class CookieLoginActivity : Activity() {
         val title = intent.getStringExtra(EXTRA_TITLE).orEmpty().ifEmpty { "登录" }
         desktopUserAgent = intent.getBooleanExtra(EXTRA_DESKTOP_UA, false)
 
+
         if (startUrl.isEmpty()) {
             Toast.makeText(this, "缺少登录地址", Toast.LENGTH_SHORT).show()
             finish()
@@ -125,6 +126,11 @@ class CookieLoginActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f,
         )
         web = view
+        // WebView 就绪后开始轮询关键 cookie（bce-sessionid 可能由页面内 XHR 种下，
+        // 没有 URL 变化，onPageFinished 检不到——只能定时探）
+        if (successCookieName.isNotEmpty()) {
+            web?.postDelayed(cookieProbe, 2_000)
+        }
 
         val statusBar = TextView(this).apply {
             text = title

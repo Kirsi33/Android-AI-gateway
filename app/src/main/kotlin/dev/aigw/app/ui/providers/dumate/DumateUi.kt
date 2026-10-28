@@ -93,6 +93,9 @@ object DumateUi : ProviderUi {
                             "dumate.cn",
                         ),
                         "登录百度搭子",
+                        // 等 bce 会话 cookie：BDUSS 在 passport 登录后就有，
+                        // bce-sessionid 要等整条跳转链走完（console.bce 那段）才种上
+                        "bce-sessionid",
                     )
                 },
                 modifier = Modifier.fillMaxWidth(),

@@ -78,12 +78,16 @@ fun ProviderDetailScreen(
             // 登录一律交给系统浏览器：本机 WebView 渲染异常（整页缩放错乱、输入框文字镜像），
             // 网关会在本地临时监听回调端口接住登录结果。
             onWebLogin = { id, region -> viewModel.beginBrowserLogin(id, region) },
-            onCookieLogin = { id, url, hosts, title ->
+            onCookieLogin = { id, url, hosts, title, cookieName ->
                 pendingCookieProvider = id
                 val intent = Intent(context, CookieLoginActivity::class.java).apply {
                     putExtra(CookieLoginActivity.EXTRA_START_URL, url)
                     putExtra(CookieLoginActivity.EXTRA_COOKIE_HOSTS, hosts.toTypedArray())
                     putExtra(CookieLoginActivity.EXTRA_TITLE, title)
+                    // 等关键会话 cookie 出现再完成（搭子的 bce-sessionid 在跳转链最后一跳）
+                    if (cookieName.isNotEmpty()) {
+                        putExtra(CookieLoginActivity.EXTRA_SUCCESS_COOKIE, cookieName)
+                    }
                 }
                 cookieLogin.launch(intent)
             },

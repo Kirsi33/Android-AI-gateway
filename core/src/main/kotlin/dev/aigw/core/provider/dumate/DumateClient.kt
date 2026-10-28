@@ -128,9 +128,14 @@ class DumateClient {
             headers = webHeaders(account),
         )
         if (status == 401) {
-            throw DumateExpiredException(
-                "登录态已失效，请重新获取 cookie。收到：" + cookieKeys(account.cookie),
-            )
+            val keys = cookie.split(';').map { it.substringBefore('=').trim().lowercase() }
+            val hint = if (keys.any { it == "bduss" } && keys.none { it.startsWith("bce-") }) {
+                "（BDUSS 已收到，但缺 bce- 系会话 cookie——登录跳转链没走完。" +
+                    "请重新登录，并在页面完全跳回搭子、不再有跳转动作后再点完成）"
+            } else {
+                "收到：" + cookieKeys(account.cookie)
+            }
+            throw DumateExpiredException("登录态已失效，请重新获取 cookie。$hint")
         }
         val root = runCatching { JsonParser.parseString(body).asJsonObject }.getOrNull()
             ?: throw IllegalStateException("换 token 响应无法解析：${body.take(120)}")
