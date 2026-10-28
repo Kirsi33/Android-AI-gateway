@@ -64,7 +64,7 @@ class QwenProvider(
             )
         }
         val models = live.map { key ->
-            ProviderModel(id = "$id/$key", name = key, contextWindow = QwenConstants.MAX_INPUT_TOKENS, extra = emptyMap())
+            ProviderModel(id = "$id/$key", name = key, contextWindow = QwenConstants.MAX_INPUT_TOKENS.toLong(), extra = emptyMap())
         }
         cachedCatalog = CatalogEntry(now, models)
         return ProviderModelCatalogView(models, fromFallback = false, error = "")
@@ -75,7 +75,7 @@ class QwenProvider(
     }
 
     private fun fallbackModels(): List<ProviderModel> = QwenConstants.FALLBACK_MODELS.map {
-        ProviderModel(id = "$id/$it", name = it, contextWindow = QwenConstants.MAX_INPUT_TOKENS, extra = emptyMap())
+        ProviderModel(id = "$id/$it", name = it, contextWindow = QwenConstants.MAX_INPUT_TOKENS.toLong(), extra = emptyMap())
     }
 
     override fun resolveModel(requested: String): String {
