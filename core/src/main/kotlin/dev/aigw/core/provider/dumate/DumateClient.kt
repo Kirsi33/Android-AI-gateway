@@ -21,7 +21,13 @@ import dev.aigw.core.util.stringOrNull
 object DumateConstants {
     const val ID = "dumate"
 
-    const val WEB_BASE = "https://www.dumate.cn"
+    /**
+     * 网页侧基址。**必须与登录域一致**：用户在 WebView 里登录的是 dumate.baidu.com，
+     * 会话 cookie 落在 baidu.com 域；拿这些 cookie 打 www.dumate.cn 服务端不认，
+     * 表现为「登录成功但 Cookie 换 token 失败：登录态已失效」。
+     * 两个域名是同一套服务（token/get 在两边都通），跟登录域走就不会错。
+     */
+    const val WEB_BASE = "https://dumate.baidu.com"
     const val GATEWAY_HOST = "dumate-svc.baidu.com"
     const val GATEWAY_PREFIX = "/gateway/apis/v1"
 
