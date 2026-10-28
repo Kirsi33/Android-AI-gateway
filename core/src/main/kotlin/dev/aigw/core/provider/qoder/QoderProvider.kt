@@ -3,6 +3,7 @@ package dev.aigw.core.provider.qoder
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import dev.aigw.core.provider.ACTION_CHECKIN
+import dev.aigw.core.provider.AuthKind
 import dev.aigw.core.provider.ChatCall
 import dev.aigw.core.provider.CreditInfo
 import dev.aigw.core.provider.ErrorKind
