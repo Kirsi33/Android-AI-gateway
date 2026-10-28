@@ -127,6 +127,12 @@ class DumateProvider(
             tokens[account.uid] = TokenEntry(account.token, account.tokenExpiresAt)
             return account
         }
+        // **token-only 账号**（粘贴 token 导入，没有 cookie）：没有换票的能力，
+        // 直接用导入的 token——过期由上游 401 反映，报错提示用户重新取。
+        if (account.cookie.isEmpty()) {
+            if (account.token.isNotEmpty()) return account
+            throw DumateExpiredException("没有 cookie 也没有 token，请重新导入")
+        }
         val refreshed = client.fetchToken(account)
         tokens[account.uid] = TokenEntry(refreshed.token, refreshed.tokenExpiresAt)
         return refreshed
