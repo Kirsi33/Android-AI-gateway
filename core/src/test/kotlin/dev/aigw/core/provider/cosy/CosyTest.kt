@@ -79,8 +79,11 @@ class CosyTest {
 
     @Test
     fun `身份 JSON 按键字母序输出`() {
-        // 大写 ASCII 在小写前：A(65) < z(122)
-        assertEquals("""{"A":"2","b":"1","c":"3"}""", Cosy.sortedJson(linkedMapOf("b" to "1", "a" to "2", "c" to "3", "A" to "2")))
+        // 大写 ASCII 在小写前：A(65) < a(97) < z(122)
+        assertEquals(
+            """{"A":"2","a":"2","b":"1","c":"3"}""",
+            Cosy.sortedJson(linkedMapOf("b" to "1", "a" to "2", "c" to "3", "A" to "2")),
+        )
         assertEquals("{}", Cosy.sortedJson(emptyMap()))
         // null 值直接省略（避免把 "null" 当字符串发上去）
         assertEquals("""{"a":"1"}""", Cosy.sortedJson(mapOf("a" to "1", "z" to null)))
