@@ -257,6 +257,10 @@ class RaccoonProvider(
     /** 查询可用积分余额（web 通道）。 */
     override fun creditInfo(account: ProviderAccount): CreditInfo? {
         val credential = parse(account) ?: return null
+        // 刷额度时顺便触发当日每日积分（幂等、每号每天只打一次）。
+        // 用户习惯是「打开供应商页看一眼余额」，不一定会点签到——不在这里补一刀，
+        // 每日 300 就会一直没人去结算。
+        runCatching { triggerDailyGrantOnce(credential) }
         return try {
             val (status, text) = getJson("$host$PATH_BALANCE", jsonHeaders(credential))
             if (status !in 200..299) return CreditInfo(0, known = false, detail = "上游 HTTP $status")
@@ -437,6 +441,13 @@ class RaccoonProvider(
         return try {
             val lines = ArrayList<String>()
 
+            // 0) 触发每日积分发放——**这一步才是「每日 300 分」的开关**。
+            //    官方公告说 00:00 自动到账、无需登录触发，实测却是惰性结算：
+            //    只有客户端启动时调的 setting_info 会让服务端结算当天那一笔。
+            //    漏了它，用户「一直用网关」就永远拿不到每日积分（10/13 之后一条 daily_grant 都没有的真凶）。
+            val grantPopup = runCatching { triggerDailyGrant(credential) }.getOrNull()
+            grantPopup?.let { lines += it }
+
             // 1) 桌面端登录奖励（幂等）
             val desktop = claimGrant("$host$PATH_GRANT", jsonHeaders(credential) + desktopHeaders(), "桌面端")
             desktop.second?.let { lines += it }
@@ -455,8 +466,10 @@ class RaccoonProvider(
             // 3) 今日每日积分的结算状态（以流水为准）
             val daily = dailyGrantStatus(credential)
             when (daily) {
-                is DailyStatus.Settled -> lines += "今日积分已在零点自动发放"
-                is DailyStatus.NotEligible -> lines += "该账号未开通每日积分（只有注册与登录奖励）"
+                is DailyStatus.Settled -> lines += "今日每日积分已到账"
+                // 触发过了却查不到任何 daily_grant：不是「没签到」，是这个号没有每日资格
+                is DailyStatus.NotEligible ->
+                    lines += "已触发每日发放，但流水中从未出现每日积分（该账号可能没有每日额度）"
                 is DailyStatus.Unknown -> Unit
             }
             if (lines.isEmpty()) {
@@ -484,6 +497,46 @@ class RaccoonProvider(
             granted && points > 0 -> status to "${label}奖励 +$points 积分"
             granted -> status to "${label}奖励已领取"
             else -> status to null // granted=false = 这笔已领过（幂等），不算新闻
+        }
+    }
+
+    /**
+     * 每天每个账号只触发一次每日积分（进程内标记）。
+     *
+     * setting_info 本身按天幂等，重复调不会多发，但额度刷新很频繁，
+     * 没必要每次都打一次上游。
+     */
+    private fun triggerDailyGrantOnce(credential: Credential) {
+        val today = java.time.LocalDate.now(java.time.ZoneId.of("Asia/Shanghai")).toString()
+        val key = credential.accessToken.hashCode().toString()
+        if (grantTriggeredDay[key] == today) return
+        triggerDailyGrant(credential)
+        grantTriggeredDay[key] = today
+    }
+
+    /**
+     * 触发服务端结算当日每日积分（官方客户端启动即调，**按天幂等**）。
+     *
+     * 返回可展示的发放提示；没有新发放（今天已结算过）返回 null。
+     * 会话失效（code 200003 / 401 / 403）直接抛，交给调用方统一处理。
+     */
+    private fun triggerDailyGrant(credential: Credential): String? {
+        val (status, text) = getJson("$host$PATH_SETTING_INFO", settingHeaders(credential))
+        if (status == 401 || status == 403) throw IllegalStateException("小浣熊会话已失效，请重新登录")
+        val envelope = runCatching { JsonParser.parseString(text).asJsonObject }.getOrNull() ?: return null
+        val code = envelope.get("code")?.takeIf { it.isJsonPrimitive }?.asLong ?: 0L
+        if (code == 200003L) throw IllegalStateException("小浣熊会话已失效，请重新登录")
+        if (status !in 200..299 || code != 0L) return null
+        val data = envelope.objOrNull("data") ?: return null
+        val toast = data.stringOrNull("point_grant_toast").orEmpty()
+        val popups = data.arrayOrNull("point_grant_popups")
+            ?.mapNotNull { it.asObjectOrNull()?.firstString("title", "message", "content") }
+            ?.filter { it.isNotBlank() }
+            .orEmpty()
+        return when {
+            toast.isNotBlank() -> toast
+            popups.isNotEmpty() -> popups.joinToString("；")
+            else -> null
         }
     }
 
@@ -678,6 +731,19 @@ class RaccoonProvider(
      * 手机端识别头（APK 逆向实证：Capacitor 的平台值加 `app-` 前缀，版本带 `v`）。
      * token 与桌面端是同一把 Bearer——JWT claims 里没有平台字段。
      */
+    /**
+     * 触发每日积分的客户端头（Raccoon-Daily 实证）。
+     *
+     * 注意平台值是 `desktop-windows`，**不带** `-x64`；版本用 v1.0.35。
+     * 与 [desktopHeaders] 刻意保持两套，别合并。
+     */
+    private fun settingHeaders(credential: Credential): Map<String, String> =
+        jsonHeaders(credential) + mapOf(
+            "x-client-platform" to GRANT_CLIENT_PLATFORM,
+            "x-client-version" to GRANT_CLIENT_VERSION,
+            "x-raccoon-language" to "zh",
+        )
+
     private fun mobileHeaders(): Map<String, String> = mapOf(
         "x-client-platform" to "app-android",
         "x-client-version" to "v1.0.3",
@@ -790,6 +856,26 @@ class RaccoonProvider(
         /** 积分流水明细。 */
         const val PATH_BILLS = "/api/web/points/v1/bills"
 
+        /**
+         * **每日积分的发放触发器**（官方客户端启动时必调，服务端按天幂等结算）。
+         *
+         * 这是「每日 300 分」真正的开关：官方公告说「每天 00:00 自动到账、无需登录触发」，
+         * 但实测是**惰性结算**——不调这个接口，服务端不会主动发（L0NE-6/Raccoon-Daily 实证，
+         * 用户流水也能回放出来：用官方客户端的日子有 `daily_grant`，只用网关的日子一条都没有）。
+         *
+         * 响应 `data.point_grant_popups` / `data.point_grant_toast` 是上游的发放提示。
+         */
+        const val PATH_SETTING_INFO = "/api/web/office/v3/setting_info"
+
+        /**
+         * 触发每日积分专用的客户端版本号。
+         *
+         * 与登录奖励的 [CLIENT_VERSION] 分开：这一套是 Raccoon-Daily 实证能拿到发放的写法
+         * （`desktop-windows` 不带 x64 后缀 + `v1.0.35`），不要混用。
+         */
+        const val GRANT_CLIENT_PLATFORM = "desktop-windows"
+        const val GRANT_CLIENT_VERSION = "v1.0.35"
+
         /** 桌面客户端标识：上游只给「官方桌面端」发登录奖励，伪装成 Windows 桌面端（与 [CLIENT_UA] 一致）。 */
         const val CLIENT_PLATFORM = "desktop-windows-x64"
 
@@ -797,6 +883,9 @@ class RaccoonProvider(
 
         /** 积分明细一次拉取的条数（官方客户端用 20）。 */
         const val POINTS_BILLS_LIMIT = 20
+
+        /** token 哈希 → 最近一次触发每日积分的日期（东八区），防止额度刷新时反复打上游。 */
+        private val grantTriggeredDay = java.util.concurrent.ConcurrentHashMap<String, String>()
 
         /** 伪装成官方桌面 Web 客户端的 UA（web 通道的调用方就是它）。 */
         const val CLIENT_UA =
