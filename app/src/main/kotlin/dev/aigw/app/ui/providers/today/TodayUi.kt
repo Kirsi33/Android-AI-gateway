@@ -157,6 +157,7 @@ object TodayUi : ProviderUi {
                         "https://todayai.cn/",
                         listOf("https://todayai.cn/", "https://www.todayai.cn/"),
                         "登录 Today",
+                        "",
                     )
                 },
                 modifier = Modifier.fillMaxWidth(),

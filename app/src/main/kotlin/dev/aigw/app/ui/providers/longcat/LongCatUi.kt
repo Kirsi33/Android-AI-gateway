@@ -86,6 +86,7 @@ object LongCatUi : ProviderUi {
                             "https://longcat.chat/",
                             listOf("https://longcat.chat/"),
                             "登录 LongCat",
+                            "",
                         )
                     },
                     modifier = Modifier.fillMaxWidth(),

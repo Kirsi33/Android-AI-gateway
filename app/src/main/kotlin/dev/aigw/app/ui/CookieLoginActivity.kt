@@ -43,6 +43,20 @@ class CookieLoginActivity : Activity() {
     private var successCookieName: String = ""
     /** 已经触发过自动确认，避免重复。 */
     private var autoConfirmed = false
+
+    /**
+     * 每 2 秒探一次关键 cookie：有些 Set-Cookie 由页面内 XHR 下发，
+     * 没有 URL 变化，onPageFinished 那条路径检不到——只能定时探。
+     */
+    private val cookieProbe = object : Runnable {
+        override fun run() {
+            if (isFinishing || autoConfirmed) return
+            if (successCookieName.isNotEmpty() && hasCookieNamed(successCookieName)) {
+                maybeAutoConfirm(web?.url.orEmpty())
+            }
+            web?.postDelayed(this, 2_000)
+        }
+    }
     /** 本次要读取 Cookie 的域名（保存下来给自动确认路径用）。 */
     private var pendingHosts: Array<String> = emptyArray()
 
