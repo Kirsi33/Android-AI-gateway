@@ -34,8 +34,8 @@ android {
         applicationId = "dev.aigw.app"
         minSdk = 26
         targetSdk = 36
-        versionCode = 196
-        versionName = "2.7.5"
+        versionCode = 197
+        versionName = "2.7.6"
     }
 
     buildFeatures {

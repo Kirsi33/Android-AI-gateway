@@ -298,6 +298,47 @@ class TraeProvider(
                 "Cookie 登录失败：${lastError?.message ?: "上游未返回 token"}（关键 Cookie：$important）",
             )
         }
+        // 直接粘贴 IDE 的 JWT（DevTools 里 Authorization: Cloud-IDE-JWT eyJ... 或裸串）：
+        // 其他反代（autumnsentiment/Trae2api-cn）的 manual 模式就是这条路，也是手机上最能拿到的凭证。
+        val bareJwt = raw.trim()
+            .removePrefix("Cloud-IDE-JWT").removePrefix("cloud-ide-jwt")
+            .removePrefix("Authorization:").removePrefix("Bearer").trim()
+            .takeIf { it.startsWith("eyJ") && it.count { c -> c == '.' } == 2 }
+        if (bareJwt != null) {
+            var lastError: Exception? = null
+            for (userRegion in listOf("US-East", "SG")) {
+                val seed = TraeAccount(
+                    uid = "",
+                    accessToken = bareJwt,
+                    refreshToken = "",
+                    expiresAt = 0L,
+                    nickname = "",
+                    enterpriseId = "",
+                    machineId = TraeLogin.newMachineId(),
+                    deviceId = TraeLogin.randomDeviceId(),
+                    domain = TraeRegion.INTL.id,
+                    apiHost = "",
+                    userRegion = userRegion,
+                )
+                try {
+                    var info = authClient(TraeRegion.INTL).getUserInfo(seed)
+                    if (info.uid.isEmpty()) {
+                        info = info.withIdentity(
+                            dev.aigw.core.util.jwtClaim(bareJwt, "user_id", "userId", "uid", "sub"),
+                            "",
+                            "",
+                        )
+                    }
+                    if (info.uid.isEmpty()) throw IllegalStateException("JWT 里没有 user_id")
+                    // 真正验证能不能调模型：这一步过了才算可用
+                    chatClient(TraeRegion.INTL, userRegion).fetchModels(info)
+                    return toProviderAccount(info)
+                } catch (e: Exception) {
+                    lastError = e
+                }
+            }
+            throw IllegalStateException("这个 JWT 用不了：${lastError?.message ?: "未知错误"}")
+        }
         var account = ensureDeviceIds(TraeAccount.parse(raw))
         val region = TraeRegion.infer(account.domain, account.apiHost)
         if (account.refreshToken.isNotEmpty()) account = authClient(region).exchangeToken(account)
