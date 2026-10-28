@@ -170,8 +170,7 @@ class CallLogStore(
         val updated = (daily[day] ?: UsageStats()) + record
         daily[day] = updated
         store.write(dayKeyOf(day), updated.toJson().toString())
-        recordDimension(dimTotal)
-            .plus(record)
+        dimTotal.plus(record)
         store.write(DIM_TOTAL_KEY, dimTotal.toJson().toString())
         val bucket = dimDaily.getOrPut(day) { DimensionBucket() }
         bucket.plus(record)
