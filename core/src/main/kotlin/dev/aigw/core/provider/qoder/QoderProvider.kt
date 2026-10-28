@@ -57,12 +57,12 @@ class QoderProvider(
 
     override fun listModels(account: ProviderAccount?): ProviderModelCatalogView {
         val parsed = account?.let { runCatching { QoderAccount.parse(it.secret) }.getOrNull() }
-            ?: return ProviderModelCatalogView(fallbackModels(), fromFallback = true)
+            ?: return ProviderModelCatalogView(fallbackModels(), fromFallback = true, error = "未选择账号")
         val realm = parsed.region
         val cached = catalogs[realm.id]
         val now = nowMillis()
         if (cached != null && now - cached.at < CATALOG_TTL_MS) {
-            return ProviderModelCatalogView(cached.models)
+            return ProviderModelCatalogView(cached.models, fromFallback = false, error = "")
         }
         val live = runCatching { auth.fetchModels(parsed) }.getOrNull()
         if (live.isNullOrEmpty()) {
@@ -79,7 +79,7 @@ class QoderProvider(
             )
         }
         catalogs[realm.id] = CatalogEntry(now, models)
-        return ProviderModelCatalogView(models)
+        return ProviderModelCatalogView(models, fromFallback = false, error = "")
     }
 
     override fun invalidateModelCache() {
@@ -156,7 +156,7 @@ class QoderProvider(
      * 每日签到。
      *
      * 顺序：先查状态（该区可能没有这个接口）→ 未签再领 → 领完复查。
-     * 国际版 `/sash/api/v1/me/daily-check-in/*` 历史上返回 404（活动改走 campaign 平台），
+     * 国际版 `/sash/api/v1/me/daily-check-in/` 下的接口历史上返回 404（活动改走 campaign 平台），
      * 这种情况如实说「该区没有签到接口」，不要报成「已签到」。
      */
     private fun checkin(account: ProviderAccount): ProviderActionResult {
