@@ -23,6 +23,13 @@ data class TraeAccount(
     val domain: String = TraeConstants.REGION_CN,
     /** 鉴权 host；空串时由 [TraeAuthClient] 按区域补上该区域的 OAuth host。 */
     val apiHost: String = "",
+    /**
+     * 账号所在区（`US-East` / `SG` / `CN`，来自凭证的 `region` 字段）。
+     *
+     * 国际版还分新加坡与美区两个部署，host 完全不同——只按「国际版」一个粒度取 host，
+     * 美区账号会全部打到新加坡，得到一个 404。
+     */
+    val userRegion: String = "",
 ) {
     fun needsRefresh(withinSeconds: Long, nowSeconds: Long): Boolean =
         expiresAt <= 0L || nowSeconds + withinSeconds >= expiresAt
@@ -41,6 +48,7 @@ data class TraeAccount(
     fun toJson(): JsonObject {
         val auth = JsonObject().apply {
             addProperty("accessToken", accessToken)
+            if (userRegion.isNotEmpty()) addProperty("userRegion", userRegion)
             addProperty("refreshToken", refreshToken)
             addProperty("expiresAt", expiresAt)
             addProperty("domain", domain)
@@ -98,8 +106,13 @@ data class TraeAccount(
                 enterpriseId = account.str("enterpriseId"),
                 machineId = auth.str("machineId"),
                 deviceId = auth.str("deviceId"),
-                domain = auth.str("domain").ifEmpty { TraeConstants.REGION_CN },
-                apiHost = auth.str("apiHost"),
+                // 浏览器抓包导出的凭证里 host 叫 apiBase（如 https://ug-normal.us.trae.ai），
+                // 官方客户端配置里叫 apiHost，两个都认。
+                domain = auth.str("domain")
+                    .ifEmpty { auth.str("region") }
+                    .ifEmpty { TraeConstants.REGION_CN },
+                apiHost = auth.str("apiHost").ifEmpty { auth.str("apiBase") },
+                userRegion = auth.str("userRegion").ifEmpty { auth.str("region") },
             )
         }
     }

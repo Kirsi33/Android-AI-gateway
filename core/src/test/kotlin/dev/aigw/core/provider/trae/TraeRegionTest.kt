@@ -95,6 +95,31 @@ class TraeRegionTest {
         )
     }
 
+    @Test
+    fun `美区凭证按 apiBase 与 region 解析到美区 host`() {
+        // 浏览器导出的国际版凭证形状：扁平结构 + apiBase + region=US-East
+        val raw = """
+            {"accessToken":"a.b.c","tokenType":"Bearer","userID":"7698408278820537358",
+             "tenantID":"7o2d894p7dr0o4","region":"US-East",
+             "apiBase":"https://ug-normal.us.trae.ai","isLoggedIn":true}
+        """.trimIndent()
+        val account = TraeAccount.parse(raw)
+        assertEquals("https://ug-normal.us.trae.ai", account.apiHost)
+        assertEquals("US-East", account.userRegion)
+
+        // 区域判为国际版，且 host 解析到美区（chat 在 coreva、ug/auth 在 us 子域）
+        assertEquals(TraeRegion.INTL, TraeRegion.infer(account.domain, account.apiHost))
+        val hosts = TraeUpstream.of(TraeRegion.INTL, account.userRegion)
+        assertEquals("https://coreva-normal.trae.ai", hosts.chatHost)
+        assertEquals("https://ug-normal.us.trae.ai", hosts.ugHost)
+        assertEquals("https://ug-normal.us.trae.ai", hosts.authHost)
+
+        // 没有 region 的国际版账号走新加坡
+        val sg = TraeUpstream.of(TraeRegion.INTL, "")
+        assertEquals("https://coresg-normal.trae.ai", sg.chatHost)
+        assertEquals("https://growsg-normal.trae.ai", sg.authHost)
+    }
+
     private fun accountWith(apiHost: String): ProviderAccount {
         val secret = """
             {"auth":{"accessToken":"at","refreshToken":"rt","expiresAt":0,"apiHost":"$apiHost",

@@ -78,9 +78,51 @@ enum class TraeRegion(
             return if (values.any {
                     val v = it.lowercase()
                     v.contains("trae.ai") || v.contains("growsg") || v.contains("coresg") ||
-                        v.contains("coreva") || v.contains("trae-api-sg")
+                        v.contains("coreva") || v.contains("trae-api-sg") ||
+                        v.contains("ug-normal.us") || v == "us-east" || v == "us"
                 }
             ) INTL else CN
+        }
+    }
+}
+
+/**
+ * 一个账号实际要打的三个上游 host。
+ *
+ * 国际版不是「一个区域」，而是**新加坡 / 美区两套部署**（凭证里的 `region: US-East`），
+ * chat、ug、auth 的域名各不相同。只按「国内/国际」两个粒度取 host，会让美区账号
+ * 全部打到新加坡，得到 404——用户看到的「上游接口不存在」就是这么来的。
+ */
+data class TraeUpstream(
+    val chatHost: String,
+    val ugHost: String,
+    val authHost: String,
+) {
+    companion object {
+        /** 美区的 ug/auth 都在 us 子域；chat 在 coreva。 */
+        private val US = TraeUpstream(
+            chatHost = "https://coreva-normal.trae.ai",
+            ugHost = "https://ug-normal.us.trae.ai",
+            authHost = "https://ug-normal.us.trae.ai",
+        )
+
+        private val SG = TraeUpstream(
+            chatHost = "https://coresg-normal.trae.ai",
+            ugHost = "https://ug-normal.trae.ai",
+            authHost = "https://growsg-normal.trae.ai",
+        )
+
+        private val CN = TraeUpstream(
+            chatHost = "https://trae-api-cn.mchost.guru",
+            ugHost = "https://api.trae.cn",
+            authHost = "https://api.trae.cn",
+        )
+
+        /** 按区域 + 账号区解析；[TraeRegion.INTL] 内部再分美区/新加坡。 */
+        fun of(region: TraeRegion, userRegion: String): TraeUpstream {
+            if (region == TraeRegion.CN) return CN
+            val code = userRegion.trim().uppercase()
+            return if (code.startsWith("US") || code.startsWith("VA") || code.contains("US-")) US else SG
         }
     }
 }

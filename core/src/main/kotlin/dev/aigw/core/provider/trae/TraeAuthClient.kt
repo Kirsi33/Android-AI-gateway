@@ -22,6 +22,7 @@ class TraeAuthClient(private val version: TraeVersion) {
      */
     internal fun authHost(account: TraeAccount): String {
         val region = TraeRegion.infer(account.domain, account.apiHost)
+        val resolved = TraeUpstream.of(region, account.userRegion).authHost
         val host = account.apiHost.trim()
         // 自定义代理 host（非官方域名）优先，原样用
         val official = host.isEmpty() ||
@@ -29,10 +30,10 @@ class TraeAuthClient(private val version: TraeVersion) {
                 .any { host.contains(it) }
         if (!official) return host
         // 官方 host 一律按区域重算：
-        //  - 国际版 auth 统一在 growsg-normal.trae.ai（美区也走它），
+        //  - 国际版：新加坡 auth=growsg-normal，美区 auth=ug-normal.us（凭证 region 决定）；
         //    存量凭证里的 api.trae.ai / 国内 api 都是错的，留着就会 404/401；
         //  - 国内版缺省 api.trae.cn。
-        return region.oauthHost
+        return resolved
     }
 
     /** refreshToken → 新 accessToken，并轮换 refreshToken。 */

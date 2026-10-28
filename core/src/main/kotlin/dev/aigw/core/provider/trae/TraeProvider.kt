@@ -53,19 +53,18 @@ class TraeProvider(
     // 国内 / 国际两套客户端：上游 host 不同（trae.cn vs trae.ai），按账号区域取用。
     // 网关多线程并发调用 openChat/listModels，reconfigure() 也会并发 clear()，
     // 故必须用 ConcurrentHashMap（普通 HashMap 并发读写会死循环/丢数据）。
-    private val chatClients = ConcurrentHashMap<TraeRegion, TraeChatClient>()
+    // 缓存键一律用 **host** 而不是区域枚举：国际版还分新加坡/美区两套域名，
+    // 用区域当键会让两套账号共用一个 client（后建的那个覆盖先建的 host）。
+    private val chatClients = ConcurrentHashMap<String, TraeChatClient>()
     private val authClients = ConcurrentHashMap<TraeRegion, TraeAuthClient>()
-    private val checkinClients = ConcurrentHashMap<TraeRegion, TraeCheckinClient>()
-    private val catalogs = ConcurrentHashMap<TraeRegion, TraeModelCatalog>()
+    private val checkinClients = ConcurrentHashMap<String, TraeCheckinClient>()
+    private val catalogs = ConcurrentHashMap<String, TraeModelCatalog>()
 
-    private fun chatClient(region: TraeRegion): TraeChatClient =
-        chatClients.computeIfAbsent(region) { TraeChatClient(version(), region.agentHost) }
+    private fun chatClient(region: TraeRegion, userRegion: String = ""): TraeChatClient {
+        val host = TraeUpstream.of(region, userRegion).chatHost
+        return chatClients.computeIfAbsent(host) { TraeChatClient(version(), host) }
+    }
 
-    /** 国际版美区部署（coreva）。仅在新加坡 host 返回 404 时兜底使用。 */
-    private val usChatClients = ConcurrentHashMap<TraeRegion, TraeChatClient>()
-
-    private fun usChatClient(region: TraeRegion): TraeChatClient =
-        usChatClients.computeIfAbsent(region) { TraeChatClient(version(), US_AGENT_HOST) }
 
     // TraeAuthClient 读取账号自身的 apiHost，不按区域分实例
     private val authClientSingleton: TraeAuthClient get() = authClients.computeIfAbsent(TraeRegion.CN) { TraeAuthClient(version()) }
@@ -73,16 +72,19 @@ class TraeProvider(
     @Suppress("UNUSED_PARAMETER")
     private fun authClient(region: TraeRegion): TraeAuthClient = authClientSingleton
 
-    private fun checkinClient(region: TraeRegion): TraeCheckinClient =
-        checkinClients.computeIfAbsent(region) { TraeCheckinClient(version(), region.ugHost, region) }
+    private fun checkinClient(region: TraeRegion, userRegion: String = ""): TraeCheckinClient {
+        val host = TraeUpstream.of(region, userRegion).ugHost
+        return checkinClients.computeIfAbsent(host) { TraeCheckinClient(version(), host, region) }
+    }
 
-    private fun catalog(region: TraeRegion): TraeModelCatalog =
-        catalogs.computeIfAbsent(region) { TraeModelCatalog(chatClient(region), nowMillis) }
+    private fun catalog(region: TraeRegion, userRegion: String = ""): TraeModelCatalog {
+        val host = TraeUpstream.of(region, userRegion).chatHost
+        return catalogs.computeIfAbsent(host) { TraeModelCatalog(chatClient(region, userRegion), nowMillis) }
+    }
 
     /** 客户端版本号变更后重建各客户端，并让模型目录缓存失效。 */
     fun reconfigure() {
         chatClients.clear()
-        usChatClients.clear()
         authClients.clear()
         checkinClients.clear()
         catalogs.clear()
@@ -112,7 +114,7 @@ class TraeProvider(
     override fun listModels(account: ProviderAccount?): ProviderModelCatalogView {
         val trae = account?.let { parseOrNull(it) }
         val region = regionOfAccount(account)
-        val catalog = catalog(region)
+        val catalog = catalog(region, trae?.userRegion.orEmpty())
         val models = catalog.models(trae)
         return ProviderModelCatalogView(
             models = models.map { model ->
@@ -159,7 +161,13 @@ class TraeProvider(
      */
     override fun hosts(): List<String> =
         TraeRegion.entries
-            .flatMap { listOf(it.agentHost, it.ugHost, it.oauthHost) }
+            .flatMap { region ->
+                // 国际版有新加坡/美区两套 host，两个都要列（代理分流漏掉一个就会绕过开关）
+                listOf("", "US-East").flatMap { userRegion ->
+                    val up = TraeUpstream.of(region, userRegion)
+                    listOf(up.chatHost, up.ugHost, up.authHost)
+                }
+            }
             .map { it.removePrefix("https://") }
             .distinct()
 
@@ -182,20 +190,9 @@ class TraeProvider(
         val model = resolveModel(requestedModelOf(openAiBody))
         val region = regionOfAccount(account)
         val call = try {
-            chatClient(region).openStream(trae, openAiBody)
+            chatClient(region, trae.userRegion).openStream(trae, openAiBody)
         } catch (e: TraeHttpException) {
-            // 国际版有两个部署：新加坡 coresg / 美国 coreva。账号所在区决定哪个能答，
-            // 而我们只能从 token 里看 region，拿不到就默认 sg。这里用 404/连接失败做兜底切换：
-            // 换错区的表现正是 404（TLB 无路由），换对就正常。
-            if (region == TraeRegion.INTL && e.status == 404) {
-                try {
-                    usChatClient(region).openStream(trae, openAiBody)
-                } catch (retry: TraeHttpException) {
-                    return FailedChatCall(retry.status, retry.body)
-                }
-            } else {
-                return FailedChatCall(e.status, e.body)
-            }
+            return FailedChatCall(e.status, e.body)
         }
         if (call.status >= 400) return FailedChatCall(call.status, call.errorBody)
         // 上游 200 但没回 SSE（签名失效时常直接回 JSON 错误体）：errorBody 已带诊断信息
@@ -317,7 +314,7 @@ class TraeProvider(
     override fun creditInfo(account: ProviderAccount): CreditInfo? {
         val trae = parseOrNull(account) ?: return null
         return try {
-            val usage = checkinClient(regionOfAccount(account)).entUsage(trae)
+            val usage = checkinClient(regionOfAccount(account), trae.userRegion).entUsage(trae)
             // 命中权益包列表还不够：包内字段缺失时 limit/remain 都是 0，报 known=true 就成了「额度真是 0」
             if (usage.parsed && usage.limit > 0) {
                 CreditInfo(usage.remain, known = true, detail = "权益包剩余 ${usage.remain} / ${usage.limit}")
@@ -352,7 +349,7 @@ class TraeProvider(
     override fun creditPacks(account: ProviderAccount): List<QuotaPack> {
         val trae = parseOrNull(account) ?: return emptyList()
         return try {
-            checkinClient(regionOfAccount(account)).entUsage(trae).details.map {
+            checkinClient(regionOfAccount(account), trae.userRegion).entUsage(trae).details.map {
                 QuotaPack(
                     name = it.name,
                     group = it.group,
@@ -374,7 +371,7 @@ class TraeProvider(
     private fun checkin(account: ProviderAccount): ProviderActionResult {
         val trae = parseOrNull(account) ?: return ProviderActionResult.failure("账号凭证无法解析")
         return try {
-            val status = checkinClient(regionOfAccount(account)).status(trae)
+            val status = checkinClient(regionOfAccount(account), trae.userRegion).status(trae)
             if (status.checkedIn) return ProviderActionResult.success("今日已签到")
             val outcome = claimWithRetry(trae)
             if (outcome == ClaimOutcome.ALREADY_CHECKED_IN) {
@@ -390,11 +387,11 @@ class TraeProvider(
     }
 
     private fun claimWithRetry(account: TraeAccount): ClaimOutcome = try {
-        checkinClient(regionOfAccount(account)).claim(account)
+        checkinClient(regionOfAccount(account), parseOrNull(account)?.userRegion.orEmpty()).claim(account)
     } catch (e: TraeHttpException) {
         if (e.upstreamCode != CHECKIN_BUSY_CODE) throw e
         Thread.sleep(CHECKIN_RETRY_DELAY_MS)
-        checkinClient(regionOfAccount(account)).claim(account)
+        checkinClient(regionOfAccount(account), parseOrNull(account)?.userRegion.orEmpty()).claim(account)
     }
 
     // ------------------------------------------------------------------ 登录
@@ -510,9 +507,6 @@ class TraeProvider(
 
         /** 「签到」这个 provider 专属动作的名字，UI 组件与 provider 约定一致。 */
         const val ACTION_CHECKIN = dev.aigw.core.provider.ACTION_CHECKIN
-
-        /** 国际版美区 chat 部署（auth 仍走新加坡 growsg）。 */
-        private const val US_AGENT_HOST = "https://coreva-normal.trae.ai"
 
         private const val MAX_PENDING = 40
         private const val CHECKIN_BUSY_CODE = 9074L
