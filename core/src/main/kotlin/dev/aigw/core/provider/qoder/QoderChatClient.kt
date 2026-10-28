@@ -38,7 +38,10 @@ class QoderChatClient(
         val request = runCatching { JsonParser.parseString(openAiBody).asJsonObject }
             .getOrElse { return FailedChatCall(400, "请求体不是合法 JSON") }
         val modelKey = request.stringOrNull("model").orEmpty().ifEmpty { "pro" }
-        val body = buildBody(modelKey, request)
+        val json = buildBody(modelKey, request)
+        // **body 必须过自定义 base64（URL 上的 Encode=1）**：上游期望的是编码后的
+        // 字符串，直接发原始 JSON 会被 400 拒。签名里用的也是编码后的 body。
+        val body = Cosy.encode(json)
 
         val session = sessionProvider(account)
         val payloadB64 = Cosy.buildPayloadB64(session.info, QoderConstants.COSY_VERSION)

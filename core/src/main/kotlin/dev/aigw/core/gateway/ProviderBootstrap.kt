@@ -6,6 +6,7 @@ import dev.aigw.core.provider.codebuddy.CodeBuddyProvider
 import dev.aigw.core.provider.loomy.LoomyProvider
 import dev.aigw.core.provider.longcat.LongCatProvider
 import dev.aigw.core.provider.qoder.QoderProvider
+import dev.aigw.core.provider.qwenwork.QwenProvider
 import dev.aigw.core.provider.raccoon.RaccoonProvider
 import dev.aigw.core.provider.today.TodayProvider
 import dev.aigw.core.provider.trae.TraeConstants
@@ -70,6 +71,12 @@ internal fun registerBuiltinProviders(engine: GatewayEngine) {
 
     registry.register(
         LongCatProvider(
+            nowMillis = { engine.now() },
+        ),
+    )
+
+    registry.register(
+        QwenProvider(
             nowMillis = { engine.now() },
         ),
     )
