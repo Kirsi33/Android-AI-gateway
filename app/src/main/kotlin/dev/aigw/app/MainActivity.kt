@@ -102,6 +102,12 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onResume() {
+        super.onResume()
+        // 从浏览器做完设备授权回来：轮询在引擎线程里可能已经成功，这里补一次刷新
+        viewModel?.checkPendingDeviceLogin()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)

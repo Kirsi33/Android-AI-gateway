@@ -80,10 +80,18 @@ object DumateUi : ProviderUi {
                 onClick = {
                     actions.onCookieLogin(
                         id,
-                        DumateConstants.WEB_BASE + "/app",
-                        // 登录发生在 passport.baidu.com，会话 cookie 在 .baidu.com 域；
-                        // 只收 dumate.cn 会拿到空串（「取不到 cookie」就是这么来的）
-                        listOf("www.dumate.cn", "dumate.cn", "passport.baidu.com", "baidu.com", ".baidu.com"),
+                        // 实际站点是 dumate.baidu.com：打开 www.dumate.cn/app 会 302 过去，
+                        // 而 cookie 落在 .baidu.com 域。直接开目标域名，少一次跳转。
+                        "https://dumate.baidu.com/app",
+                        // 会话 cookie 在 dumate.baidu.com / .baidu.com；只收 dumate.cn 必然拿到空串
+                        listOf(
+                            "dumate.baidu.com",
+                            "baidu.com",
+                            ".baidu.com",
+                            "passport.baidu.com",
+                            "www.dumate.cn",
+                            "dumate.cn",
+                        ),
                         "登录百度搭子",
                     )
                 },
@@ -92,7 +100,9 @@ object DumateUi : ProviderUi {
                 Text("在 App 内登录（取 Cookie）")
             }
             Text(
-                text = "登录完成后自动取回 cookie。也可以从浏览器复制 cookie 粘贴导入。",
+                text = "登录完成后自动取回 cookie。页面上若弹出 console.bce.baidu.com 的" +
+                    "「网页无法打开」，那是站内嵌的控制台被浏览器拦了，不影响登录，关掉即可。" +
+                    "也可以从浏览器复制 cookie 粘贴导入。",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

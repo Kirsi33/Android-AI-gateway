@@ -952,27 +952,52 @@ class AppViewModel(
      * 设备授权（WorkBuddy）：浏览器里登录完成后轮询换取 token，最长 5 分钟。
      */
     fun pollDeviceLogin(providerId: String, state: String, region: String = "") {
+        // 轮询交给引擎线程：用户去浏览器登录时 App 常被重建，viewModelScope 一没就断，
+        // 表现就是「登录成功但网关抓不到」。这里只负责启动与回报。
+        engine.startDeviceAuthPolling(providerId, state, region)
         viewModelScope.launch {
-            _state.value = _state.value.copy(busy = "等待授权完成")
-            val deadline = System.currentTimeMillis() + 5 * 60 * 1000
-            var message = "授权超时，请重试"
+            _state.value = _state.value.copy(busy = "等待授权完成，可切到浏览器登录")
+            val deadline = System.currentTimeMillis() + 6 * 60 * 1000
             while (System.currentTimeMillis() < deadline) {
-                val poll = withContext(Dispatchers.IO) { engine.pollDeviceAuth(providerId, state, region) }
-                when (poll) {
-                    is DeviceAuthPoll.Pending -> delay(3_000)
+                when (val poll = engine.deviceLoginStatus()) {
+                    null -> delay(2_000)
+                    is DeviceAuthPoll.Pending -> delay(2_000)
                     is DeviceAuthPoll.Success -> {
-                        _state.value = _state.value.copy(busy = "", notice = "登录成功：${poll.account.nickname.ifEmpty { poll.account.uid }}")
+                        _state.value = _state.value.copy(
+                            busy = "",
+                            notice = "登录成功：${poll.account.nickname.ifEmpty { poll.account.uid }}",
+                        )
                         refresh()
                         return@launch
                     }
                     is DeviceAuthPoll.Failed -> {
-                        message = poll.error
-                        break
+                        _state.value = _state.value.copy(busy = "", notice = poll.error)
+                        return@launch
                     }
                 }
             }
-            _state.value = _state.value.copy(busy = "", notice = message)
+            _state.value = _state.value.copy(busy = "")
             refresh()
+        }
+    }
+
+    /**
+     * 回到前台时补一次检查：设备授权可能在 App 被重建期间完成了。
+     *
+     * 轮询跑在引擎线程里，结果放在 engine.deviceLoginStatus()；UI 重建后没人读它，
+     * 用户就会觉得「登录成功了但网关没反应」。这里消费掉并刷新。
+     */
+    fun checkPendingDeviceLogin() {
+        when (val status = engine.deviceLoginStatus()) {
+            is DeviceAuthPoll.Success -> {
+                engine.clearDeviceLoginStatus()
+                refresh()
+            }
+            is DeviceAuthPoll.Failed -> {
+                engine.clearDeviceLoginStatus()
+                _state.value = _state.value.copy(notice = status.error)
+            }
+            else -> Unit
         }
     }
 

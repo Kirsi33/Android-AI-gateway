@@ -255,6 +255,29 @@ class GatewayEngine(
     internal fun schedulerExecutor(): ScheduledExecutorService = scheduler
 
     /** 对话成功后的额度补刷新：没有流内计费回报的供应商（如 Loomy）靠它让池里的数字跟上消耗。 */
+    /**
+     * 设备授权轮询跑在引擎线程里，**不放在 ViewModel 的协程**。
+     *
+     * 原因：设备授权要跳系统浏览器，用户回到 App 时 Activity 常被重建——
+     * viewModelScope 一没，轮询就断，表现是「登录成功但网关抓不到」。
+     * 引擎的生命周期跟着进程走，只要 App 没被杀，轮询就能一直跑到出结果。
+     */
+    private val deviceLoginPoller = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "device-login").apply { isDaemon = true }
+    }
+
+    /** 最近一次设备授权的结果（UI 回来时读它，而不是自己等）。 */
+    @Volatile
+    private var deviceLoginStatus: DeviceAuthPoll? = null
+
+    /** 让 UI 读最近的授权结果；还没开始时为 null。 */
+    fun deviceLoginStatus(): DeviceAuthPoll? = deviceLoginStatus
+
+    /** UI 消费完结果后清掉，避免重复提示。 */
+    fun clearDeviceLoginStatus() {
+        deviceLoginStatus = null
+    }
+
     private val creditRefresher = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "credit-refresh").apply { isDaemon = true }
     }
@@ -1046,6 +1069,40 @@ class GatewayEngine(
         val support = registry.get(providerId) as? DeviceCodeSupport
             ?: throw IllegalStateException("该供应商不支持设备授权登录")
         return support.startDeviceAuth(region)
+    }
+
+    /**
+     * 在引擎线程里跑设备授权轮询，直到成功 / 失败 / 超时。
+     *
+     * UI 只需调用一次然后离开——用户去浏览器登录、回来时 Activity 重建也不影响，
+     * 账号会直接进池，界面刷新就能看到。结果同时存在 [deviceLoginStatus] 里供回来时读取。
+     */
+    fun startDeviceAuthPolling(
+        providerId: String,
+        state: String,
+        region: String = "",
+        timeoutMs: Long = 5 * 60 * 1000,
+    ) {
+        deviceLoginStatus = null
+        deviceLoginPoller.submit {
+            val deadline = System.currentTimeMillis() + timeoutMs
+            var last: DeviceAuthPoll = DeviceAuthPoll.Pending
+            while (System.currentTimeMillis() < deadline) {
+                last = try {
+                    pollDeviceAuth(providerId, state, region)
+                } catch (e: Exception) {
+                    DeviceAuthPoll.Failed(e.message ?: "轮询失败")
+                }
+                when (last) {
+                    is DeviceAuthPoll.Success, is DeviceAuthPoll.Failed -> {
+                        deviceLoginStatus = last
+                        return@submit
+                    }
+                    is DeviceAuthPoll.Pending -> Thread.sleep(3_000)
+                }
+            }
+            deviceLoginStatus = DeviceAuthPoll.Failed("授权超时（5 分钟），请重新发起")
+        }
     }
 
     fun pollDeviceAuth(providerId: String, state: String, region: String = ""): DeviceAuthPoll {
