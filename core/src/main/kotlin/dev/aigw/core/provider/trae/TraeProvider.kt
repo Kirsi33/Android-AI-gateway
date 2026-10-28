@@ -387,11 +387,11 @@ class TraeProvider(
     }
 
     private fun claimWithRetry(account: TraeAccount): ClaimOutcome = try {
-        checkinClient(regionOfAccount(account), parseOrNull(account)?.userRegion.orEmpty()).claim(account)
+        checkinClient(regionOfAccount(account), account.userRegion).claim(account)
     } catch (e: TraeHttpException) {
         if (e.upstreamCode != CHECKIN_BUSY_CODE) throw e
         Thread.sleep(CHECKIN_RETRY_DELAY_MS)
-        checkinClient(regionOfAccount(account), parseOrNull(account)?.userRegion.orEmpty()).claim(account)
+        checkinClient(regionOfAccount(account), account.userRegion).claim(account)
     }
 
     // ------------------------------------------------------------------ 登录
