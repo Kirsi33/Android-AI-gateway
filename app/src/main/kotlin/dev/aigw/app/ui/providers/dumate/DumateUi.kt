@@ -78,12 +78,13 @@ object DumateUi : ProviderUi {
             }
             Button(
                 onClick = {
-                    actions.onCookieLogin(
+                    // **必须用桌面 UA**：Android WebView 的 UA 带 `; wv` 标记，
+                    // 百度 passport 对它走另一条分支——BDUSS 能种上、bce 系会话
+                    // cookie 却永远不种（实测三轮：2.8.6/2.8.8/2.8.9 全败于此）。
+                    // Minis 浏览器（桌面 Linux Chrome UA）登录一次成功，佐证 UA 是分水岭。
+                    actions.onDesktopCookieLogin(
                         id,
-                        // 实际站点是 dumate.baidu.com：打开 www.dumate.cn/app 会 302 过去，
-                        // 而 cookie 落在 .baidu.com 域。直接开目标域名，少一次跳转。
                         "https://dumate.baidu.com/app",
-                        // 会话 cookie 在 dumate.baidu.com / .baidu.com；只收 dumate.cn 必然拿到空串
                         listOf(
                             "dumate.baidu.com",
                             "baidu.com",
