@@ -6,6 +6,9 @@ import dev.aigw.core.provider.ACTION_CHECKIN
 import dev.aigw.core.provider.AuthKind
 import dev.aigw.core.provider.ChatCall
 import dev.aigw.core.provider.CreditInfo
+import dev.aigw.core.provider.DeviceAuthPoll
+import dev.aigw.core.provider.DeviceAuthTicket
+import dev.aigw.core.provider.DeviceCodeSupport
 import dev.aigw.core.provider.ErrorKind
 import dev.aigw.core.provider.FailedChatCall
 import dev.aigw.core.provider.Provider
@@ -34,7 +37,7 @@ import java.util.concurrent.ConcurrentHashMap
  */
 class QoderProvider(
     private val nowMillis: () -> Long = { System.currentTimeMillis() },
-) : Provider {
+) : Provider, DeviceCodeSupport {
 
     private val auth = QoderAuthClient()
 
@@ -42,6 +45,9 @@ class QoderProvider(
     private data class SessionEntry(val tokenHash: Int, val session: QoderChatClient.CosySession)
 
     private val sessions = ConcurrentHashMap<String, SessionEntry>()
+
+    /** 进行中的设备授权（state → 票据）。轮询要用它取 verifier/nonce。 */
+    private val pendingAuth = ConcurrentHashMap<String, QoderLoginTicket>()
 
     /** 区域 → 模型目录缓存（按区域隔离，两个区的模型集不同）。 */
     private data class CatalogEntry(val at: Long, val models: List<ProviderModel>)
@@ -174,6 +180,45 @@ class QoderProvider(
     }
 
     // ------------------------------------------------------------------ 其它
+
+    // ------------------------------------------------------------------ 设备授权登录
+
+    /**
+     * 开始设备授权：生成 PKCE 票据，返回授权页 URL 与本地 state。
+     *
+     * 用户在弹出的浏览器里完成登录后，上层按 [pollDeviceAuth] 轮询换取凭证。
+     * `region` 传 `cn` / `global`，决定 client_id 与授权页域名。
+     */
+    override fun startDeviceAuth(region: String): DeviceAuthTicket {
+        val realm = QoderRealm.of(region.ifEmpty { QoderRealm.CN.id })
+        val ticket = auth.beginLogin(realm)
+        pendingAuth[ticket.state] = ticket
+        return DeviceAuthTicket(ticket.authUrl, ticket.state)
+    }
+
+    override fun pollDeviceAuth(state: String, region: String): DeviceAuthPoll {
+        val ticket = pendingAuth[state]
+            ?: return DeviceAuthPoll.Failed("授权会话不存在或已过期，请重新开始")
+        return when (val result = auth.poll(ticket)) {
+            // 404/202 = 用户还没点完，继续等——最容易写错的一步
+            is QoderPollResult.Pending -> DeviceAuthPoll.Pending
+            is QoderPollResult.Expired -> {
+                pendingAuth.remove(state)
+                DeviceAuthPoll.Failed("授权超时（10 分钟），请重新开始")
+            }
+            is QoderPollResult.Failure -> {
+                pendingAuth.remove(state)
+                DeviceAuthPoll.Failed(result.message)
+            }
+            is QoderPollResult.Success -> {
+                pendingAuth.remove(state)
+                DeviceAuthPoll.Success(toProviderAccount(result.account))
+            }
+        }
+    }
+
+    private fun toProviderAccount(account: QoderAccount): ProviderAccount =
+        ProviderAccount(id, account.uid, account.nickname, account.toJson().toString())
 
     override fun importCredentials(raw: String): ProviderAccount? {
         val text = raw.trim()
