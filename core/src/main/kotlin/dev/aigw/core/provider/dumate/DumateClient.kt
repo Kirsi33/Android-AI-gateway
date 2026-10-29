@@ -35,7 +35,18 @@ object DumateConstants {
     const val PATH_USER_INFO = "/api/dumate/user/info"
     const val PATH_LOGIN_BONUS_INFO = "/api/dumate/points/loginBonusInfo"
     const val PATH_LOGIN_BONUS = "/api/dumate/points/loginBonus"
-    const val PATH_QUOTA = "/api/dumate/points/quota_overview?clientType=desktop&timezone=Asia%2FShanghai"
+    const val PATH_QUOTA =
+        "/api/dumate/points/quota_overview?timezone=Asia%2FShanghai&clientType=desktop&ignoreLoginBonus=true"
+
+    /**
+     * 积分/签到接口跑在**百度云控制台域**，不在 dumate 域。
+     *
+     * 三份独立参考实现（Minatoxiaohu/dumate_signin.py、mcvea/AIAutomator 的 dumate.toml、
+     * dumate2api 的 dumate-web.js）都是 console.bce.baidu.com——登录态本来就挂在
+     * console 域上，dumate 域的接口只是给网页前端用的另一套。
+     * 鉴权头也要跟着换：csrftoken = bce-user-info 这个 cookie 的值（去掉引号）。
+     */
+    const val CONSOLE_BASE = "https://console.bce.baidu.com"
     const val PATH_GROWTH_TASKS = "/api/dumate/activity/growth-plan/tasks"
 
     /** cookie 换对话 token。 */
@@ -197,10 +208,10 @@ class DumateClient {
     /** 今日签到状态：true=已签，null=查不到。 */
     fun loginBonusInfo(account: DumateAccount): Boolean? {
         val (status, body) = request(
-            url = DumateConstants.WEB_BASE + DumateConstants.PATH_LOGIN_BONUS_INFO,
+            url = DumateConstants.CONSOLE_BASE + DumateConstants.PATH_LOGIN_BONUS_INFO,
             method = "GET",
             body = null,
-            headers = webHeaders(account),
+            headers = consoleHeaders(account),
         )
         if (status !in 200..299) return null
         val root = runCatching { JsonParser.parseString(body).asJsonObject }.getOrNull() ?: return null
@@ -217,10 +228,10 @@ class DumateClient {
     /** 领每日登录奖励（签到）。 */
     fun claimLoginBonus(account: DumateAccount): Pair<Boolean, String> {
         val (status, body) = request(
-            url = DumateConstants.WEB_BASE + DumateConstants.PATH_LOGIN_BONUS,
+            url = DumateConstants.CONSOLE_BASE + DumateConstants.PATH_LOGIN_BONUS,
             method = "POST",
             body = "{}",
-            headers = webHeaders(account) + mapOf("Content-Type" to "application/json"),
+            headers = consoleHeaders(account) + mapOf("Content-Type" to "application/json"),
         )
         val root = runCatching { JsonParser.parseString(body).asJsonObject }.getOrNull()
         val message = root?.stringOrNull("message").orEmpty()
@@ -247,10 +258,10 @@ class DumateClient {
     /** 额度总览。 */
     fun quota(account: DumateAccount): DumateQuota {
         val (status, body) = request(
-            url = DumateConstants.WEB_BASE + DumateConstants.PATH_QUOTA,
+            url = DumateConstants.CONSOLE_BASE + DumateConstants.PATH_QUOTA,
             method = "GET",
             body = null,
-            headers = webHeaders(account),
+            headers = consoleHeaders(account),
         )
         if (status !in 200..299) throw IllegalStateException("查询额度失败：HTTP $status ${body.take(120)}")
         val root = runCatching { JsonParser.parseString(body).asJsonObject }.getOrNull()
@@ -269,6 +280,37 @@ class DumateClient {
     }
 
     // ------------------------------------------------------------------ 工具
+
+    /**
+     * 控制台域请求头。
+     *
+     * `csrftoken` 是百度云控制台的防 CSRF 头，值直接取 `bce-user-info` 这个 cookie
+     * （三份参考实现都这么干；缺了它签到接口回 403/401）。cookie 里可能带引号，要去掉。
+     */
+    private fun consoleHeaders(account: DumateAccount): Map<String, String> {
+        val base = mapOf(
+            "Cookie" to account.cookie,
+            "Accept" to "application/json, text/plain, */*",
+            "Accept-Language" to "zh-CN,zh;q=0.9",
+            "X-Requested-With" to "XMLHttpRequest",
+            "Origin" to DumateConstants.CONSOLE_BASE,
+            "Referer" to DumateConstants.CONSOLE_BASE + "/",
+            "User-Agent" to WEB_UA,
+        )
+        val csrf = csrfTokenOf(account.cookie)
+        return if (csrf.isEmpty()) base else base + mapOf("csrftoken" to csrf)
+    }
+
+    /** 从 cookie 串里取 `bce-user-info` 的值当 csrftoken。 */
+    private fun csrfTokenOf(cookie: String): String {
+        for (pair in cookie.split(';')) {
+            val trimmed = pair.trim()
+            if (!trimmed.startsWith("bce-user-info=")) continue
+            val value = trimmed.substringAfter('=').trim()
+            return value.trim('"').trim('\'')
+        }
+        return ""
+    }
 
     private fun webHeaders(account: DumateAccount): Map<String, String> = mapOf(
         "Cookie" to account.cookie,
