@@ -791,7 +791,6 @@ class GatewayHttpServer(
         }
         val normalized = payload?.toString() ?: aggregated
         val usage = payload?.objOrNull("usage")
-        logUsageDiagnostics(providerId, model, usage)
         val content = payload?.arrayOrNull("choices")?.firstOrNull()
             ?.takeIf { it.isJsonObject }?.asJsonObject
             ?.objOrNull("message")?.get("content")?.asString.orEmpty()
@@ -1252,6 +1251,7 @@ class GatewayHttpServer(
         // 跳天自动清理必须照常执行：它是存量记录（含旧版本积压）的唯一运行期回收点，
         // 放在开关短路之后会让「关归档」变成「永不清理」。
         engine.autoPurgeIfDue()
+        logUsageDiagnostics(providerId, model, usage)
         if (!engine.settings().callLoggingEnabled) return
         engine.callLogStore.add(
             CallRecord(
