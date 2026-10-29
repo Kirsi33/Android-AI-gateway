@@ -1,0 +1,40 @@
+name: Debug APK
+
+# 手动触发：打 debug 包（debug 签名零配置），产物为 artifact，下载即装。
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v4
+        with:
+          packages: 'platform-tools platforms;android-36 build-tools;35.0.0'
+
+      - uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: '8.11.1'
+
+      - name: 准备 local.properties
+        run: echo "sdk.dir=$ANDROID_HOME" > local.properties
+
+      - name: 打包 debug
+        run: gradle :app:assembleDebug --console=plain
+
+      - name: 重命名产物
+        run: cp app/build/outputs/apk/debug/app-debug.apk ai-gateway-debug.apk
+
+      - name: 上传 APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-gateway-debug
+          path: ai-gateway-debug.apk
+          retention-days: 14
