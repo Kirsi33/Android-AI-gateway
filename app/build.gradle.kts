@@ -45,7 +45,15 @@ android {
     signingConfigs {
         // 只有存在 keystore.properties 时才创建 release 签名；
         // 本地只出 debug 包时不依赖该文件。
+        // 固定签名：keystore.properties 存在（本地开发或 CI 注入）时，debug 也用它签，
+        // 保证跨次构建签名一致，APK 可直接覆盖安装。
         if (hasReleaseKeystore) {
+            create("fixed") {
+                storeFile = file(keystoreValue("storeFile"))
+                storePassword = keystoreValue("storePassword")
+                keyAlias = keystoreValue("keyAlias")
+                keyPassword = keystoreValue("keyPassword")
+            }
             create("release") {
                 storeFile = file(keystoreValue("storeFile"))
                 storePassword = keystoreValue("storePassword")
@@ -69,6 +77,7 @@ android {
             isShrinkResources = true
             applicationIdSuffix = ".debug"
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            if (hasReleaseKeystore) signingConfig = signingConfigs.getByName("fixed")
         }
         // release = 仅由 GitHub Actions 云端构建并发版；本地不产出 release 包。
         release {
