@@ -479,7 +479,7 @@ private fun Tile(modifier: Modifier, label: String, content: @Composable ColumnS
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         Text(
-            text = label,
+            text = cnTitle(label),
             style = MaterialTheme.typography.labelSmall,
             letterSpacing = 0.8.sp,
             color = MaterialTheme.colorScheme.onSurfaceVariant,

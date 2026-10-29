@@ -231,7 +231,7 @@ private fun EditorialRow(
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 // 标题固定单行：「中文 · ENGLISH」被挤成两行会破坏栅格（英文标签跑到第二行）
                 Text(
-                    text = title,
+                    text = cnTitle(title),
                     style = MaterialTheme.typography.titleSmall,
                     color = MaterialTheme.colorScheme.onSurface,
                     maxLines = 1,
@@ -277,7 +277,7 @@ private fun EditorialSwitchRow(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                Text(title, style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurface)
+                Text(cnTitle(title), style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurface)
                 Text(
                     text = subtitle,
                     style = MaterialTheme.typography.bodySmall,

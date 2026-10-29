@@ -82,7 +82,7 @@ fun PageHeader(
             leading?.invoke()
             Column(Modifier.weight(1f)) {
                 Text(
-                    text = title,
+                    text = cnTitle(title),
                     style = MaterialTheme.typography.headlineMedium,
                     fontWeight = FontWeight.Light,
                     letterSpacing = 0.5.sp,
@@ -406,44 +406,19 @@ fun EmptyHint(title: String, message: String) {
     }
 }
 
-/** 小节标签中英对照：命中即渲染为「中文 · ENGLISH」。 */
-private val SECTION_EN: Map<String, String> = mapOf(
-    "接入地址" to "ENDPOINT",
-    "端口" to "PORT",
-    "默认供应商" to "DEFAULT PROVIDER",
-    "基本信息" to "BASICS",
-    "今日" to "TODAY",
-    "累计" to "TOTAL",
-    "存储" to "STORAGE",
-    "账号" to "ACCOUNTS",
-    "添加账号" to "ADD ACCOUNT",
-    "登录" to "LOGIN",
-    "Cookie 登录" to "COOKIE LOGIN",
-    "短信登录" to "SMS LOGIN",
-    "服务区域" to "REGION",
-    "模型" to "MODELS",
-    "代理" to "PROXY",
-    "走代理的供应商" to "PROXIED PROVIDERS",
-    "并发闸门" to "CONCURRENCY",
-    "故障转移（单供应商内重试 + 跨供应商切换）" to "FAILOVER",
-    "熔断器（按供应商）" to "CIRCUIT BREAKER",
-    "模型级冷却" to "MODEL COOLDOWN",
-    "反审核脱敏" to "SANITIZER",
-    "账号级限速" to "RATE LIMIT",
-    "批量操作" to "BATCH",
-    "任务中心" to "TASK CENTER",
-    "积分明细" to "POINTS LEDGER",
-)
+/** 标题纯中文渲染：剥掉「中文 · ENGLISH」式的英文尾巴（大写字母/空格组成），保留正常中文文案。 */
+fun pureCn(text: String): String =
+    text.replace(Regex("\\s*·\\s*[A-Z][A-Za-z0-9\\- ]*$"), "")
+        .replace(Regex("\\s*/\\s*[A-Z][A-Z0-9\\- ]*$"), "")
 
-/** 小节标签双语渲染：有对照就带英文小尾巴，没有原样返回。 */
-fun sectionLabelDual(text: String): String =
-    SECTION_EN[text]?.let { "$text · $it" } ?: text
+/** 全局双语标题净化：所有页面标题/小节标签共用，示例「动态取色 · DYNAMIC COLOR」→「动态取色」。 */
+fun cnTitle(text: String): String = pureCn(text)
 
-/** 小灰大写小节标签（中文 · ENGLISH）。 */
+/** 小灰大写小节标签。 */
 @Composable
 fun SectionLabel(text: String) {
     Text(
-        text = sectionLabelDual(text),
+        text = cnTitle(text),
         style = MaterialTheme.typography.labelMedium,
         fontWeight = FontWeight.SemiBold,
         letterSpacing = 1.2.sp,
@@ -462,7 +437,7 @@ fun SectionHeader(title: String, action: String? = null, onAction: (() -> Unit)?
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         Text(
-            text = title,
+            text = cnTitle(title),
             style = MaterialTheme.typography.labelMedium,
             fontWeight = FontWeight.SemiBold,
             letterSpacing = 1.2.sp,
@@ -491,7 +466,7 @@ fun EditorialGroupHeader(index: String, title: String, meta: String? = null) {
     ) {
         Box(Modifier.size(width = 4.dp, height = 15.dp).background(gold))
         Text(
-            text = "$index / $title",
+            text = "$index / ${cnTitle(title)}",
             style = MaterialTheme.typography.labelMedium,
             fontWeight = FontWeight.SemiBold,
             letterSpacing = 1.2.sp,
