@@ -406,11 +406,44 @@ fun EmptyHint(title: String, message: String) {
     }
 }
 
+/** 小节标签中英对照：命中即渲染为「中文 · ENGLISH」。 */
+private val SECTION_EN: Map<String, String> = mapOf(
+    "接入地址" to "ENDPOINT",
+    "端口" to "PORT",
+    "默认供应商" to "DEFAULT PROVIDER",
+    "基本信息" to "BASICS",
+    "今日" to "TODAY",
+    "累计" to "TOTAL",
+    "存储" to "STORAGE",
+    "账号" to "ACCOUNTS",
+    "添加账号" to "ADD ACCOUNT",
+    "登录" to "LOGIN",
+    "Cookie 登录" to "COOKIE LOGIN",
+    "短信登录" to "SMS LOGIN",
+    "服务区域" to "REGION",
+    "模型" to "MODELS",
+    "代理" to "PROXY",
+    "走代理的供应商" to "PROXIED PROVIDERS",
+    "并发闸门" to "CONCURRENCY",
+    "故障转移（单供应商内重试 + 跨供应商切换）" to "FAILOVER",
+    "熔断器（按供应商）" to "CIRCUIT BREAKER",
+    "模型级冷却" to "MODEL COOLDOWN",
+    "反审核脱敏" to "SANITIZER",
+    "账号级限速" to "RATE LIMIT",
+    "批量操作" to "BATCH",
+    "任务中心" to "TASK CENTER",
+    "积分明细" to "POINTS LEDGER",
+)
+
+/** 小节标签双语渲染：有对照就带英文小尾巴，没有原样返回。 */
+fun sectionLabelDual(text: String): String =
+    SECTION_EN[text]?.let { "$text · $it" } ?: text
+
 /** 小灰大写小节标签（中文 · ENGLISH）。 */
 @Composable
 fun SectionLabel(text: String) {
     Text(
-        text = text,
+        text = sectionLabelDual(text),
         style = MaterialTheme.typography.labelMedium,
         fontWeight = FontWeight.SemiBold,
         letterSpacing = 1.2.sp,

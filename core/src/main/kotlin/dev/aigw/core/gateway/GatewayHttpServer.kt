@@ -1008,10 +1008,22 @@ class GatewayHttpServer(
      */
     internal fun cachedTokensOf(usage: JsonObject?): Long {
         val obj = usage ?: return 0L
-        for (key in listOf("prompt_cache_hit_tokens", "cache_read_input_tokens")) {
+        // 平铺字段：DeepSeek/腾讯系、Anthropic 风格，以及各家私有中转的常见变体
+        for (key in listOf(
+            "prompt_cache_hit_tokens",
+            "cache_read_input_tokens",
+            "cached_tokens",
+            "cache_tokens",
+            "prompt_cached_tokens",
+            "cached_prompt_tokens",
+        )) {
             obj.get(key)?.takeIf { it.isJsonPrimitive }?.asLong?.let { if (it > 0) return it }
         }
-        return obj.objOrNull("prompt_tokens_details")?.longOrNull("cached_tokens")?.coerceAtLeast(0L) ?: 0L
+        // 嵌套口径：OpenAI / Gemini(经 OpenAiGemini 映射)、以及 response_prompt_tokens_details 变体
+        for (key in listOf("prompt_tokens_details", "response_prompt_tokens_details", "token_usage")) {
+            obj.objOrNull(key)?.longOrNull("cached_tokens")?.takeIf { it > 0 }?.let { return it }
+        }
+        return 0L
     }
 
     /**

@@ -151,6 +151,24 @@ object AnthropicProtocol {
 
     // ------------------------------------------------------------------ 非流式响应
 
+    /** 从 OpenAI usage 里提「命中前缀缓存的输入 token」（OpenAI/DeepSeek/Anthropic 三家口径都认）。 */
+    private fun cachedTokensOf(usage: JsonObject?): Int {
+        usage ?: return 0
+        usage.get("prompt_cache_hit_tokens")?.takeIf { it.isJsonPrimitive }?.asInt?.let { if (it > 0) return it }
+        usage.get("cache_read_input_tokens")?.takeIf { it.isJsonPrimitive }?.asInt?.let { if (it > 0) return it }
+        return usage.objOrNull("prompt_tokens_details")
+            ?.get("cached_tokens")?.takeIf { it.isJsonPrimitive }?.asInt?.coerceAtLeast(0) ?: 0
+    }
+
+    private fun antUsage(usage: JsonObject?, includeOutput: Boolean): JsonObject =
+        JsonObject().apply {
+            addProperty("input_tokens", usage?.get("prompt_tokens")?.takeIf { it.isJsonPrimitive }?.asInt ?: 0)
+            addProperty("cache_read_input_tokens", cachedTokensOf(usage))
+            if (includeOutput) {
+                addProperty("output_tokens", usage?.get("completion_tokens")?.takeIf { it.isJsonPrimitive }?.asInt ?: 0)
+            }
+        }
+
     /** OpenAI `chat.completion` → Anthropic `message`。 */
     fun completionFromOpenAi(raw: String, fallbackModel: String): String {
         val src = runCatching { JsonParser.parseString(raw).asJsonObject }.getOrNull()
@@ -194,10 +212,7 @@ object AnthropicProtocol {
             add("content", content)
             addProperty("stop_reason", stopReasonOf(choice?.str("finish_reason")))
             add("stop_sequence", JsonNull.INSTANCE)
-            add("usage", JsonObject().apply {
-                addProperty("input_tokens", usage?.get("prompt_tokens")?.takeIf { it.isJsonPrimitive }?.asInt ?: 0)
-                addProperty("output_tokens", usage?.get("completion_tokens")?.takeIf { it.isJsonPrimitive }?.asInt ?: 0)
-            })
+            add("usage", antUsage(usage, includeOutput = true))
         }
         return out.toString()
     }
@@ -229,6 +244,7 @@ object AnthropicProtocol {
         var inputTokens = 0
         var outputTokens = 0
         var stopReason = "end_turn"
+        var lastUsage: JsonObject? = null  // 最近一次 usage 块：结束时 message_delta 里回传真实 input/缓存 token
         var textBlockOpen = false
         // OpenAI 的 tool_calls 按 index 分片到达；Anthropic 要一个个 content_block
         var nextBlockIndex = 0
@@ -251,7 +267,7 @@ object AnthropicProtocol {
                         add("stop_sequence", JsonNull.INSTANCE)
                         add("usage", JsonObject().apply {
                             addProperty("input_tokens", inputTokens)
-                            addProperty("output_tokens", 0)
+                            addProperty("cache_read_input_tokens", cachedTokensOf(lastUsage))
                         })
                     })
                 })
@@ -285,6 +301,7 @@ object AnthropicProtocol {
 
                 // 首帧之前先把 message_start 补上（含 input_tokens）
                 obj.objOrNull("usage")?.let { usage ->
+                    lastUsage = usage
                     inputTokens = usage.get("prompt_tokens")?.takeIf { it.isJsonPrimitive }?.asInt ?: inputTokens
                     outputTokens = usage.get("completion_tokens")?.takeIf { it.isJsonPrimitive }?.asInt ?: outputTokens
                 }
@@ -376,9 +393,7 @@ object AnthropicProtocol {
                         addProperty("stop_reason", stopReason)
                         add("stop_sequence", JsonNull.INSTANCE)
                     })
-                    add("usage", JsonObject().apply {
-                        addProperty("output_tokens", outputTokens)
-                    })
+                    add("usage", antUsage(lastUsage, includeOutput = true))
                 })
                 frames += event("message_stop", JsonObject().apply {
                     addProperty("type", "message_stop")
