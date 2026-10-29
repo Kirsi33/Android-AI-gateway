@@ -31,6 +31,11 @@ object TraePayload {
         obj.addProperty("function", TraeConstants.FUNCTION)
 
         rewriteMessages(obj)
+        // 稳定会话标识：上游按 session 归组（官方 IDE 每会话带 session_id），
+        // 同一会话内稳定、跨会话不同，帮助上游命中前缀缓存。
+        if (obj.get("session_id") == null || obj.get("session_id").isJsonNull) {
+            stableSessionId(obj)?.let { obj.addProperty("session_id", it) }
+        }
 
         val model = obj.str("model").trim().ifEmpty { fallbackConfigName }
         obj.addProperty("config_name", model)
@@ -133,6 +138,28 @@ object TraePayload {
             rebuilt.add(item)
         }
         if (images > 0) message.add("content", rebuilt)
+    }
+
+    /** 从首条 user 消息文本派生稳定会话 id（SHA-256 前 32 位十六进制）。 */
+    private fun stableSessionId(obj: JsonObject): String? {
+        val messages = obj.get("messages") as? JsonArray ?: return null
+        for (element in messages) {
+            val message = element as? JsonObject ?: continue
+            if (message.str("role") != "user") continue
+            val content = message.get("content") ?: continue
+            val text = when {
+                content.isJsonPrimitive -> content.asString
+                content.isJsonArray -> content.asJsonArray.joinToString("\n") { block ->
+                    (block as? JsonObject)?.str("text").orEmpty()
+                }
+                else -> continue
+            }
+            if (text.isBlank()) continue
+            val digest = java.security.MessageDigest.getInstance("SHA-256")
+                .digest(text.toByteArray())
+            return digest.joinToString("") { "%02x".format(it) }.take(32)
+        }
+        return null
     }
 
     /** 图片占位说明（多张图合并为一条）。 */

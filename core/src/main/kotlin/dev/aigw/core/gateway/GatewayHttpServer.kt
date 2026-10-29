@@ -791,6 +791,7 @@ class GatewayHttpServer(
         }
         val normalized = payload?.toString() ?: aggregated
         val usage = payload?.objOrNull("usage")
+        logUsageDiagnostics(providerId, model, usage)
         val content = payload?.arrayOrNull("choices")?.firstOrNull()
             ?.takeIf { it.isJsonObject }?.asJsonObject
             ?.objOrNull("message")?.get("content")?.asString.orEmpty()
@@ -1023,6 +1024,27 @@ class GatewayHttpServer(
         for (key in listOf("prompt_tokens_details", "response_prompt_tokens_details", "token_usage")) {
             obj.objOrNull(key)?.longOrNull("cached_tokens")?.takeIf { it > 0 }?.let { return it }
         }
+        // 通用兜底：递归找任何键名含 cache 的数值字段（各家私有中转的未知变体都能接住）
+        return findCachedValue(obj, depth = 0)
+    }
+
+    private fun findCachedValue(element: com.google.gson.JsonElement?, depth: Int): Long {
+        if (element == null || depth > 4) return 0L
+        if (element.isJsonObject) {
+            for ((key, value) in element.asJsonObject.entrySet()) {
+                if (key.contains("cache", ignoreCase = true) || key.contains("hit", ignoreCase = true)) {
+                    if (value.isJsonPrimitive && value.asJsonPrimitive.isNumber) {
+                        val v = value.asLong
+                        if (v > 0) return v
+                    }
+                }
+                findCachedValue(value, depth + 1).takeIf { it > 0 }?.let { return it }
+            }
+        } else if (element.isJsonArray) {
+            for (item in element.asJsonArray) {
+                findCachedValue(item, depth + 1).takeIf { it > 0 }?.let { return it }
+            }
+        }
         return 0L
     }
 
@@ -1169,6 +1191,18 @@ class GatewayHttpServer(
             "application/json; charset=utf-8",
             body,
         )
+    }
+
+    /**
+     * usage 诊断日志：识别不到缓存字段时把原始 usage 记进运行日志（前 600 字符），
+     * 用于排查「上游到底报没报缓存、字段名是什么」。识别到时不刷屏。
+     */
+    private fun logUsageDiagnostics(providerId: String, model: String, usage: JsonObject?) {
+        usage ?: return
+        if (cachedTokensOf(usage) > 0) return
+        if (providerId.startsWith("trae")) {
+            engine.requestLog.info("[cache-diag] $providerId/$model usage无缓存字段: ${usage.toString().take(600)}")
+        }
     }
 
     /** Anthropic 形状的错误响应（客户端 SDK 按 `type`/`error.type` 解析）。 */
