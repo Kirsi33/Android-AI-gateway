@@ -388,7 +388,7 @@ class CookieLoginActivity : Activity() {
      * 用同步 XHR 是为了让结果作为 evaluateJavascript 的返回值直接回来——
      * evaluateJavascript 不会 await Promise，async fetch 拿不到结果。
      */
-    private val tokenProbe = object : Runnable {
+    private val tokenProbe: Runnable = object : Runnable {
         override fun run() {
             val view = web ?: return
             if (tokenResult != null) return
