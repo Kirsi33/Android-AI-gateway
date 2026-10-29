@@ -92,6 +92,14 @@ class ProviderUiActions(
     val onRefreshCredits: (providerId: String, uid: String?) -> Unit = { _, _ -> },
     /** 执行供应商专属动作（签到、兑换码等）。 */
     val onAction: (providerId: String, uid: String, action: String, payload: JsonObject) -> Unit = { _, _, _, _ -> },
+
+    /**
+     * **页内积分**：签到/查额度这类依赖 HttpOnly 会话 cookie 的动作，在 WebView 里执行。
+     *
+     * 搭子实证：cookie 导出永远缺 HttpOnly 会话项，外部发请求一律 302；
+     * 只有页面里发的同源请求才会被服务端认账。结果走 Activity 回传 + notice。
+     */
+    val onInPagePoints: (providerId: String, uid: String) -> Unit = { _, _ -> },
     val onToggleAccount: (providerId: String, uid: String, enabled: Boolean) -> Unit = { _, _, _ -> },
     val onRemoveAccount: (providerId: String, uid: String) -> Unit = { _, _ -> },
     /** 调整账号使用顺序（↑/↓）：排在前面的先用，同级仍按余额。 */

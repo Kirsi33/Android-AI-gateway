@@ -188,8 +188,11 @@ object DumateUi : ProviderUi {
                     )
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(top = 4.dp)) {
-                    OutlineActionButton("签到") {
-                        actions.onAction(id, status.uid, ACTION_CHECKIN, JsonObject())
+                    // **页内签到**：积分接口要 HttpOnly 会话 cookie，WebView 外发请求一律 302
+                    //（2.9.7 换控制台域 + csrftoken、2.9.8 拦截请求头都试过，全不行）。
+                    // 改成开一个小 WebView 在页面里发同源请求，cookie 由浏览器自动带上，必成。
+                    OutlineActionButton("签到（页内）") {
+                        actions.onInPagePoints(id, status.uid)
                     }
                 }
             },
