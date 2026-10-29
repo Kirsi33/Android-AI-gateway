@@ -104,10 +104,40 @@ object TraePayload {
                     addProperty("text", content.asString)
                 })
                 message.add("content", wrapped)
+            } else if (content.isJsonArray) {
+                stripImages(message, content.asJsonArray)
             }
-            // 已是数组（多模态）→ 原样透传
         }
     }
+
+    /**
+     * 图片降级保护：SOLO 通道（llm_utils_chat）不支持 image_url 块。
+     * base64 图片原样透传会被上游当异常内容送审，误触发「sensitive content」拒绝。
+     * 这里把图片块替换成一行文字占位：会话不中断，模型知道用户发过图；纯文本消息不受影响。
+     */
+    private fun stripImages(message: JsonObject, content: JsonArray) {
+        var images = 0
+        val rebuilt = JsonArray()
+        for (item in content) {
+            val block = item as? JsonObject
+            if (block != null && block.str("type").trim().lowercase() == "image_url") {
+                images++
+                if (images == 1) {
+                    rebuilt.add(JsonObject().apply {
+                        addProperty("type", "text")
+                        addProperty("text", IMAGE_PLACEHOLDER)
+                    })
+                }
+                continue
+            }
+            rebuilt.add(item)
+        }
+        if (images > 0) message.add("content", rebuilt)
+    }
+
+    /** 图片占位说明（多张图合并为一条）。 */
+    private const val IMAGE_PLACEHOLDER =
+        "[系统提示：用户发送了图片，但当前对话通道不支持图片输入，图片已被省略。请基于现有文本继续，必要时提示用户改用支持视觉的模型。]"
 
     private fun rewriteAssistantToolCalls(message: JsonObject) {
         val toolCalls = message.get("tool_calls") as? JsonArray ?: return
