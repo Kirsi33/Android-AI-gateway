@@ -53,7 +53,7 @@ class CookieLoginActivity : Activity() {
         val manager = CookieManager.getInstance()
         manager.flush()
         // 已知域 + 常见父域/子域，一次性扫全
-        val allHosts = cookieHosts.toList() +
+        val allHosts = pendingHosts.toList() +
             listOf("dumate.baidu.com", "baidu.com", ".baidu.com", "console.bce.baidu.com",
                 "www.dumate.cn", "dumate.cn", "passport.baidu.com")
         val seen = LinkedHashSet<String>()
