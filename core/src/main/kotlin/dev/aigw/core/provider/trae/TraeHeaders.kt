@@ -27,6 +27,27 @@ object TraeHeaders {
         c.setRequestProperty("Request-Traffic-Type", "prod")
         if (a.machineId.isNotEmpty()) c.setRequestProperty("X-Machine-Id", a.machineId)
         if (a.deviceId.isNotEmpty()) c.setRequestProperty("x-device-id", a.deviceId)
+        // 以下与官方 Windows IDE 完全对齐（逆向自官方客户端流量）：
+        // 字节网关按请求头画像分流后端集群——缺这些头会被当成「非 IDE 来源」
+        // 路由到无缓存通道，prompt cache 恒为 0。
+        c.setRequestProperty("X-Device-CPU", "Intel")
+        c.setRequestProperty("Package-Type", "stable_cn")
+        c.setRequestProperty("X-Lgw-Req-Sdk-Type", "3")
+        c.setRequestProperty("X-Lscbd-Aid", "787976")
+        c.setRequestProperty("X-SS-DP", "787976")
+        c.setRequestProperty("App-Version", v.ideVersion)
+        // 每请求一个 trace：格式对齐官方（00-<32hex>-<16hex>-01）
+        val trace = "00-" + randHex(32) + "-" + randHex(16) + "-01"
+        c.setRequestProperty("X-TT-Trace-Id", trace)
+        c.setRequestProperty("X-Custom-Trace-Id", trace.substring(3, 19))
+        c.setRequestProperty("X-Request-Id", "req_" + randHex(16))
+    }
+
+    private fun randHex(n: Int): String {
+        val chars = "0123456789abcdef"
+        val sb = StringBuilder(n)
+        repeat(n) { sb.append(chars[kotlin.random.Random.nextInt(16)]) }
+        return sb.toString()
     }
 
     /**
