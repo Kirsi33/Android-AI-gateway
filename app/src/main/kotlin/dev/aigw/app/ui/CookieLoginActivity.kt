@@ -41,6 +41,43 @@ class CookieLoginActivity : Activity() {
     private var successPrefixes: List<String> = emptyList()
     /** 需要等待出现的 Cookie 名（LongCat 这类站内跳转、没有回调地址的上游）。 */
     private var successCookieName: String = ""
+    /**
+     * 一键复制全部 Cookie 到剪贴板。
+     *
+     * WebView 登录链走不完时（如百度搭子的 bce-sessionid 在跳转链最后一跳才种上，
+     * 而 WebView 对那段流程要么拦跨域、要么 UA 分流不种），用户可以直接复制全部 Cookie
+     * 自己粘贴导入。点「完成」走的是 collectAndFinish（只收 hosts 列表里的域），
+     * 但有些 cookie 落在别的子域，逐域读可能漏掉——这里从 CookieManager 一次性取全部。
+     */
+    private fun copyCookiesToClipboard() {
+        val manager = CookieManager.getInstance()
+        manager.flush()
+        // 已知域 + 常见父域/子域，一次性扫全
+        val allHosts = cookieHosts.toList() +
+            listOf("dumate.baidu.com", "baidu.com", ".baidu.com", "console.bce.baidu.com",
+                "www.dumate.cn", "dumate.cn", "passport.baidu.com")
+        val seen = LinkedHashSet<String>()
+        val pairs = mutableListOf<String>()
+        for (host in allHosts) {
+            val raw = manager.getCookie(host).orEmpty()
+            if (raw.isBlank()) continue
+            for (pair in raw.split(';')) {
+                val trimmed = pair.trim()
+                if (trimmed.isEmpty()) continue
+                val key = trimmed.substringBefore('=').trim().lowercase()
+                if (seen.add(key)) pairs.add(trimmed)
+            }
+        }
+        if (pairs.isEmpty()) {
+            Toast.makeText(this, "还没有 Cookie，先登录", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val cookieStr = pairs.joinToString("; ")
+        val clipboard = getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+        clipboard.setPrimaryClip(android.content.ClipData.newPlainText("DuMate Cookie", cookieStr))
+        Toast.makeText(this, "Cookie 已复制（${pairs.size} 条），去粘贴导入", Toast.LENGTH_LONG).show()
+    }
+
     /** 已经触发过自动确认，避免重复。 */
     private var autoConfirmed = false
 
@@ -120,8 +157,16 @@ class CookieLoginActivity : Activity() {
             textSize = 14f
             setOnClickListener { collectAndFinish(cookieHosts) }
         }
+        // 一键复制 Cookie：WebView 登录链走不完时（如百度搭子的 bce 会话在跳转链最后一跳才种上，
+        // 而 WebView 对那段流程要么拦跨域、要么 UA 分流不种），让用户直接复制全部 Cookie 自己粘贴导入。
+        val copyCookie = Button(this).apply {
+            text = "复制 Cookie"
+            textSize = 14f
+            setOnClickListener { copyCookiesToClipboard() }
+        }
         bar.addView(close)
         bar.addView(label)
+        bar.addView(copyCookie)
         bar.addView(done)
 
         val progress = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
