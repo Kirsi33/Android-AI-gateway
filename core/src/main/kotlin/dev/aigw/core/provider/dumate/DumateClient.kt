@@ -92,7 +92,12 @@ data class DumateAccount(
         fun parse(raw: String): DumateAccount {
             val root = JsonParser.parseString(raw).asJsonObject
             val cookie = root.stringOrNull("cookie").orEmpty()
-            if (cookie.isEmpty()) throw IllegalArgumentException("凭证缺少 cookie")
+            val token = root.stringOrNull("token").orEmpty()
+            // **cookie 与 token 至少有一个**：token 导入的账号（WebView 登录链走不通时的兜底）
+            // 没有 cookie，但它能对话；只要求两者都有会让这类账号在签到/额度处报「凭证无法解析」。
+            if (cookie.isEmpty() && token.isEmpty()) {
+                throw IllegalArgumentException("凭证缺少 cookie 或 token")
+            }
             return DumateAccount(
                 uid = root.stringOrNull("uid").orEmpty(),
                 nickname = root.stringOrNull("nickname").orEmpty(),

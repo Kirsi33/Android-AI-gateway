@@ -142,6 +142,10 @@ class DumateProvider(
 
     override fun creditInfo(account: ProviderAccount): CreditInfo? {
         val parsed = runCatching { DumateAccount.parse(account.secret) }.getOrNull() ?: return null
+        // 积分查询走网页 cookie，token 导入的账号没有——如实说明，不报「不支持额度刷新」
+        if (parsed.cookie.isEmpty()) {
+            return CreditInfo(0, known = false, detail = "token 导入的账号不含 cookie，查不到积分（对话可用）")
+        }
         return try {
             val quota = client.quota(parsed)
             CreditInfo(
@@ -170,6 +174,11 @@ class DumateProvider(
     private fun checkin(account: ProviderAccount): ProviderActionResult {
         val parsed = runCatching { DumateAccount.parse(account.secret) }.getOrNull()
             ?: return ProviderActionResult.failure("凭证无法解析")
+        if (parsed.cookie.isEmpty()) {
+            return ProviderActionResult.failure(
+                "签到需要网页 cookie（token 导入的账号只有对话权限）。请用「在 App 内登录」或粘贴完整 cookie。",
+            )
+        }
         return try {
             if (client.loginBonusInfo(parsed) == true) {
                 return ProviderActionResult.success("今日已签到")
