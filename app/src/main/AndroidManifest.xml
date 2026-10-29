@@ -42,6 +42,11 @@
             android:exported="false"
             android:configChanges="keyboardHidden|orientation|screenSize"
             android:windowSoftInputMode="adjustResize" />
+            <activity
+            android:name=".ui.DumatePointsActivity"
+            android:exported="false"
+            android:configChanges="keyboardHidden|orientation|screenSize"
+            android:windowSoftInputMode="adjustResize" />
 
         <service
             android:name=".service.GatewayService"
