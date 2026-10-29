@@ -37,6 +37,38 @@ object TraePayload {
         if (obj.get("session_id") == null || obj.get("session_id").isJsonNull) {
             stableSessionId(obj)?.let { obj.addProperty("session_id", it) }
         }
+        // 官方 IDE 请求体带完整会话上下文字段（MITM 实证，见 Trae-workbuddyAssistant 文档）。
+        // 上游按这些字段识别「合法 IDE 会话」——缺失可能被路由到无缓存后端。
+        if (obj.get("conversation_id") == null) {
+            obj.addProperty("conversation_id", stableSessionId(obj) ?: java.util.UUID.randomUUID().toString())
+        }
+        if (obj.get("session_id") == null) {
+            obj.addProperty("session_id", java.util.UUID.randomUUID().toString())
+        }
+        if (obj.get("project_id") == null) {
+            obj.addProperty("project_id", java.util.UUID.randomUUID().toString())
+        }
+        if (obj.get("workspace_id") == null) {
+            obj.addProperty("workspace_id", "e04cdd")
+        }
+        if (obj.get("prompt_max_tokens") == null) {
+            obj.addProperty("prompt_max_tokens", 168000)
+        }
+        if (obj.get("mode") == null) {
+            obj.addProperty("mode", "FunctionCall")
+        }
+        if (obj.get("ide_version") == null) {
+            obj.addProperty("ide_version", "0.1.50")
+        }
+        if (obj.get("ide_version_code") == null) {
+            obj.addProperty("ide_version_code", "20260811")
+        }
+        if (obj.get("app_id") == null) {
+            obj.addProperty("app_id", TraeConstants.APP_ID)
+        }
+        if (obj.get("package_type") == null) {
+            obj.addProperty("package_type", "stable_cn")
+        }
 
         val model = obj.str("model").trim().ifEmpty { fallbackConfigName }
         obj.addProperty("config_name", model)
