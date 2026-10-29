@@ -90,7 +90,19 @@ data class DumateAccount(
 
     companion object {
         fun parse(raw: String): DumateAccount {
-            val root = JsonParser.parseString(raw).asJsonObject
+            val text = raw.trim()
+            // **裸 cookie 串**（`BAIDUID=...; BDUSS=...`）直接当 cookie，不要拿去 JSON 解析：
+            // 以前一律 parseString，用户粘贴 cookie 只会收到 Gson 的
+            // “malformed JSON at line 1 column 30” —— 提示与实际原因完全对不上。
+            if (!text.startsWith("{")) {
+                val looksLikeCookie = text.contains('=') && text.contains(';')
+                if (looksLikeCookie) {
+                    return DumateAccount(uid = "", nickname = "", cookie = text, token = "")
+                }
+                // 单个 token（36 字符 UUID 形状）
+                return DumateAccount(uid = "", nickname = "", cookie = "", token = text)
+            }
+            val root = JsonParser.parseString(text).asJsonObject
             val cookie = root.stringOrNull("cookie").orEmpty()
             val token = root.stringOrNull("token").orEmpty()
             // **cookie 与 token 至少有一个**：token 导入的账号（WebView 登录链走不通时的兜底）

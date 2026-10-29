@@ -37,8 +37,14 @@ class ProviderUiActions(
      * （百度搭子：BDUSS 在 passport 登录后就有，但 bce-sessionid
      * 要等整个跳转链走完才种上，提前收就只能拿到半套）。
      */
-    val onCookieLogin: (providerId: String, url: String, hosts: List<String>, title: String, cookieName: String) -> Unit =
-        { _, _, _, _, _ -> },
+    val onCookieLogin: (
+        providerId: String,
+        url: String,
+        hosts: List<String>,
+        title: String,
+        cookieName: String,
+        settleUrls: List<String>,
+    ) -> Unit = { _, _, _, _, _, _ -> },
 
     /**
      * 内嵌网页登录（桌面 UA 版）。

@@ -205,27 +205,20 @@ class DumateProvider(
         // 支持**直接粘贴对话 token**（36 字符 UUID 形状）：token 由「网页 cookie → token/get」
         // 换出，24h 有效。没有 cookie 的账号对话可用，但签到/积分（走 cookie）不可用——
         // 这是给「WebView 登录链走不完」的场景留的兜底路径。
-        val parsedCookie = runCatching { DumateAccount.parse(text) }.getOrNull()
-        val bareToken = parsedCookie?.takeIf { it.cookie.isEmpty() && it.token.isNotEmpty() }?.token
-            ?: text.takeIf {
-                !it.startsWith("{") && it.length in 8..64 &&
-                    it.all { c -> c.isLetterOrDigit() || c == '-' }
-            }
-        if (bareToken != null) {
-            val uid = "dumate-tok-" + bareToken.take(8)
-            val account = DumateAccount(
-                uid = uid,
-                nickname = "token 导入",
-                cookie = "",
-                token = bareToken,
-            )
-            return ProviderAccount(id, account.uid, account.nickname, account.toJson().toString())
-        }
-        var account = runCatching {
-            DumateAccount.parse(text)
-        }.getOrElse {
+        // parse 已同时认三种形态：`{...}` JSON、裸 cookie 串、单个 token
+        var account = runCatching { DumateAccount.parse(text) }.getOrElse {
             // 返回 null 会被上层当成「该供应商不支持粘贴导入」，用户就永远看不到真正原因
-            throw IllegalArgumentException("凭证解析失败：${it.message}。需要 cookie 串或 {\"cookie\":\"...\"}")
+            throw IllegalArgumentException(
+                "凭证解析失败：${it.message}。" +
+                    "可以粘贴：① cookie 串（含 BAIDUID=…; BDUSS=…）② 单个对话 token ③ {\"cookie\":\"...\"}",
+            )
+        }
+        // 纯 token 账号：没有 cookie，对话可用、签到/积分不可用
+        if (account.cookie.isEmpty() && account.token.isNotEmpty()) {
+            val uid = "dumate-tok-" + account.token.take(8)
+            val tokenAccount = account.copy(uid = uid, nickname = "token 导入")
+            tokens[uid] = TokenEntry(tokenAccount.token, System.currentTimeMillis() + 24 * 3600_000L)
+            return ProviderAccount(id, uid, tokenAccount.nickname, tokenAccount.toJson().toString())
         }
         if (account.cookie.isEmpty()) throw IllegalArgumentException("cookie 为空")
         account = runCatching { client.userInfo(account) }.getOrDefault(account)

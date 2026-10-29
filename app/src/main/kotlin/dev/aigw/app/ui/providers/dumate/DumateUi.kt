@@ -84,19 +84,30 @@ object DumateUi : ProviderUi {
                     // Minis 浏览器（桌面 Linux Chrome UA）登录一次成功，佐证 UA 是分水岭。
                     actions.onDesktopCookieLogin(
                         id,
-                        "https://dumate.baidu.com/app",
+                        // **从 bce 登录页进**（照 dumate2api/src/login-browser.js:19-21）：
+                        // 登录完直接落在 console.bce.baidu.com，会话 cookie 自然种下。
+                        // 直接在 dumate 域登录永远拿不到 bce 系——那是在访问 console 域
+                        // 时才由服务端下发的，缺了它调 /api/dumate/* 一律 401。
+                        "https://login.bce.baidu.com/?redirect=" +
+                            "https%3A%2F%2Fconsole.bce.baidu.com%2F",
                         listOf(
-                            "dumate.baidu.com",
+                            "console.bce.baidu.com",
+                            "bce.baidu.com",
                             "baidu.com",
                             ".baidu.com",
                             "passport.baidu.com",
+                            "dumate.baidu.com",
                             "www.dumate.cn",
                             "dumate.cn",
                         ),
                         "登录百度搭子",
-                        // 等 bce 会话 cookie：BDUSS 在 passport 登录后就有，
-                        // bce-sessionid 要等整条跳转链走完（console.bce 那段）才种上
                         "bce-sessionid",
+                        // 兜底：若登录后没自动落 console 域，主动访问这两页激活会话
+                        listOf(
+                            "https://console.bce.baidu.com/",
+                            "https://console.bce.baidu.com/ai/#/app/dumate/overview",
+                            "https://dumate.baidu.com/app",
+                        ),
                     )
                 },
                 modifier = Modifier.fillMaxWidth(),
@@ -104,10 +115,9 @@ object DumateUi : ProviderUi {
                 Text("在 App 内登录（取 Cookie）")
             }
             Text(
-                text = "打开页面后要在里面**登录百度账号**（点页面里的登录入口，跳到 " +
-                    "passport 登录完成并跳回来），只是看到页面打开不算登录。" +
-                    "登录完成点右上角「完成」。站内若弹出 console.bce.baidu.com 的" +
-                    "「网页无法打开」是嵌套控制台被拦，关掉即可。",
+                text = "页面是百度云登录页：登录后会跳到 console 域（这一步会**自动**完成，" +
+                    "它在为「搭子」授权会话，不能跳过）。等它自己跳完、" +
+                    "出现 bce-sessionid 才算成功，不用手动点完成。",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

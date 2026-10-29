@@ -78,7 +78,7 @@ fun ProviderDetailScreen(
             // 登录一律交给系统浏览器：本机 WebView 渲染异常（整页缩放错乱、输入框文字镜像），
             // 网关会在本地临时监听回调端口接住登录结果。
             onWebLogin = { id, region -> viewModel.beginBrowserLogin(id, region) },
-            onCookieLogin = { id, url, hosts, title, cookieName ->
+            onCookieLogin = { id, url, hosts, title, cookieName, settleUrls ->
                 pendingCookieProvider = id
                 val intent = Intent(context, CookieLoginActivity::class.java).apply {
                     putExtra(CookieLoginActivity.EXTRA_START_URL, url)
@@ -88,10 +88,14 @@ fun ProviderDetailScreen(
                     if (cookieName.isNotEmpty()) {
                         putExtra(CookieLoginActivity.EXTRA_SUCCESS_COOKIE, cookieName)
                     }
+                    // 跨域会话 cookie 必须真正访问那个域才会种下（bce 系要在 console 域）
+                    if (settleUrls.isNotEmpty()) {
+                        putExtra(CookieLoginActivity.EXTRA_SETTLE_URLS, settleUrls.toTypedArray())
+                    }
                 }
                 cookieLogin.launch(intent)
             },
-            onDesktopCookieLogin = { id, url, hosts, title, cookieName ->
+            onDesktopCookieLogin = { id, url, hosts, title, cookieName, settleUrls ->
                 pendingCookieProvider = id
                 val intent = Intent(context, CookieLoginActivity::class.java).apply {
                     putExtra(CookieLoginActivity.EXTRA_START_URL, url)
@@ -101,6 +105,9 @@ fun ProviderDetailScreen(
                     putExtra(CookieLoginActivity.EXTRA_DESKTOP_UA, true)
                     if (cookieName.isNotEmpty()) {
                         putExtra(CookieLoginActivity.EXTRA_SUCCESS_COOKIE, cookieName)
+                    }
+                    if (settleUrls.isNotEmpty()) {
+                        putExtra(CookieLoginActivity.EXTRA_SETTLE_URLS, settleUrls.toTypedArray())
                     }
                 }
                 cookieLogin.launch(intent)

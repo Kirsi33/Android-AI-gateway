@@ -99,6 +99,18 @@ class CookieLoginActivity : Activity() {
 
     /** 是否用桌面 UA 打开（部分上游按 UA 判定「地区不开放」）。 */
     private var desktopUserAgent = false
+    /**
+     * 登录成功后必须**主动访问一次**的域名（用于让服务端种下跨域会话 cookie）。
+     *
+     * 百度搭子实证：`bce-sessionid` / `bce-long-term-sessionid` 只有在真正访问
+     * `console.bce.baidu.com` 时才由服务端下发；只在 dumate 域登录永远拿不到，
+     * 而调 `/api/dumate/*` 恰恰依赖它（缺了一律 401）。
+     * 参考实现 dumate2api/src/login-browser.js 的 SETTLE_URLS 就是这个用途。
+     */
+    private var settleUrls: List<String> = emptyList()
+    /** 已经跳过一次 settle 页面，避免反复刷新。 */
+    private var settleIndex = 0
+
     /** 判断「关键 Cookie 是否出现」时要查的域名。 */
     private var cookieHostsForCheck: List<String> = emptyList()
 
@@ -109,6 +121,7 @@ class CookieLoginActivity : Activity() {
         val cookieHosts = intent.getStringArrayExtra(EXTRA_COOKIE_HOSTS) ?: emptyArray()
         successPrefixes = intent.getStringArrayExtra(EXTRA_SUCCESS_URL_PREFIXES)?.toList() ?: emptyList()
         successCookieName = intent.getStringExtra(EXTRA_SUCCESS_COOKIE).orEmpty()
+        settleUrls = intent.getStringArrayExtra(EXTRA_SETTLE_URLS)?.toList() ?: emptyList()
         pendingHosts = cookieHosts
         cookieHostsForCheck = cookieHosts.toList()
         val title = intent.getStringExtra(EXTRA_TITLE).orEmpty().ifEmpty { "登录" }
@@ -287,6 +300,16 @@ class CookieLoginActivity : Activity() {
      */
     private fun maybeAutoConfirm(url: String) {
         if (autoConfirmed) return
+        // 关键 cookie 还没出现、但有 settle 页面要访问 → 先去 settle 一次。
+        // 跨域会话 cookie 只在真正访问那个域时才种下，光等是不会出现的。
+        if (successCookieName.isNotEmpty() && !hasCookieNamed(successCookieName) &&
+            settleIndex < settleUrls.size
+        ) {
+            val next = settleUrls[settleIndex++]
+            status?.text = "正在激活会话（" + next.substringAfter("://").substringBefore("/") + "）…"
+            web?.loadUrl(next)
+            return
+        }
         val hitPrefix = successPrefixes.any { url.startsWith(it) }
         val hitCookie = successCookieName.isNotEmpty() && hasCookieNamed(successCookieName)
         if (!hitPrefix && !hitCookie) return
@@ -427,6 +450,7 @@ class CookieLoginActivity : Activity() {
     companion object {
         const val EXTRA_START_URL = "start_url"
         const val EXTRA_COOKIE_HOSTS = "cookie_hosts"
+        const val EXTRA_SETTLE_URLS = "settle_urls"
         const val EXTRA_TITLE = "title"
         const val EXTRA_RESULT_COOKIE = "cookie"
         /** 命中任一前缀即视为登录完成（回调地址）。 */

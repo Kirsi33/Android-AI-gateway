@@ -35,7 +35,7 @@ android {
         minSdk = 26
         targetSdk = 36
         versionCode = 206
-        versionName = "2.9.4"
+        versionName = "2.9.5"
     }
 
     buildFeatures {
