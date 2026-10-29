@@ -111,6 +111,29 @@ class CookieLoginActivity : Activity() {
     /** 已经跳过一次 settle 页面，避免反复刷新。 */
     private var settleIndex = 0
 
+    /**
+     * **页面内换票**模式用的接口路径（如 `/api/dumate/app/token/get`）。
+     *
+     * 非空时不再靠「关键 Cookie 出现」判断登录完成：百度 passport 的会话 cookie
+     * （`BDUSS` / `bce-long-term-sessionid`）是 **HttpOnly**，`CookieManager.getCookie()`
+     * 读不到，导出的 cookie 串永远缺这几项，服务端一律回 401「登录态已失效」。
+     * 改为在页面里发同源请求——HttpOnly cookie 由 WebView 自动带上——直接把票取回来。
+     * 参考实现（dumate2api 的 login-browser.js）用的是 Playwright 的 ctx.cookies()，
+     * 那个能读到 HttpOnly，所以它能成；我们照抄「导出 cookie 再换票」这条路必然不成。
+     */
+    private var tokenEndpoint: String = ""
+
+    /** 页面内换票前要落到的页面，保证请求与登录态同源。 */
+    private var tokenPageUrl: String = ""
+    private var tokenPageHost: String = ""
+    private var tokenPageOpened = false
+    private var tokenProbeStarted = false
+    private var tokenAttempts = 0
+    private var tokenResult: String? = null
+
+    private val tokenValueRegex = Regex("\"token\"\\s*:\\s*\"([0-9A-Za-z_\\-]{16,})\"")
+    private val expiredAtRegex = Regex("\"expired_at\"\\s*:\\s*\"([^\"]+)\"")
+
     /** 判断「关键 Cookie 是否出现」时要查的域名。 */
     private var cookieHostsForCheck: List<String> = emptyList()
 
@@ -122,6 +145,11 @@ class CookieLoginActivity : Activity() {
         successPrefixes = intent.getStringArrayExtra(EXTRA_SUCCESS_URL_PREFIXES)?.toList() ?: emptyList()
         successCookieName = intent.getStringExtra(EXTRA_SUCCESS_COOKIE).orEmpty()
         settleUrls = intent.getStringArrayExtra(EXTRA_SETTLE_URLS)?.toList() ?: emptyList()
+        tokenEndpoint = intent.getStringExtra(EXTRA_TOKEN_ENDPOINT).orEmpty()
+        tokenPageUrl = intent.getStringExtra(EXTRA_TOKEN_PAGE_URL).orEmpty()
+        tokenPageHost = if (tokenPageUrl.isEmpty()) "" else {
+            runCatching { android.net.Uri.parse(tokenPageUrl).host.orEmpty() }.getOrDefault("")
+        }
         pendingHosts = cookieHosts
         cookieHostsForCheck = cookieHosts.toList()
         val title = intent.getStringExtra(EXTRA_TITLE).orEmpty().ifEmpty { "登录" }
@@ -168,7 +196,7 @@ class CookieLoginActivity : Activity() {
         val done = Button(this).apply {
             text = "完成"
             textSize = 14f
-            setOnClickListener { collectAndFinish(cookieHosts) }
+            setOnClickListener { onDonePressed(cookieHosts) }
         }
         // 一键复制 Cookie：WebView 登录链走不完时（如百度搭子的 bce 会话在跳转链最后一跳才种上，
         // 而 WebView 对那段流程要么拦跨域、要么 UA 分流不种），让用户直接复制全部 Cookie 自己粘贴导入。
@@ -300,6 +328,11 @@ class CookieLoginActivity : Activity() {
      */
     private fun maybeAutoConfirm(url: String) {
         if (autoConfirmed) return
+        // 页面内换票模式：判断依据是「拿到 token」而不是「看到 cookie」
+        if (tokenEndpoint.isNotEmpty()) {
+            maybeTokenFlow(url)
+            return
+        }
         // 关键 cookie 还没出现、但有 settle 页面要访问 → 先去 settle 一次。
         // 跨域会话 cookie 只在真正访问那个域时才种下，光等是不会出现的。
         if (successCookieName.isNotEmpty() && !hasCookieNamed(successCookieName) &&
@@ -317,6 +350,90 @@ class CookieLoginActivity : Activity() {
         status?.text = "登录成功，正在保存…"
         // 稍等一拍：让 Set-Cookie 落盘、页面别闪一下就关
         web?.postDelayed({ collectAndFinish(true) }, AUTO_CONFIRM_DELAY_MS)
+    }
+
+    /**
+     * 页面内换票的三段流程：离开登录页 → 落到搭子页面 → 页内请求换票。
+     *
+     * 登录页上不动手（用户还在输账号）；一旦跳到别的域（console / 搭子），
+     * 说明授权链走完了，此时才切到 tokenPageUrl 并开始同源换票。
+     */
+    private fun maybeTokenFlow(url: String) {
+        if (tokenResult != null) return
+        val host = runCatching { android.net.Uri.parse(url).host.orEmpty() }.getOrDefault("")
+        if (host.isEmpty()) return
+        if (host.startsWith("login.") || host.startsWith("passport.") || host.startsWith("wappass.")) {
+            return
+        }
+        if (!tokenPageOpened) {
+            tokenPageOpened = true
+            status?.text = "登录成功，正在建立搭子会话…"
+            if (tokenPageUrl.isNotEmpty()) web?.loadUrl(tokenPageUrl)
+            return
+        }
+        if (tokenPageHost.isNotEmpty() && host != tokenPageHost) return
+        startTokenProbe()
+    }
+
+    private fun startTokenProbe() {
+        if (tokenProbeStarted || tokenResult != null) return
+        tokenProbeStarted = true
+        status?.text = "正在获取对话 token…"
+        web?.postDelayed(tokenProbe, TOKEN_PROBE_INTERVAL_MS)
+    }
+
+    /**
+     * 每 2 秒在页面里跑一次同源 GET。
+     *
+     * 用同步 XHR 是为了让结果作为 evaluateJavascript 的返回值直接回来——
+     * evaluateJavascript 不会 await Promise，async fetch 拿不到结果。
+     */
+    private val tokenProbe = object : Runnable {
+        override fun run() {
+            val view = web ?: return
+            if (tokenResult != null) return
+            if (tokenAttempts++ >= TOKEN_PROBE_MAX) {
+                status?.text = "没能自动取到 token，可点右上角「完成」或「复制 Cookie」手动导入"
+                return
+            }
+            val js = TOKEN_PROBE_JS.replace("__ENDPOINT__", tokenEndpoint)
+            runCatching {
+                view.evaluateJavascript(js) { raw ->
+                    val text = decodeJsString(raw)
+                    if (parseToken(text) != null) {
+                        tokenResult = text
+                        status?.text = "已取得对话 token，正在保存…"
+                        collectAndFinish(pendingHosts, true)
+                    } else {
+                        view.postDelayed(tokenProbe, TOKEN_PROBE_INTERVAL_MS)
+                    }
+                }
+            }.onFailure { status?.text = "取 token 失败（页面已关闭？），请点「完成」保存 Cookie" }
+        }
+    }
+
+    /** 用户点「完成」：token 模式下先补一次换票，取不到才退回 cookie 导出。 */
+    private fun onDonePressed(hosts: Array<String>) {
+        if (tokenEndpoint.isNotEmpty() && tokenResult == null) {
+            tokenAttempts = 0
+            tokenProbeStarted = false
+            startTokenProbe()
+            return
+        }
+        collectAndFinish(hosts)
+    }
+
+    /** 从换票响应里挑出 token（顶层 / result / data 三种形状都认）。 */
+    private fun parseToken(body: String): String? {
+        if (body.isBlank() || body.startsWith("ERR:")) return null
+        return tokenValueRegex.find(body)?.groupValues?.getOrNull(1)
+    }
+
+    private fun parseExpiry(body: String): Long {
+        val raw = expiredAtRegex.find(body)?.groupValues?.getOrNull(1).orEmpty()
+        val parsed = runCatching { java.time.Instant.parse(raw).toEpochMilli() }.getOrNull()
+        // 取不到过期时间就按 50 分钟兜底：宁可早刷，不要卡在过期点上
+        return parsed ?: (System.currentTimeMillis() + 50 * 60 * 1000L)
     }
 
     /** 目标域名下是否存在指定名字的 Cookie。 */
@@ -382,6 +499,19 @@ class CookieLoginActivity : Activity() {
 
     /** 把读到的登录态交回宿主；拿不到时给出可操作的提示而不是静默返回。 */
     private fun deliver(raw: String, fromAuto: Boolean) {
+        // 页内换票拿到了票：cookie 和 token 一起交回去（cookie 还要用于签到/额度）
+        val tokenBody = tokenResult
+        val token = if (tokenBody == null) null else parseToken(tokenBody)
+        if (tokenBody != null && token != null) {
+            val payload = com.google.gson.JsonObject().apply {
+                addProperty("cookie", raw)
+                addProperty("token", token)
+                addProperty("tokenExpiresAt", parseExpiry(tokenBody))
+            }
+            setResult(RESULT_OK, Intent().putExtra(EXTRA_RESULT_COOKIE, payload.toString()))
+            finish()
+            return
+        }
         if (raw.isBlank()) {
             if (!fromAuto) {
                 Toast.makeText(this, "还没读到登录信息，请先在页面里完成登录", Toast.LENGTH_LONG).show()
@@ -451,6 +581,12 @@ class CookieLoginActivity : Activity() {
         const val EXTRA_START_URL = "start_url"
         const val EXTRA_COOKIE_HOSTS = "cookie_hosts"
         const val EXTRA_SETTLE_URLS = "settle_urls"
+
+        /** 页面内换票的接口路径（同源相对路径，如 `/api/dumate/app/token/get`）。 */
+        const val EXTRA_TOKEN_ENDPOINT = "token_endpoint"
+
+        /** 换票前要落到的页面（决定请求的 Origin）。 */
+        const val EXTRA_TOKEN_PAGE_URL = "token_page_url"
         const val EXTRA_TITLE = "title"
         const val EXTRA_RESULT_COOKIE = "cookie"
         /** 命中任一前缀即视为登录完成（回调地址）。 */
@@ -468,6 +604,28 @@ class CookieLoginActivity : Activity() {
 
         /** 自动确认后等多久再收尾，给 Set-Cookie 落盘留时间。 */
         private const val AUTO_CONFIRM_DELAY_MS = 600L
+
+        /** 换票轮询间隔：SPA 起完到接口可用要几秒，2 秒一探够快也不吵。 */
+        private const val TOKEN_PROBE_INTERVAL_MS = 2000L
+
+        /** 最多探 20 次（40 秒），超时就退回手动。 */
+        private const val TOKEN_PROBE_MAX = 20
+
+        /**
+         * 页内换票脚本。
+         *
+         * 关键点是 withCredentials：让 HttpOnly 会话 cookie 随请求发出——
+         * 那正是 CookieManager.getCookie() 拿不到、而服务端要求的东西。
+         */
+        private const val TOKEN_PROBE_JS =
+            "(function(){try{" +
+                "var x=new XMLHttpRequest();" +
+                "x.open('GET','__ENDPOINT__',false);" +
+                "x.withCredentials=true;" +
+                "x.send(null);" +
+                "return x.responseText;" +
+                "}catch(e){return 'ERR:'+(e&&e.message?e.message:e);}})()"
+
 
         /**
          * 读取 Web Storage 的探针。

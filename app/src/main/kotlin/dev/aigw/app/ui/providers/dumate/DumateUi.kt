@@ -101,13 +101,19 @@ object DumateUi : ProviderUi {
                             "dumate.cn",
                         ),
                         "登录百度搭子",
-                        "bce-sessionid",
+                        // 换票模式拿 token 判定成功，这个 cookie 名只用于手动「完成」时的兜底判断
+                        "bce-long-term-sessionid",
                         // 兜底：若登录后没自动落 console 域，主动访问这两页激活会话
                         listOf(
                             "https://console.bce.baidu.com/",
                             "https://console.bce.baidu.com/ai/#/app/dumate/overview",
                             "https://dumate.baidu.com/app",
                         ),
+                        // **页内换票**：百度 passport 的会话 cookie 是 HttpOnly，
+                        // CookieManager 导不出来，导出的串服务端一律判「登录态已失效」。
+                        // 改成在搭子页面里发一条同源 GET，cookie 由 WebView 自动带上。
+                        "/api/dumate/app/token/get",
+                        "https://dumate.baidu.com/app",
                     )
                 },
                 modifier = Modifier.fillMaxWidth(),
@@ -115,9 +121,9 @@ object DumateUi : ProviderUi {
                 Text("在 App 内登录（取 Cookie）")
             }
             Text(
-                text = "页面是百度云登录页：登录后会跳到 console 域（这一步会**自动**完成，" +
-                    "它在为「搭子」授权会话，不能跳过）。等它自己跳完、" +
-                    "出现 bce-sessionid 才算成功，不用手动点完成。",
+                text = "页面是百度云登录页，登录后会自动跳 console 域授权，再到搭子页面取 token，" +
+                    "全程不用点「完成」。之所以要绕这一圈：百度的会话 cookie 是 HttpOnly，" +
+                    "从外面读不到，只能在页面里换票。",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

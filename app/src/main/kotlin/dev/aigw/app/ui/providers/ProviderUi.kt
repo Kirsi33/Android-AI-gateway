@@ -52,7 +52,15 @@ class ProviderUiActions(
      * 部分上游按 UA 判断客户端平台，手机 UA 直接回「该地区不开放」，桌面 UA 同网却能进
      * （Trae 国际版就是）。需要时用它，别去改全局 UA。
      */
-    /** 同 [onCookieLogin]，但 WebView 用桌面 UA（对 UA 敏感的上游用）。 */
+    /**
+     * 同 [onCookieLogin]，但 WebView 用桌面 UA（对 UA 敏感的上游用）。
+     *
+     * [tokenEndpoint] 非空时走**页内换票**：不导出 cookie，而是在登录后的页面里发一条
+     * 同源 GET，让 WebView 自己把 HttpOnly 会话 cookie 带上，直接把 token 取回来。
+     * 百度搭子必须这么走——它的 `BDUSS` / `bce-long-term-sessionid` 是 HttpOnly，
+     * `CookieManager.getCookie()` 读不到，导出的 cookie 串服务端一律判「登录态已失效」。
+     * [tokenPageUrl] 决定换票请求的 Origin（要和登录态同域）。
+     */
     val onDesktopCookieLogin: (
         providerId: String,
         url: String,
@@ -60,7 +68,9 @@ class ProviderUiActions(
         title: String,
         cookieName: String,
         settleUrls: List<String>,
-    ) -> Unit = { _, _, _, _, _, _ -> },
+        tokenEndpoint: String,
+        tokenPageUrl: String,
+    ) -> Unit = { _, _, _, _, _, _, _, _ -> },
     /** 设备授权登录（WorkBuddy）：拉起 WebView 并开始轮询；region 由组件按滑块传入。 */
     val onDeviceLogin: (providerId: String, region: String) -> Unit = { _, _ -> },
     /** 读供应商私有设置项（同步，取引擎内存值）。 */

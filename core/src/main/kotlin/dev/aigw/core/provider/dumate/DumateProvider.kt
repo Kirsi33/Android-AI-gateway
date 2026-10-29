@@ -221,6 +221,15 @@ class DumateProvider(
             return ProviderAccount(id, uid, tokenAccount.nickname, tokenAccount.toJson().toString())
         }
         if (account.cookie.isEmpty()) throw IllegalArgumentException("cookie 为空")
+        // **页内换票**回来的账号：cookie 是真的（就在那个 WebView 里工作），但百度会话 cookie
+        // 是 HttpOnly，导不出来，所以绝不能拿这份残缺 cookie 再换一次票——那必然 401。
+        // token 已经是页面内换好的，直接用。
+        if (account.token.isNotEmpty() && account.tokenExpiresAt > System.currentTimeMillis()) {
+            val uid = account.uid.ifEmpty { "dumate-" + account.cookie.hashCode().toUInt() }
+            val ready = account.copy(uid = uid, nickname = account.nickname.ifEmpty { "网页登录" })
+            tokens[uid] = TokenEntry(ready.token, ready.tokenExpiresAt)
+            return ProviderAccount(id, uid, ready.nickname, ready.toJson().toString())
+        }
         account = runCatching { client.userInfo(account) }.getOrDefault(account)
         account = runCatching { client.fetchToken(account) }.getOrElse {
             throw IllegalArgumentException("Cookie 换取对话 token 失败：${it.message}")

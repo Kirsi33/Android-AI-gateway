@@ -62,7 +62,10 @@ fun ProviderDetailScreen(
         val cookie = result.data?.getStringExtra(CookieLoginActivity.EXTRA_RESULT_COOKIE).orEmpty()
         val target = pendingCookieProvider
         if (cookie.isNotEmpty() && target.isNotEmpty()) {
-            val json = JsonObject().apply { addProperty("cookie", cookie) }.toString()
+            // 页内换票模式回来的是整份凭证 JSON（cookie + token + 过期时间），原样交给供应商；
+            // 其余上游回来的还是裸 cookie 串，按老样子包一层。
+            val json = if (cookie.trimStart().startsWith("{")) cookie
+            else JsonObject().apply { addProperty("cookie", cookie) }.toString()
             viewModel.importCredentials(target, json)
         }
         pendingCookieProvider = ""
@@ -95,7 +98,7 @@ fun ProviderDetailScreen(
                 }
                 cookieLogin.launch(intent)
             },
-            onDesktopCookieLogin = { id, url, hosts, title, cookieName, settleUrls ->
+            onDesktopCookieLogin = { id, url, hosts, title, cookieName, settleUrls, tokenEndpoint, tokenPageUrl ->
                 pendingCookieProvider = id
                 val intent = Intent(context, CookieLoginActivity::class.java).apply {
                     putExtra(CookieLoginActivity.EXTRA_START_URL, url)
@@ -108,6 +111,11 @@ fun ProviderDetailScreen(
                     }
                     if (settleUrls.isNotEmpty()) {
                         putExtra(CookieLoginActivity.EXTRA_SETTLE_URLS, settleUrls.toTypedArray())
+                    }
+                    // 页内换票：cookie 是 HttpOnly 的、导不出来，只能在页面里换
+                    if (tokenEndpoint.isNotEmpty()) {
+                        putExtra(CookieLoginActivity.EXTRA_TOKEN_ENDPOINT, tokenEndpoint)
+                        putExtra(CookieLoginActivity.EXTRA_TOKEN_PAGE_URL, tokenPageUrl)
                     }
                 }
                 cookieLogin.launch(intent)
