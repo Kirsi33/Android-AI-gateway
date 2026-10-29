@@ -31,6 +31,7 @@ object TraePayload {
         obj.addProperty("function", TraeConstants.FUNCTION)
 
         rewriteMessages(obj)
+        applyCacheControl(obj)
         // 稳定会话标识：上游按 session 归组（官方 IDE 每会话带 session_id），
         // 同一会话内稳定、跨会话不同，帮助上游命中前缀缓存。
         if (obj.get("session_id") == null || obj.get("session_id").isJsonNull) {
@@ -138,6 +139,43 @@ object TraePayload {
             rebuilt.add(item)
         }
         if (images > 0) message.add("content", rebuilt)
+    }
+
+    /**
+     * Anthropic 风格前缀缓存断点：上游 usage 回报 cache_creation/cache_read_input_tokens，
+     * 说明后端是 Anthropic 兼容缓存——必须显式打 cache_control 标记才会缓存，
+     * 否则恒为 0。这里打两个断点：
+     *  1. system 首块：缓存「工具定义 + 系统提示词」（每请求稳定的前缀大头）
+     *  2. 最后一条 user 的末块：缓存整段对话历史（增量延伸）
+     */
+    private fun applyCacheControl(obj: JsonObject) {
+        val messages = obj.get("messages") as? JsonArray ?: return
+        for (element in messages) {
+            val message = element as? JsonObject ?: continue
+            if (message.str("role") == "system") {
+                markLastTextBlock(message)
+                break
+            }
+        }
+        for (i in messages.size() - 1 downTo 0) {
+            val message = messages.get(i) as? JsonObject ?: continue
+            if (message.str("role") == "user") {
+                markLastTextBlock(message)
+                break
+            }
+        }
+    }
+
+    /** 给消息里最后一个 text 块加 cache_control（Anthropic 允许的断点标记）。 */
+    private fun markLastTextBlock(message: JsonObject) {
+        val content = message.get("content") as? JsonArray ?: return
+        for (i in content.size() - 1 downTo 0) {
+            val block = content.get(i) as? JsonObject ?: continue
+            if (block.str("type").trim().lowercase() == "text") {
+                block.add("cache_control", JsonObject().apply { addProperty("type", "ephemeral") })
+                return
+            }
+        }
     }
 
     /** 从首条 user 消息文本派生稳定会话 id（SHA-256 前 32 位十六进制）。 */
