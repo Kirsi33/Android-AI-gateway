@@ -104,7 +104,7 @@ class CookieLoginActivity : Activity() {
      *
      * 百度搭子实证：`bce-sessionid` / `bce-long-term-sessionid` 只有在真正访问
      * `console.bce.baidu.com` 时才由服务端下发；只在 dumate 域登录永远拿不到，
-     * 而调 `/api/dumate/*` 恰恰依赖它（缺了一律 401）。
+     * 而调 `/api/dumate/` 下所有接口恰恰依赖它（缺了一律 401）。
      * 参考实现 dumate2api/src/login-browser.js 的 SETTLE_URLS 就是这个用途。
      */
     private var settleUrls: List<String> = emptyList()
