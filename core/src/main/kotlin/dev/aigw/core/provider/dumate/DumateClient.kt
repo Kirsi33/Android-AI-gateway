@@ -207,12 +207,7 @@ class DumateClient {
 
     /** 今日签到状态：true=已签，null=查不到。 */
     fun loginBonusInfo(account: DumateAccount): Boolean? {
-        val (status, body) = request(
-            url = DumateConstants.CONSOLE_BASE + DumateConstants.PATH_LOGIN_BONUS_INFO,
-            method = "GET",
-            body = null,
-            headers = consoleHeaders(account),
-        )
+        val (status, body) = pointsCall(DumateConstants.PATH_LOGIN_BONUS_INFO, "GET", null, account)
         if (status !in 200..299) return null
         val root = runCatching { JsonParser.parseString(body).asJsonObject }.getOrNull() ?: return null
         if (isExpired(root)) throw DumateExpiredException("登录态已失效")
@@ -227,12 +222,7 @@ class DumateClient {
 
     /** 领每日登录奖励（签到）。 */
     fun claimLoginBonus(account: DumateAccount): Pair<Boolean, String> {
-        val (status, body) = request(
-            url = DumateConstants.CONSOLE_BASE + DumateConstants.PATH_LOGIN_BONUS,
-            method = "POST",
-            body = "{}",
-            headers = consoleHeaders(account) + mapOf("Content-Type" to "application/json"),
-        )
+        val (status, body) = pointsCall(DumateConstants.PATH_LOGIN_BONUS, "POST", "{}", account)
         val root = runCatching { JsonParser.parseString(body).asJsonObject }.getOrNull()
         val message = root?.stringOrNull("message").orEmpty()
             .ifEmpty { root?.stringOrNull("msg").orEmpty() }
@@ -257,12 +247,7 @@ class DumateClient {
 
     /** 额度总览。 */
     fun quota(account: DumateAccount): DumateQuota {
-        val (status, body) = request(
-            url = DumateConstants.CONSOLE_BASE + DumateConstants.PATH_QUOTA,
-            method = "GET",
-            body = null,
-            headers = consoleHeaders(account),
-        )
+        val (status, body) = pointsCall(DumateConstants.PATH_QUOTA, "GET", null, account)
         if (status !in 200..299) throw IllegalStateException("查询额度失败：HTTP $status ${body.take(120)}")
         val root = runCatching { JsonParser.parseString(body).asJsonObject }.getOrNull()
             ?: return DumateQuota(-1, -1, "响应无法解析")
@@ -280,6 +265,34 @@ class DumateClient {
     }
 
     // ------------------------------------------------------------------ 工具
+
+    /**
+     * 积分/签到请求：cookie 优先，拿不到就换 Bearer token 重试一次。
+     *
+     * 为什么需要兜底：控制台会话里有一项 `bce-long-term-sessionid` 是 HttpOnly，
+     * 从 WebView 外面读不出来（2.9.6 起改成拦截请求头抓，能拿到就正常）。
+     * 万一某个 ROM 拦不到，WebView 里换出来的对话 token 还有一次机会——
+     * 反正失败时两个分支都是 401/302，多试一次不亏。
+     */
+    private fun pointsCall(
+        path: String,
+        method: String,
+        body: String?,
+        account: DumateAccount,
+    ): Pair<Int, String> {
+        val extra = if (body == null) emptyMap() else mapOf("Content-Type" to "application/json")
+        val url = DumateConstants.CONSOLE_BASE + path
+        val first = request(url, method, body, consoleHeaders(account) + extra)
+        if (first.first in 200..299) return first
+        if (account.token.isEmpty()) return first
+        val second = request(
+            url,
+            method,
+            body,
+            consoleHeaders(account) + extra + mapOf("Authorization" to "Bearer " + account.token),
+        )
+        return if (second.first in 200..299) second else first
+    }
 
     /**
      * 控制台域请求头。

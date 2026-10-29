@@ -9,6 +9,7 @@ import android.view.ViewGroup
 import android.webkit.CookieManager
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -130,6 +131,16 @@ class CookieLoginActivity : Activity() {
     private var tokenProbeStarted = false
     private var tokenAttempts = 0
     private var tokenResult: String? = null
+
+    /**
+     * 从 WebView 自己发出的请求里抓到的 **Cookie 头原文**（含 HttpOnly 项）。
+     *
+     * `CookieManager.getCookie()` 只返回非 HttpOnly 的 cookie，百度那套会话
+     * （`bce-long-term-sessionid` 之类）全在 HttpOnly 里，于是导出的串看着很长、
+     * 拿去调接口一律 302/401。WebView 真正发请求时这些 cookie 是带上的，
+     * 在 `shouldInterceptRequest` 里能把整串读出来——这是外部唯一能拿到完整会话的口子。
+     */
+    private val interceptedCookies = LinkedHashMap<String, String>()
 
     private val tokenValueRegex = Regex("\"token\"\\s*:\\s*\"([0-9A-Za-z_\\-]{16,})\"")
     private val expiredAtRegex = Regex("\"expired_at\"\\s*:\\s*\"([^\"]+)\"")
@@ -297,6 +308,14 @@ class CookieLoginActivity : Activity() {
                 return false
             }
 
+            override fun shouldInterceptRequest(
+                view: WebView?,
+                request: WebResourceRequest?,
+            ): WebResourceResponse? {
+                if (request != null) captureCookieHeader(request)
+                return super.shouldInterceptRequest(view, request)
+            }
+
             override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                 super.onPageStarted(view, url, favicon)
                 maybeAutoConfirm(url.orEmpty())
@@ -436,6 +455,38 @@ class CookieLoginActivity : Activity() {
         return parsed ?: (System.currentTimeMillis() + 50 * 60 * 1000L)
     }
 
+    /**
+     * 抓一条请求的 Cookie 头，按键合并进 [interceptedCookies]。
+     *
+     * 只收目标域名的请求：WebView 同一时刻可能有广告/统计域的请求，那些 cookie
+     * 拼进凭证串只会污染（上游看到一堆不认识的名字）。
+     */
+    private fun captureCookieHeader(request: WebResourceRequest) {
+        val host = request.url?.host.orEmpty()
+        if (host.isEmpty() || cookieHostsForCheck.isEmpty()) return
+        val matched = cookieHostsForCheck.any { raw ->
+            val target = raw.trim().trimStart('.').lowercase()
+            target.isNotEmpty() && (host == target || host.endsWith(".$target"))
+        }
+        if (!matched) return
+        val header = request.requestHeaders?.entries
+            ?.firstOrNull { it.key.equals("Cookie", ignoreCase = true) }
+            ?.value
+            .orEmpty()
+        if (header.isBlank()) return
+        for (pair in header.split(';')) {
+            val trimmed = pair.trim()
+            if (trimmed.isEmpty()) continue
+            val key = trimmed.substringBefore('=').trim()
+            if (key.isEmpty()) continue
+            interceptedCookies[key] = trimmed.substringAfter('=').trim()
+        }
+    }
+
+    /** 拦截到的完整 cookie 串（不含抓不到的键时为空）。 */
+    private fun interceptedCookieString(): String =
+        interceptedCookies.entries.joinToString("; ") { (k, v) -> "$k=$v" }
+
     /** 目标域名下是否存在指定名字的 Cookie。 */
     private fun hasCookieNamed(name: String): Boolean {
         val manager = CookieManager.getInstance()
@@ -476,6 +527,17 @@ class CookieLoginActivity : Activity() {
                 val key = trimmed.substringBefore('=').trim().lowercase()
                 if (seenKeys.add(key)) pairs.add(trimmed)
             }
+        }
+        // **拦截到的完整 cookie 优先**：它含 HttpOnly 会话项，是唯一能让外部接口认账的那份。
+        // CookieManager 那份照旧保留其余键（两边的键基本重合，拦截版更新更全）。
+        if (interceptedCookies.isNotEmpty()) {
+            val merged = LinkedHashMap<String, String>()
+            for (pair in pairs) {
+                merged[pair.substringBefore('=').trim()] = pair.substringAfter('=').trim()
+            }
+            merged.putAll(interceptedCookies)
+            pairs.clear()
+            for ((k, v) in merged) pairs.add("$k=$v")
         }
         val cookies = StringBuilder(pairs.joinToString("; "))
         val view = web
