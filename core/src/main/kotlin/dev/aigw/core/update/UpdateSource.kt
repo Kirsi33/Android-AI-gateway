@@ -56,16 +56,25 @@ data class ReleaseInfo(
     val apkSize: Long,
 ) {
     /** 与 [local] 逐段比较；远端更大返回 true。 */
-    fun isNewerThan(local: String): Boolean {
-        val remote = version.split('.', '-').mapNotNull { it.toIntOrNull() }
-        val installed = local.split('.', '-').mapNotNull { it.toIntOrNull() }
-        for (i in 0 until maxOf(remote.size, installed.size)) {
-            val a = remote.getOrElse(i) { 0 }
-            val b = installed.getOrElse(i) { 0 }
-            if (a != b) return a > b
-        }
-        return false
+    fun isNewerThan(local: String): Boolean = isNewerVersion(version, local)
+}
+
+/**
+ * 逐段比较版本号：[remote] 比 [local] 新则返回 true。
+ *
+ * 按 `.`/`-` 切段后取数字段逐位比较，缺位补 0（`2.13` 与 `2.13.0` 视为相同），
+ * 非数字段直接丢弃（如 `2.14.0-beta` 里的 beta）。app 与 core 共用这一份，
+ * 不要在两端各写一遍。[ReleaseInfo.isNewerThan] 也走它。
+ */
+fun isNewerVersion(remote: String, local: String): Boolean {
+    val r = remote.split('.', '-').mapNotNull { it.toIntOrNull() }
+    val l = local.split('.', '-').mapNotNull { it.toIntOrNull() }
+    for (i in 0 until maxOf(r.size, l.size)) {
+        val a = r.getOrElse(i) { 0 }
+        val b = l.getOrElse(i) { 0 }
+        if (a != b) return a > b
     }
+    return false
 }
 
 /**
@@ -76,14 +85,7 @@ data class ReleaseInfo(
  */
 object UpdateRepository {
 
-    /**
-     * 指向**本仓库**（fork）而不是上游。
-     *
-     * 上游的版本序列是 2.x 一路涨到 2.14.x，而我们的发行号是独立的 2.5.x；
-     * 若查上游 Release，`2.14.6 > 2.5.0` 恒成立 → 每次启动都提示「发现新版本」，
-     * 点下去还会因为 versionCode 比本地小而装不上（INSTALL_FAILED_VERSION_DOWNGRADE）。
-     */
-    private const val API = "https://api.github.com/repos/x3284728970/Android-AI-gateway/releases/latest"
+    private const val API = "https://api.github.com/repos/xibai6668/Android-AI-gateway/releases/latest"
     private const val UA = "ai-gateway-android"
 
     fun fetchLatest(
@@ -123,7 +125,7 @@ object UpdateRepository {
         val obj = JsonParser.parseString(body).asJsonObject
         val version = obj.str("tag_name").trim().removePrefix("v")
         if (version.isEmpty()) throw IllegalStateException("未找到版本信息")
-        val pageUrl = obj.str("html_url").ifEmpty { "https://github.com/x3284728970/Android-AI-gateway/releases" }
+        val pageUrl = obj.str("html_url").ifEmpty { "https://github.com/xibai6668/Android-AI-gateway/releases" }
         val notes = obj.str("body").trim()
         // 发版产物固定命名为 ai-gateway-<version>-release.apk；没有就退回最大的 .apk 资产
         val assets = obj.arrayOrNull("assets")?.mapNotNull { it.takeIf { a -> a.isJsonObject }?.asJsonObject }.orEmpty()

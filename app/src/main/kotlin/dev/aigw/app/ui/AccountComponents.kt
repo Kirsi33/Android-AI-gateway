@@ -1,5 +1,6 @@
 package dev.aigw.app.ui
 
+import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
@@ -10,25 +11,29 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
-import androidx.compose.foundation.layout.size
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.KeyboardArrowDown
-import androidx.compose.material.icons.filled.KeyboardArrowUp
-import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import dev.aigw.app.ui.providers.ProviderUiActions
 import dev.aigw.core.pool.AccountStatus
@@ -56,10 +61,34 @@ fun AccountTitleColumn(
 }
 
 /**
- * 账号优先级控制：`优先` 徽章 + ↑↓ 调整顺序。
+ * 账号卡片头部标题行：左侧账号信息（[AccountTitleColumn]），右侧挂接操作控件（默认开关或展开图标）。
+ */
+@Composable
+fun AccountTitleRow(
+    account: AccountStatus,
+    modifier: Modifier = Modifier,
+    trailing: @Composable () -> Unit,
+) {
+    Row(
+        modifier = modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        AccountTitleColumn(
+            account = account,
+            modifier = Modifier.weight(1f),
+        )
+        trailing()
+    }
+}
+
+/**
+ * 账号优先级箭头（↑/↓）：绑 [ProviderUiActions.onMoveAccountPriority]。
  *
- * 优先级是「手动覆盖」：只有用户显式调过（priority > 0）才显示徽章，
- * 默认 0 的账号按余额排队，界面上不制造噪音。
+ * 排在前面的先用，同级仍按余额（见 AccountPool.pick）。被手动提到默认位置之上的账号额外标一枚「优先」，
+ * 否则用户看不出哪些号是手动提上来的。
+ *
+ * 判据用 [AccountStatus.raised] 而不是 priority：↑/↓ 是交换两个账号的优先级，
+ * 退回原顺序时高值会跑到另一个账号身上，直接看 priority 会让标记带着跑。
  */
 @Composable
 fun AccountPriorityArrows(
@@ -69,7 +98,7 @@ fun AccountPriorityArrows(
     modifier: Modifier = Modifier,
 ) {
     Row(modifier, verticalAlignment = Alignment.CenterVertically) {
-        if (account.priority > 0) {
+        if (account.raised) {
             Box(
                 modifier = Modifier
                     .clip(CircleShape)
@@ -107,27 +136,6 @@ fun AccountPriorityArrows(
 }
 
 /**
- * 账号卡片头部标题行：左侧账号信息（[AccountTitleColumn]），右侧挂接操作控件（默认开关或展开图标）。
- */
-@Composable
-fun AccountTitleRow(
-    account: AccountStatus,
-    modifier: Modifier = Modifier,
-    trailing: @Composable () -> Unit,
-) {
-    Row(
-        modifier = modifier.fillMaxWidth(),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        AccountTitleColumn(
-            account = account,
-            modifier = Modifier.weight(1f),
-        )
-        trailing()
-    }
-}
-
-/**
  * 账号启用/停用开关：绑定 [ProviderUiActions.onToggleAccount]。
  */
 @Composable
@@ -160,7 +168,7 @@ fun AccountDeleteChipRow(
         ChoiceChip(
             text = "删除账号",
             selected = false,
-            // 删除是不可恢复的：这一步只开确认框，真正的删除在对话框的确认按钮里
+            // 删除不可恢复：这一步只开确认框，真正的删除在对话框的确认按钮里
             onClick = { confirm = true },
         )
     }
@@ -175,13 +183,15 @@ fun AccountDeleteChipRow(
 }
 
 /**
- * 统一账号卡片外壳：
- * 头部标题行（昵称 + 状态 + [trailing] 开关）+ [extra] 供应商专属信息区 + [footer] 删除行。
+ * 统一账号卡片外壳。
+ *
+ * 默认收起：一行只显示 账号名 + 额度（+ 状态异常时的文案），点那一行才展开优先级、开关、
+ * 供应商专属区与删除按钮。账号多了以后每张卡都把开关和专属区铺开，列表就没法扫视了。
  *
  * - [ProviderDetailScreen]、[TraeUi]、[CodeBuddyUi] 的账号项均基于此外壳实现。
- * - [trailing] 默认为 [AccountEnableSwitch]，可传入展开图标等自定义内容；为 null 时使用默认开关。
- * - [extra] 对应各供应商自有的专属信息（额度行、detail 文案、签到/任务入口等）。
- * - [footer] 默认为 [AccountDeleteChipRow]；传 null 时隐藏；ProviderDetailScreen 可传自定义 LinkText 文本。
+ * - [trailing] 展开后右侧的控件，默认为优先级箭头 + 启用开关。
+ * - [extra] 各供应商自有的专属信息（额度明细、设备指纹、签到入口等），收起时一律隐藏。
+ * - [footer] 默认为 [AccountDeleteChipRow]；传 null 时隐藏。
  */
 @Composable
 fun AccountCardShell(
@@ -195,29 +205,67 @@ fun AccountCardShell(
         AccountDeleteChipRow(onRemove = { actions.onRemoveAccount(providerId, account.uid) })
     },
 ) {
+    var expanded by rememberSaveable(account.uid) { mutableStateOf(false) }
     Column(
-        modifier = modifier,
+        modifier = modifier.animateContentSize(),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        AccountTitleRow(
-            account = account,
-            trailing = trailing ?: {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    AccountPriorityArrows(
-                        account = account,
-                        providerId = providerId,
-                        actions = actions,
-                    )
-                    AccountEnableSwitch(
-                        account = account,
-                        providerId = providerId,
-                        actions = actions,
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { expanded = !expanded },
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text(
+                    text = account.nickname.ifEmpty { account.uid },
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                // 正常账号不占一行副标题：列表要能一眼扫完，异常才需要额外解释
+                if (!account.usable) {
+                    Text(
+                        text = accountStatusText(account),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-            },
-        )
-        extra()
-        footer?.invoke()
+            }
+            Text(
+                text = accountCreditsText(account),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.primary,
+            )
+            Icon(
+                if (expanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+                contentDescription = if (expanded) "收起" else "展开",
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(start = 6.dp),
+            )
+        }
+        if (expanded) {
+            AccountTitleRow(
+                account = account,
+                trailing = trailing ?: {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        AccountPriorityArrows(
+                            account = account,
+                            providerId = providerId,
+                            actions = actions,
+                        )
+                        AccountEnableSwitch(
+                            account = account,
+                            providerId = providerId,
+                            actions = actions,
+                        )
+                    }
+                },
+            )
+            extra()
+            footer?.invoke()
+        }
     }
 }
 

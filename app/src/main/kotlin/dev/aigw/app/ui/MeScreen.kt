@@ -4,6 +4,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.AlertDialog
@@ -37,13 +38,30 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
+import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.unit.sp
+import dev.aigw.app.data.CrashReporter
+import dev.aigw.app.ui.theme.DeepInk
 import dev.aigw.app.ui.theme.LocalAppColors
 import dev.aigw.app.ui.theme.formatHex
 import dev.aigw.core.usage.StorageAudit
 import dev.aigw.core.usage.UsageStats
+import dev.aigw.core.usage.formatMicroUsd
+import dev.aigw.core.util.startOfDay
+import java.text.SimpleDateFormat
+import java.util.Date
 import java.util.Locale
+
+/** 趋势图展示天数。 */
+private const val TREND_DAYS = 14
 
 @Composable
 fun MeScreen(state: AppUiState, viewModel: AppViewModel, open: (SubPage) -> Unit) {
@@ -88,21 +106,14 @@ fun MeScreen(state: AppUiState, viewModel: AppViewModel, open: (SubPage) -> Unit
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
         }
 
-        EditorialGroupHeader("01", "外观风格 · APPEARANCE")
+        EditorialGroupHeader("01", "外观与主题 · APPEARANCE")
         Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            EditorialSwitchRow(
-                index = "01.1",
-                title = "动态取色 · DYNAMIC COLOR",
-                subtitle = "跟随系统壁纸生成配色（Android 12 及以上）",
-                checked = state.dynamicColor,
-                onCheckedChange = { viewModel.setDynamicColor(it) },
-            )
             EditorialRow(
-                "01.2",
-                "外观主题 · THEME",
-                "明暗模式、配色方案与金色文字",
+                "01",
+                "主题设置",
+                "明暗模式、配色、底栏样式",
                 appearanceMeta(state),
-            ) { open(SubPage.AppearanceTheme) }
+            ) { open(SubPage.ThemeSettings) }
         }
 
         EditorialGroupHeader("02", "核心功能偏好 · CORE FUNCTIONS")
@@ -111,8 +122,12 @@ fun MeScreen(state: AppUiState, viewModel: AppViewModel, open: (SubPage) -> Unit
             EditorialRow(
                 "02.2",
                 "安全防护 · SECURITY",
-                "反审核脱敏与账号限速",
-                if (state.security.sanitizeEnabled) "脱敏开启" else "脱敏关闭",
+                "风控提示词替换、反审核脱敏与账号限速",
+                when {
+                    state.security.promptRewriteEnabled -> "提示词替换开启"
+                    state.security.sanitizeEnabled -> "脱敏开启"
+                    else -> "全部关闭"
+                },
             ) { open(SubPage.SecurityProtection) }
             EditorialRow(
                 "02.3",
@@ -132,8 +147,12 @@ fun MeScreen(state: AppUiState, viewModel: AppViewModel, open: (SubPage) -> Unit
             EditorialRow(
                 "02.6",
                 "代理设置 · NETWORK PROXY",
-                "境外供应商需要走代理",
-                if (state.proxy.usable) "已启用" else "未启用",
+                "多套配置，按供应商或区域决定是否走代理",
+                when {
+                    state.proxy.profiles.isEmpty() -> "未配置"
+                    state.proxy.usable -> "使用中 ${state.proxy.activeProfile?.name.orEmpty()}"
+                    else -> "${state.proxy.profiles.size} 套配置"
+                },
             ) { open(SubPage.Proxy) }
             EditorialRow(
                 "02.7",
@@ -141,15 +160,49 @@ fun MeScreen(state: AppUiState, viewModel: AppViewModel, open: (SubPage) -> Unit
                 "通知、电池优化与后台限制",
                 if (state.keepAlive?.allGood == true) "就绪" else "待配置",
             ) { open(SubPage.KeepAlive) }
+            EditorialSwitchRow(
+                index = "02.8",
+                title = "实时状态通知 · LIVE STATUS",
+                subtitle = "仅网关有请求时显示，点击回到 App",
+                checked = state.liveNotification,
+                onCheckedChange = { viewModel.setLiveNotification(it) },
+            )
             EditorialRow(
-                "02.8",
-                "数据管理 · STORAGE AUDIT",
-                "存储占用、保留期与截断",
-                StorageAudit.formatSize(state.storage?.totalChars ?: 0L),
-            ) {
-                viewModel.refreshStorage()
-                open(SubPage.DataManagement)
-            }
+                "02.9",
+                "账号导入导出 · ACCOUNTS BACKUP",
+                "按供应商与账号备份、迁移凭证",
+                "${state.pool.total} 个账号",
+            ) { open(SubPage.AccountTransfer) }
+            EditorialRow(
+                "02.10",
+                "客户端密钥 · CLIENT KEYS",
+                "谁能调用网关，可限制模型与用量",
+                if (state.clientKeys.isEmpty()) "未创建" else "${state.clientKeys.size} 把",
+            ) { open(SubPage.ClientKeys) }
+            EditorialRow(
+                "02.11",
+                "路由组 · ROUTING GROUPS",
+                "多个模型合成一个对外模型名",
+                if (state.routingGroups.groups.isEmpty()) "未创建" else "${state.routingGroups.groups.size} 组",
+            ) { open(SubPage.RoutingGroups) }
+            EditorialRow(
+                "02.12",
+                "模型价格 · PRICING",
+                "按 token 计算调用费用",
+                if (state.pricing.prices.isEmpty()) "未配置" else "${state.pricing.prices.size} 个模型",
+            ) { open(SubPage.ModelPricing) }
+            EditorialRow(
+                "02.13",
+                "请求改写 · REWRITE",
+                "模型别名、system 追加与思考标签",
+                rewriteSummary(state.middleware),
+            ) { open(SubPage.RequestRewrite) }
+            EditorialRow(
+                "02.14",
+                "崩溃日志 · CRASH",
+                "异常退出时的堆栈记录",
+                crashSummary(),
+            ) { open(SubPage.CrashLog) }
         }
 
         EditorialGroupHeader("03", "架构关于 · ABOUT THE ENGINE")
@@ -229,7 +282,7 @@ private fun EditorialRow(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                // 标题固定单行：「中文 · ENGLISH」被挤成两行会破坏栅格（英文标签跑到第二行）
+                // 标题固定单行：英文尾巴已在 cnTitle 里剥掉，中文单行不再挤
                 Text(
                     text = cnTitle(title),
                     style = MaterialTheme.typography.titleSmall,
@@ -318,9 +371,7 @@ private fun AboutDialog(onDismiss: () -> Unit) {
             TextButton(onClick = onDismiss) { Text("关闭") }
         },
         text = {
-            Column(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalAlignment = Alignment.CenterHorizontally,
+            DialogContentColumn(
                 verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 Text(
@@ -349,7 +400,7 @@ fun UsageScreen(state: AppUiState, viewModel: AppViewModel, onBack: () -> Unit) 
     LaunchedEffect(Unit) { viewModel.refreshStorage() }
     PageScaffold(
         title = "用量统计",
-        subtitle = "累计与今日",
+        subtitle = "今日、趋势与累计",
         leading = {
             Icon(
                 Icons.AutoMirrored.Filled.ArrowBack,
@@ -360,6 +411,11 @@ fun UsageScreen(state: AppUiState, viewModel: AppViewModel, onBack: () -> Unit) 
         },
     ) {
         SectionCard(enterIndex = 3) {
+            SectionLabel("近期趋势")
+            TrendSection(state)
+        }
+
+        SectionCard(enterIndex = 4) {
             SectionLabel("今日")
             CacheHitGauge(state.today)
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
@@ -368,9 +424,10 @@ fun UsageScreen(state: AppUiState, viewModel: AppViewModel, onBack: () -> Unit) 
                 StatCell(formatCount(state.today.failed), "失败")
                 StatCell(formatCount(state.today.aborted), "中断")
             }
+            CostLine(state.today)
         }
 
-        SectionCard(enterIndex = 4) {
+        SectionCard(enterIndex = 5) {
             SectionLabel("累计")
             CacheHitGauge(state.total)
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
@@ -379,35 +436,8 @@ fun UsageScreen(state: AppUiState, viewModel: AppViewModel, onBack: () -> Unit) 
                 StatCell(formatCount(state.total.failed), "失败")
                 StatCell(formatCount(state.total.aborted), "中断")
             }
+            CostLine(state.total)
         }
-
-        BreakdownCard(
-            title = "今日 · 按供应商",
-            dimensions = state.todayBreakdown.byProvider,
-            providerNames = state.providers.associate { it.id to it.displayName },
-            enterIndex = 5,
-        )
-
-        BreakdownCard(
-            title = "今日 · 按模型",
-            dimensions = state.todayBreakdown.byModel,
-            providerNames = emptyMap(),
-            enterIndex = 5,
-        )
-
-        BreakdownCard(
-            title = "累计 · 按供应商",
-            dimensions = state.totalBreakdown.byProvider,
-            providerNames = state.providers.associate { it.id to it.displayName },
-            enterIndex = 6,
-        )
-
-        BreakdownCard(
-            title = "累计 · 按模型",
-            dimensions = state.totalBreakdown.byModel,
-            providerNames = emptyMap(),
-            enterIndex = 6,
-        )
 
         SectionCard(enterIndex = 6) {
             SectionLabel("存储")
@@ -421,73 +451,161 @@ fun UsageScreen(state: AppUiState, viewModel: AppViewModel, onBack: () -> Unit) 
 }
 
 /**
- * 按维度（供应商 / 模型）拆分的用量列表。
- *
- * 数据只从本版本起累计：更早的日聚合没有维度字段，用最近 100 条记录反推会与总数矛盾。
- * 因此空列表时如实说明，不显示一个「0」让人以为是统计坏了。
+ * 近 14 天输入/输出 token 折线。放在用量统计页而不是首页：它是回顾型数据，
+ * 与「今日/累计」同属一处。
  */
 @Composable
-private fun BreakdownCard(
-    title: String,
-    dimensions: List<dev.aigw.core.usage.UsageDimension>,
-    providerNames: Map<String, String>,
-    enterIndex: Int,
-) {
-    SectionCard(enterIndex = enterIndex) {
-        SectionLabel(title)
-        if (dimensions.isEmpty()) {
-            Text(
-                text = "本版本起开始按维度统计，之前的记录没有明细。",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            return@SectionCard
+private fun TrendSection(state: AppUiState) {
+    val trend = remember(state.daily) { state.daily.takeLast(TREND_DAYS) }
+    val drawable = remember(trend) {
+        trend.size >= 2 && trend.any { it.promptTokens > 0 || it.completionTokens > 0 }
+    }
+    if (!drawable) {
+        Text(
+            text = "暂无足够历史，累积几天后显示趋势",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(vertical = 12.dp),
+        )
+        return
+    }
+
+    val gold = LocalAppColors.current.goldStart
+    TrendChart(trend, startOfDay(System.currentTimeMillis()))
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(16.dp),
+    ) {
+        LegendDot(gold, "输入")
+        LegendDot(DeepInk, "输出")
+        Text(
+            text = "近 ${trend.size} 天",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.weight(1f),
+            textAlign = TextAlign.End,
+        )
+    }
+}
+
+@Composable
+private fun LegendDot(color: Color, text: String) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Box(Modifier.size(8.dp).clip(CircleShape).background(color))
+        Text(text, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
+@Composable
+private fun TrendChart(daily: List<UsageStats>, todayStart: Long) {
+    val gold = LocalAppColors.current.goldStart
+    val gridColor = MaterialTheme.colorScheme.surfaceContainerHighest
+    val labelColor = MaterialTheme.colorScheme.onSurfaceVariant
+    val n = daily.size
+    val maxValue = remember(daily) {
+        daily.maxOf { maxOf(it.promptTokens, it.completionTokens) }.coerceAtLeast(1L)
+    }
+    val labels = remember(daily, todayStart) {
+        List(n) { index -> dayLabel(todayStart - (n - 1 - index) * 86_400_000L) }
+    }
+
+    // 复用同一支画笔：绘制阶段只改对齐方式，不再每次重绘都新建
+    val axisPaint = remember { android.graphics.Paint() }
+    val inFractions = remember(daily, maxValue) {
+        FloatArray(n) { daily[it].promptTokens.toFloat() / maxValue }
+    }
+    val outFractions = remember(daily, maxValue) {
+        FloatArray(n) { daily[it].completionTokens.toFloat() / maxValue }
+    }
+    val xs = remember(n) { FloatArray(n) }
+    val inY = remember(n) { FloatArray(n) }
+    val outY = remember(n) { FloatArray(n) }
+    Canvas(Modifier.fillMaxWidth().height(150.dp)) {
+        val gutterLeft = 40.dp.toPx()
+        val gutterBottom = 22.dp.toPx()
+        val padTop = 6.dp.toPx()
+        val padRight = 6.dp.toPx()
+        val chartWidth = (size.width - gutterLeft - padRight).coerceAtLeast(1f)
+        val chartHeight = (size.height - gutterBottom - padTop).coerceAtLeast(1f)
+        val originY = padTop + chartHeight
+        val stepX = chartWidth / (n - 1)
+        for (i in 0 until n) {
+            xs[i] = gutterLeft + i * stepX
+            inY[i] = originY - inFractions[i] * chartHeight
+            outY[i] = originY - outFractions[i] * chartHeight
         }
-        dimensions.forEach { dimension ->
-            val stats = dimension.stats
-            val percent = stats.cacheHitPercent
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column(Modifier.weight(1f)) {
-                    Text(
-                        text = providerNames[dimension.key] ?: dimension.key,
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurface,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    Text(
-                        text = "请求 ${formatCount(stats.requests)} · 成功 ${formatCount(stats.success)}" +
-                            if (stats.failed + stats.aborted > 0) {
-                                " · 失败 ${formatCount(stats.failed)} · 中断 ${formatCount(stats.aborted)}"
-                            } else {
-                                ""
-                            },
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
-                Column(horizontalAlignment = Alignment.End) {
-                    Text(
-                        text = formatTokens(stats.promptTokens) + " / " + formatTokens(stats.completionTokens),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    Text(
-                        text = if (percent == null) "命中 —" else "命中 " + String.format(Locale.US, "%.0f%%", percent),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = if (percent != null && percent >= 50) {
-                            MaterialTheme.colorScheme.tertiary
-                        } else {
-                            MaterialTheme.colorScheme.onSurfaceVariant
-                        },
-                    )
-                }
+
+        drawLine(gridColor, Offset(gutterLeft, originY), Offset(gutterLeft + chartWidth, originY), strokeWidth = 1f)
+        drawSeries(xs, inY, originY, gold)
+        drawSeries(xs, outY, originY, DeepInk)
+
+        drawIntoCanvas { canvas ->
+            axisPaint.isAntiAlias = true
+            axisPaint.color = labelColor.toArgb()
+            axisPaint.textSize = 9.sp.toPx()
+            axisPaint.textAlign = android.graphics.Paint.Align.RIGHT
+            canvas.nativeCanvas.drawText(formatAxis(maxValue), gutterLeft - 6.dp.toPx(), originY, axisPaint)
+            axisPaint.textAlign = android.graphics.Paint.Align.CENTER
+            val labelY = originY + 14.dp.toPx()
+            for (index in listOf(0, (n - 1) / 2, n - 1).distinct()) {
+                canvas.nativeCanvas.drawText(labels[index], xs[index], labelY, axisPaint)
             }
+        }
+    }
+}
+
+/** 一条序列：先画半透明填充，再画主线。 */
+private fun DrawScope.drawSeries(xs: FloatArray, ys: FloatArray, baseline: Float, color: Color) {
+    if (xs.size < 2) return
+    val fillPath = Path().apply {
+        moveTo(xs[0], baseline)
+        for (i in xs.indices) lineTo(xs[i], ys[i])
+        lineTo(xs.last(), baseline)
+        close()
+    }
+    drawPath(fillPath, color = color.copy(alpha = 0.12f))
+    val linePath = Path().apply {
+        moveTo(xs[0], ys[0])
+        for (i in 1 until xs.size) lineTo(xs[i], ys[i])
+    }
+    drawPath(
+        linePath,
+        color = color,
+        style = Stroke(width = 1.6.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round),
+    )
+}
+
+/** 坐标轴上限缩写：1.2k / 3.4M。 */
+private fun formatAxis(value: Long): String = when {
+    value >= 1_000_000L -> String.format(Locale.US, "%.1fM", value / 1_000_000.0)
+    value >= 1_000L -> String.format(Locale.US, "%.1fk", value / 1_000.0)
+    else -> value.toString()
+}
+
+private val DAY_LABEL_FORMAT = SimpleDateFormat("M/d", Locale.US)
+
+private fun dayLabel(millis: Long): String = DAY_LABEL_FORMAT.format(Date(millis))
+
+/**
+ * 费用与重试两行。
+ *
+ * 未定价的调用不能算进金额，也不能默默省略——并排告知「另有 N 次未定价」，
+ * 否则总额看起来偏低而用户不知道原因。
+ */
+@Composable
+private fun CostLine(stats: UsageStats) {
+    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(16.dp),
+    ) {
+        StatCell(formatCount(stats.retried), "换号救回")
+        StatCell(formatMicroUsd(stats.costMicros), "费用（美元）")
+        if (stats.unpriced > 0) {
+            StatCell(formatCount(stats.unpriced), "未定价调用")
         }
     }
 }
@@ -615,4 +733,22 @@ private fun concurrencySummary(failover: dev.aigw.core.failover.ModelFailoverSet
         concurrency.maxPerAccount == 0 && concurrency.maxGlobal == 0 -> "并发不限"
         else -> "单账号${concurrency.maxPerAccount}/全局${concurrency.maxGlobal}"
     }
+}
+
+/** 请求改写入口行的右侧摘要：一眼看出开了哪几项。 */
+private fun rewriteSummary(settings: dev.aigw.core.gateway.MiddlewareSettings): String {
+    val parts = buildList {
+        if (settings.aliases.isNotEmpty()) add("别名 ${settings.aliases.size}")
+        if (settings.systemPromptAppend.isNotBlank()) add("追加提示词")
+        if (settings.stripThinkTags) add("清理思考标签")
+    }
+    return if (parts.isEmpty()) "未启用" else parts.joinToString("、")
+}
+
+/** 崩溃日志摘要：没记录时不提「0 份」，免得以为是功能坏了。 */
+@Composable
+private fun crashSummary(): String {
+    val context = LocalContext.current
+    val count = remember { CrashReporter.list(context).size }
+    return if (count == 0) "无记录" else "$count 份"
 }

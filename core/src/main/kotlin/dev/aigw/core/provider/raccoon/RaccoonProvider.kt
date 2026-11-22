@@ -33,10 +33,9 @@ import dev.aigw.core.provider.queryParam
 import dev.aigw.core.provider.requestedModelOf
 import dev.aigw.core.util.HttpSupport
 import dev.aigw.core.util.arrayOrNull
-import dev.aigw.core.util.asObjectOrNull
+import dev.aigw.core.util.bodySnippet
 import dev.aigw.core.util.boolOrNull
 import dev.aigw.core.util.firstLong
-import dev.aigw.core.util.jsonCapabilitiesOf
 import dev.aigw.core.util.firstString
 import dev.aigw.core.util.jwtClaim
 import dev.aigw.core.util.jwtClaimLong
@@ -257,40 +256,24 @@ class RaccoonProvider(
     /** 查询可用积分余额（web 通道）。 */
     override fun creditInfo(account: ProviderAccount): CreditInfo? {
         val credential = parse(account) ?: return null
-        // 刷额度时顺便触发当日每日积分（幂等、每号每天只打一次）。
-        // 用户习惯是「打开供应商页看一眼余额」，不一定会点签到——不在这里补一刀，
-        // 每日 300 就会一直没人去结算。
-        runCatching { triggerDailyGrantOnce(credential) }
         return try {
             val (status, text) = getJson("$host$PATH_BALANCE", jsonHeaders(credential))
-            if (status !in 200..299) return CreditInfo(0, known = false, detail = "上游 HTTP $status")
+            if (status !in 200..299) {
+                return CreditInfo(0, known = false, detail = "上游 HTTP $status" + bodySnippet(text))
+            }
             val data = envelopeData(text) ?: return CreditInfo(0, known = false, detail = "响应缺少 data")
             // 不能走 firstLong：它把 0 当「未提供」，而积分真的是 0 与字段缺失必须区分——
             // 字段缺失要报 known=false（界面显示「—」），不能显示成「积分 0」。
             val points = BALANCE_POINT_KEYS.firstNotNullOfOrNull { data.longOrNull(it) }
                 ?: return CreditInfo(0, known = false, detail = "响应里没有积分字段（键：${data.keySet().joinToString(",")}）")
-            // 四桶明细（xhx2api 实证）：daily/monthly/reward/topup。
-            // daily=0 是「没有每日积分资格」的信号，签到页据此如实说明。
-            val buckets = listOf(
-                "日" to "daily_points",
-                "月" to "monthly_points",
-                "奖" to "reward_points",
-                "充" to "topup_points",
-            ).mapNotNull { (label, key) ->
-                data.longOrNull(key)?.takeIf { it > 0 }?.let { "$label $it" }
-            }
-            val detail = buildString {
-                append("可用积分 ").append(points)
-                if (buckets.isNotEmpty()) append("（").append(buckets.joinToString(" · ")).append("）")
-            }
-            CreditInfo(points, known = true, detail = detail)
+            CreditInfo(points, known = true, detail = "可用积分 $points")
         } catch (e: Exception) {
             CreditInfo(0, known = false, detail = e.message ?: "查询积分失败")
         }
     }
 
     override fun classify(status: Int, body: String): UpstreamError {
-        val message = extractMessage(body).ifEmpty { "上游 HTTP $status" }
+        val message = extractMessage(body).ifEmpty { "上游 HTTP $status" + bodySnippet(body) }
         val kind = when {
             status == 401 || status == 403 -> ErrorKind.SESSION_DEAD
             status == 402 -> ErrorKind.QUOTA
@@ -333,10 +316,10 @@ class RaccoonProvider(
     // ------------------------------------------------------------------ 网页登录
 
     /**
-     * 修历史遗留的 uid：早期版本把 JWT 的 `iss`（签发方，同站点所有用户同一个值）当成了
-     * 用户 id，于是所有小浣熊账号在池里共用一个 key，后登录的覆盖前一个。
+     * 修历史遗留的 uid：早期版本把 JWT 的 `iss`（签发方，同站点所有用户同一个值）当成了用户 id，
+     * 于是所有小浣熊账号在池里共用一个 key，后登录的覆盖前一个。
      *
-     * 只在**能确定**旧 uid 就是那个 iss、且能从凭证算出真实用户标识时才返回新账号；
+     * 只在**能确定**旧 uid 就是那个 iss、且能从 JWT 算出真实用户标识时才返回新账号；
      * 拿不准一律返回 null，交给用户手动处理，不猜。
      */
     override fun migrateAccount(account: ProviderAccount): ProviderAccount? {
@@ -376,19 +359,19 @@ class RaccoonProvider(
         var nickname = jwtClaim(accessToken, "name")
         var pro = false
         var orgCode = ""
-        // 不能拿 JWT 的 iss 当用户 id：iss 是签发方，同站点所有账号同一个值，拿它当
-        // 账号池主键会让后登录的账号直接覆盖前一个（「登录另一个会取代第一个」）。
-        // 取法与 CodeBuddy 一致：先 user_info 的用户字段，再退 JWT 的用户声明。
-        var userId = ""
         val userInfo = runCatching { fetchUserInfo(accessToken) }.getOrNull()
         if (userInfo != null) {
             nickname = userInfo.firstString("name", "nickname", "nick_name", "username").ifEmpty { nickname }
             pro = userInfo.boolOrNull("pro") == true
             orgCode = firstOrgCode(userInfo)
-            userId = userInfo.firstString("userId", "user_id", "uid", "sub")
         }
-        if (userId.isEmpty()) {
-            userId = jwtClaim(accessToken, "user_id", "userId", "uid", "sub")
+        // 账号标识取值顺序（对照 Buddy2api 的 providers/xiaohuanxiong/store.py）：
+        // 1. JWT 的用户声明——实测可用且每个账号都不同；
+        // 2. user_info 里的 id 字段（仅当 JWT 没给时）——不首选是因为上游该接口的 id 语义不稳定；
+        // 3. 由 refresh_token 派生（不是 access_token，后者每次登录都轮换）。
+        var userId = jwtClaim(accessToken, "user_id", "userId", "uid", "sub")
+        if (userId.isEmpty() && userInfo != null) {
+            userId = userInfo.firstString("userId", "user_id", "uid", "id", "sub")
         }
 
         val credential = Credential(
@@ -421,158 +404,74 @@ class RaccoonProvider(
     }
 
     /**
-     * 「签到」的真实语义（来自 rsfree/xhx2api 的协议实证，修正我们之前的误读）：
+     * 领取今日积分（「签到」）。
      *
-     * 1. **每日积分是服务端每天 00:00 自动结算的**（东八区），流水里 `biz_type=daily_grant`；
-     *    根本不存在「每天点一下才发」的签到接口。
-     * 2. `POST /api/web/desktop/v1/login/points/grant` 是**登录弹窗式手动领取**，幂等——
-     *    今日已发放则 `granted:false`。之前把它当每日签到，用户第二天点就「不加积分」，
-     *    其实是这笔奖励早就领过了。
-     * 3. **手机端还有一笔独立的首登奖励**（`/api/web/mobile/v1/login/points/grant`，
-     *    身份头 `app-android`），桌面领了它照样能领。
-     * 4. 有的账号**没有每日积分资格**：流水里只有 `reward_grant`（注册/登录奖励），
-     *    `daily_points` 恒为 0——这种号无论点多少次都不会有 daily_grant，
-     *    报「签到成功」是谎报，必须如实说「没有每日积分」。
+     * 对照 Buddy2api 的 `providers/xiaohuanxiong/quota.py`（实测可用）：
+     * 1. 先拉今天的积分流水，算出今日已到账多少；
+     * 2. GET `/api/web/office/v3/setting_info`——它会触发上游的每日发放，
+     *    响应里 `data.point_grant_popups` / `data.point_grant_toast` 表示确实触发了；
+     * 3. 再拉一次流水对比：变多就是本次领到，没变但已有记录就是今日已领。
      *
-     * 所以这里的动作是：领桌面奖励 → 领手机奖励 → 查流水判定今日状态 → 如实汇总。
+     * 从前用的是 `desktop/v1/login/points/grant`（桌面端登录奖励，不是每日领取），
+     * 所以点了没反应——这就是「签到不起作用」的根因。
      */
     private fun checkin(account: ProviderAccount): ProviderActionResult {
         val credential = parse(account) ?: return ProviderActionResult.failure("凭证无法解析")
         return try {
-            val lines = ArrayList<String>()
-
-            // 0) 触发每日积分发放——**这一步才是「每日 300 分」的开关**。
-            //    官方公告说 00:00 自动到账、无需登录触发，实测却是惰性结算：
-            //    只有客户端启动时调的 setting_info 会让服务端结算当天那一笔。
-            //    漏了它，用户「一直用网关」就永远拿不到每日积分（10/13 之后一条 daily_grant 都没有的真凶）。
-            val grantPopup = runCatching { triggerDailyGrant(credential) }.getOrNull()
-            grantPopup?.let { lines += it }
-
-            // 1) 桌面端登录奖励（幂等）
-            val desktop = claimGrant("$host$PATH_GRANT", jsonHeaders(credential) + desktopHeaders(), "桌面端")
-            desktop.second?.let { lines += it }
-            if (desktop.first in 400..499) {
-                return ProviderActionResult.failure(desktop.second ?: "签到失败（HTTP ${desktop.first}）")
+            val before = todayGrantedPoints(credential)
+            val (status, text) = getJson("$host$PATH_SETTING_INFO", jsonHeaders(credential) + desktopHeaders())
+            val payload = runCatching { JsonParser.parseString(text).asJsonObject }.getOrNull()
+            val code = payload?.get("code")?.takeIf { it.isJsonPrimitive }?.asLong
+            if (status !in 200..299 || (code != null && code != 0L)) {
+                val message = payload?.let { extractMessage(text) }.orEmpty()
+                return ProviderActionResult.failure(
+                    message.ifEmpty { "每日发放失败（HTTP $status）" },
+                )
             }
-
-            // 2) 手机端首登奖励（独立一笔，错过就没了）
-            val mobile = claimGrant(
-                "$host$PATH_MOBILE_GRANT",
-                jsonHeaders(credential) + mobileHeaders(),
-                "手机端",
-            )
-            mobile.second?.let { lines += it }
-
-            // 3) 今日每日积分的结算状态（以流水为准）
-            val daily = dailyGrantStatus(credential)
-            when (daily) {
-                is DailyStatus.Settled -> lines += "今日每日积分已到账"
-                // 触发过了却查不到任何 daily_grant：不是「没签到」，是这个号没有每日资格
-                is DailyStatus.NotEligible ->
-                    lines += "已触发每日发放，但流水中从未出现每日积分（该账号可能没有每日额度）"
-                is DailyStatus.Unknown -> Unit
+            val after = todayGrantedPoints(credential)
+            val data = payload?.objOrNull("data")
+            val triggered = data?.boolOrNull("point_grant_popups") == true ||
+                data?.boolOrNull("point_grant_toast") == true
+            when {
+                after > before -> ProviderActionResult.success("签到成功，+${after - before} 积分")
+                after > 0 -> ProviderActionResult.success("今日已领取（今日共 +$after 积分）")
+                triggered -> ProviderActionResult.success("已触发每日发放")
+                else -> ProviderActionResult.success("今日积分由服务端自动发放，目前未查到新入账")
             }
-            if (lines.isEmpty()) {
-                // 两个奖励都领过、流水也查不到——不猜，把原始状态摆出来
-                lines += "今日已领取过登录奖励" +
-                    if (daily is DailyStatus.Settled) "" else "（每日积分状态未知）"
-            }
-            ProviderActionResult.success(lines.joinToString("；"))
         } catch (e: Exception) {
             ProviderActionResult.failure(e.message ?: "签到失败")
         }
     }
 
-    /** 领一笔登录奖励；返回 (HTTP 状态, 展示文案)。文案为 null 表示这笔没有可展示的新信息。 */
-    private fun claimGrant(url: String, headers: Map<String, String>, label: String): Pair<Int, String?> {
-        val (status, text) = postJson(url, "{}", headers)
-        if (status !in 200..299) {
-            val msg = extractMessage(text).ifEmpty { "HTTP $status" }
-            return status to "${label}领取失败：$msg"
+    /** 今日已到账的正积分合计（按积分流水的 created_at 判日）。 */
+    private fun todayGrantedPoints(credential: Credential): Long {
+        val (status, text) = runCatching {
+            getJson("$host$PATH_BILLS?paging.limit=20&paging.offset=0", jsonHeaders(credential))
+        }.getOrNull() ?: return 0L
+        if (status !in 200..299) return 0L
+        val data = envelopeData(text) ?: return 0L
+        val rows = data.get("items")?.takeIf { it.isJsonArray }?.asJsonArray
+            ?: data.get("bills")?.takeIf { it.isJsonArray }?.asJsonArray
+            ?: data.get("list")?.takeIf { it.isJsonArray }?.asJsonArray
+            ?: return 0L
+        val today = java.time.LocalDate.now()
+        var total = 0L
+        for (element in rows) {
+            val row = element.takeIf { it.isJsonObject }?.asJsonObject ?: continue
+            val points = row.get("points")?.takeIf { it.isJsonPrimitive }?.asLong ?: continue
+            if (points <= 0) continue
+            val created = row.get("created_at")?.takeIf { it.isJsonPrimitive }?.asString.orEmpty()
+            if (created.isEmpty()) continue
+            // 兼容 ISO-8601（带 Z/偏移）与「yyyy-MM-dd HH:mm:ss」两种形态
+            val day = runCatching {
+                java.time.OffsetDateTime.parse(created).toLocalDate()
+            }.recoverCatching {
+                java.time.LocalDateTime.parse(created.replace(' ', 'T')).toLocalDate()
+            }.getOrNull() ?: continue
+            if (day == today) total += points
         }
-        val data = runCatching { JsonParser.parseString(text).asJsonObject.objOrNull("data") }.getOrNull()
-        val granted = data?.boolOrNull("granted") == true
-        val points = data?.objOrNull("popup")?.firstLong("points") ?: 0L
-        return when {
-            granted && points > 0 -> status to "${label}奖励 +$points 积分"
-            granted -> status to "${label}奖励已领取"
-            else -> status to null // granted=false = 这笔已领过（幂等），不算新闻
-        }
+        return total
     }
-
-    /**
-     * 每天每个账号只触发一次每日积分（进程内标记）。
-     *
-     * setting_info 本身按天幂等，重复调不会多发，但额度刷新很频繁，
-     * 没必要每次都打一次上游。
-     */
-    private fun triggerDailyGrantOnce(credential: Credential) {
-        val today = java.time.LocalDate.now(java.time.ZoneId.of("Asia/Shanghai")).toString()
-        val key = credential.accessToken.hashCode().toString()
-        if (grantTriggeredDay[key] == today) return
-        triggerDailyGrant(credential)
-        grantTriggeredDay[key] = today
-    }
-
-    /**
-     * 触发服务端结算当日每日积分（官方客户端启动即调，**按天幂等**）。
-     *
-     * 返回可展示的发放提示；没有新发放（今天已结算过）返回 null。
-     * 会话失效（code 200003 / 401 / 403）直接抛，交给调用方统一处理。
-     */
-    private fun triggerDailyGrant(credential: Credential): String? {
-        val (status, text) = getJson("$host$PATH_SETTING_INFO", settingHeaders(credential))
-        if (status == 401 || status == 403) throw IllegalStateException("小浣熊会话已失效，请重新登录")
-        val envelope = runCatching { JsonParser.parseString(text).asJsonObject }.getOrNull() ?: return null
-        val code = envelope.get("code")?.takeIf { it.isJsonPrimitive }?.asLong ?: 0L
-        if (code == 200003L) throw IllegalStateException("小浣熊会话已失效，请重新登录")
-        if (status !in 200..299 || code != 0L) return null
-        val data = envelope.objOrNull("data") ?: return null
-        val toast = data.stringOrNull("point_grant_toast").orEmpty()
-        val popups = data.arrayOrNull("point_grant_popups")
-            ?.mapNotNull { it.asObjectOrNull()?.firstString("title", "message", "content") }
-            ?.filter { it.isNotBlank() }
-            .orEmpty()
-        return when {
-            toast.isNotBlank() -> toast
-            popups.isNotEmpty() -> popups.joinToString("；")
-            else -> null
-        }
-    }
-
-    /** 每日积分的结算状态，以流水里今天有没有 `daily_grant` 入账为准。 */
-    private sealed interface DailyStatus {
-        /** 今天（东八区）已有 daily_grant 入账。 */
-        data object Settled : DailyStatus
-
-        /** 该账号从来没有过 daily_grant——未开通每日积分，点了也不会有。 */
-        data object NotEligible : DailyStatus
-
-        /** 流水查不到（网络/上游错误），不下结论。 */
-        data object Unknown : DailyStatus
-    }
-
-    private fun dailyGrantStatus(credential: Credential): DailyStatus {
-        val url = "$host$PATH_BILLS?paging.limit=$POINTS_BILLS_LIMIT&paging.offset=0&type=all"
-        val (status, text) = runCatching { getJson(url, jsonHeaders(credential)) }
-            .getOrNull() ?: return DailyStatus.Unknown
-        if (status !in 200..299) return DailyStatus.Unknown
-        val data = runCatching { envelopeData(text) }.getOrNull() ?: return DailyStatus.Unknown
-        val items = data.arrayOrNull("items") ?: return DailyStatus.Unknown
-
-        val today = java.time.LocalDate.now(java.time.ZoneId.of("Asia/Shanghai")).toString()
-        var ever = false
-        for (element in items) {
-            val item = element.asObjectOrNull() ?: continue
-            if (item.stringOrNull("biz_type") != "daily_grant") continue
-            ever = true
-            // 流水按时间倒序，第一条命中今天就够
-            val grantAt = item.firstString("grant_at", "created_at")
-            if (grantAt.length >= 10 && grantAt.take(10) == today) return DailyStatus.Settled
-        }
-        return if (ever) DailyStatus.Unknown else DailyStatus.NotEligible
-    }
-
 
     /** 积分流水（`/api/web/points/v1/bills`），最近 [POINTS_BILLS_LIMIT] 条。 */
     override fun pointsBills(account: ProviderAccount): PointsBillListView? {
@@ -621,7 +520,6 @@ class RaccoonProvider(
                     contextWindow = item.firstLong(
                         "context_window", "contextWindow", "max_input_tokens", "maxInputTokens", "max_context",
                     ),
-                    extra = jsonCapabilitiesOf(item),
                 ),
             )
         }
@@ -708,45 +606,17 @@ class RaccoonProvider(
         putAll(bearerHeaders(credential.accessToken))
         put("User-Agent", CLIENT_UA)
         put("Accept-Language", "zh-Hans")
+        // 官方桌面客户端会带它（Buddy2api 同款），缺了部分接口按非桌面端处理
+        put("X-Raccoon-Language", "zh")
         if (credential.orgCode.isNotEmpty()) put("X-Org-Code", credential.orgCode)
     }
 
     /**
      * 桌面客户端标识头。上游靠它判定「调用方是官方桌面端」，缺了就不发登录奖励。
      */
-    /**
-     * 桌面客户端识别头。
-     *
-     * 四个头都要：上游按这套组合判定「官方桌面端」，缺 `x-client-name` / `x-client-channel`
-     * 会被当网页端——登录奖励不发放。字段值来自 xhx2api（rsfree/xhx2api）的抓包实证。
-     */
     private fun desktopHeaders(): Map<String, String> = mapOf(
-        "x-client-name" to "@raccoon/office-desktop",
-        "x-client-platform" to CLIENT_PLATFORM,
-        "x-client-version" to CLIENT_VERSION,
-        "x-client-channel" to "official",
-    )
-
-    /**
-     * 手机端识别头（APK 逆向实证：Capacitor 的平台值加 `app-` 前缀，版本带 `v`）。
-     * token 与桌面端是同一把 Bearer——JWT claims 里没有平台字段。
-     */
-    /**
-     * 触发每日积分的客户端头（Raccoon-Daily 实证）。
-     *
-     * 注意平台值是 `desktop-windows`，**不带** `-x64`；版本用 v1.0.35。
-     * 与 [desktopHeaders] 刻意保持两套，别合并。
-     */
-    private fun settingHeaders(credential: Credential): Map<String, String> =
-        jsonHeaders(credential) + mapOf(
-            "x-client-platform" to GRANT_CLIENT_PLATFORM,
-            "x-client-version" to GRANT_CLIENT_VERSION,
-            "x-raccoon-language" to "zh",
-        )
-
-    private fun mobileHeaders(): Map<String, String> = mapOf(
-        "x-client-platform" to "app-android",
-        "x-client-version" to "v1.0.3",
+        "X-Client-Platform" to CLIENT_PLATFORM,
+        "X-Client-Version" to CLIENT_VERSION,
     )
 
     /** 上游 `created_at` 是 ISO-8601 字符串，转毫秒；解析不了就当未知（0）。 */
@@ -794,8 +664,11 @@ class RaccoonProvider(
             addProperty("nickname", credential.nickname)
             if (credential.orgCode.isNotEmpty()) addProperty("orgCode", credential.orgCode)
         }.toString()
+        // uid 兜底必须用 **refresh_token** 的哈希：它只在重新授权时轮换，同一账号多次登录保持稳定；
+        // access_token 每次登录都换，拿它做哈希会让同一账号反复变成新条目（看起来像「只能登一个号」）。
         val uid = existingUid.ifEmpty { credential.userId }.ifEmpty {
-            "raccoon-" + credential.accessToken.hashCode().toUInt().toString(16)
+            val material = credential.refreshToken.ifEmpty { credential.accessToken }
+            "raccoon-" + material.hashCode().toUInt().toString(16)
         }
         return ProviderAccount(id, uid, credential.nickname, secret)
     }
@@ -850,47 +723,29 @@ class RaccoonProvider(
         /** 桌面端登录奖励（不是每日签到）。 */
         const val PATH_GRANT = "/api/web/desktop/v1/login/points/grant"
 
-        /** 手机端首登奖励：与桌面端是**两笔独立额度**（身份头换成 app-android）。 */
-        const val PATH_MOBILE_GRANT = "/api/web/mobile/v1/login/points/grant"
-
         /** 积分流水明细。 */
         const val PATH_BILLS = "/api/web/points/v1/bills"
 
         /**
-         * **每日积分的发放触发器**（官方客户端启动时必调，服务端按天幂等结算）。
+         * 每日发放触发端点。
          *
-         * 这是「每日 300 分」真正的开关：官方公告说「每天 00:00 自动到账、无需登录触发」，
-         * 但实测是**惰性结算**——不调这个接口，服务端不会主动发（L0NE-6/Raccoon-Daily 实证，
-         * 用户流水也能回放出来：用官方客户端的日子有 `daily_grant`，只用网关的日子一条都没有）。
-         *
-         * 响应 `data.point_grant_popups` / `data.point_grant_toast` 是上游的发放提示。
+         * 对照 Buddy2api（`providers/xiaohuanxiong/quota.py`）：它读本机登录后 GET 这个端点，
+         * 响应里 `data.point_grant_popups` / `data.point_grant_toast` 表示触发了每日发放。
+         * 从前我们打的是 `desktop/v1/login/points/grant`——那是**桌面端登录奖励**，不是每日领取，
+         * 这就是用户「签到不起作用」的根因。
          */
         const val PATH_SETTING_INFO = "/api/web/office/v3/setting_info"
 
-        /**
-         * 触发每日积分专用的客户端版本号。
-         *
-         * 与登录奖励的 [CLIENT_VERSION] 分开：这一套是 Raccoon-Daily 实证能拿到发放的写法
-         * （`desktop-windows` 不带 x64 后缀 + `v1.0.35`），不要混用。
-         */
-        const val GRANT_CLIENT_PLATFORM = "desktop-windows"
-        const val GRANT_CLIENT_VERSION = "v1.0.35"
+        /** 桌面客户端标识（与 Buddy2api 一致：office-raccoon/1.0.0 + v1.0.0）。 */
+        const val CLIENT_PLATFORM = "desktop-windows"
 
-        /** 桌面客户端标识：上游只给「官方桌面端」发登录奖励，伪装成 Windows 桌面端（与 [CLIENT_UA] 一致）。 */
-        const val CLIENT_PLATFORM = "desktop-windows-x64"
-
-        const val CLIENT_VERSION = "v1.1.0"
+        const val CLIENT_VERSION = "v1.0.0"
 
         /** 积分明细一次拉取的条数（官方客户端用 20）。 */
         const val POINTS_BILLS_LIMIT = 20
 
-        /** token 哈希 → 最近一次触发每日积分的日期（东八区），防止额度刷新时反复打上游。 */
-        private val grantTriggeredDay = java.util.concurrent.ConcurrentHashMap<String, String>()
-
-        /** 伪装成官方桌面 Web 客户端的 UA（web 通道的调用方就是它）。 */
-        const val CLIENT_UA =
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-                "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+        /** 伪装成官方桌面客户端的 UA（与 Buddy2api 的 office-raccoon/1.0.0 一致）。 */
+        const val CLIENT_UA = "office-raccoon/1.0.0"
 
         /** 对话默认停止符，与官方 Web 前端一致。 */
         const val DEFAULT_STOP = "<|endofmessage|>"

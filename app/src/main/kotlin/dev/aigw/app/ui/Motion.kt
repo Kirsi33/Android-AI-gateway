@@ -1,6 +1,5 @@
 package dev.aigw.app.ui
 
-import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedContentTransitionScope
 import androidx.compose.animation.ContentTransform
 import androidx.compose.animation.core.FastOutSlowInEasing
@@ -16,34 +15,24 @@ import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.keyframes
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyListState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.State
 import androidx.compose.runtime.derivedStateOf
-import androidx.compose.foundation.gestures.awaitEachGesture
-import androidx.compose.foundation.gestures.awaitFirstDown
-import androidx.compose.foundation.gestures.waitForUpOrCancellation
-import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
@@ -55,6 +44,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -63,14 +53,9 @@ import androidx.compose.ui.unit.dp
 object Motion {
     const val PUSH_MILLIS = 320
     const val TAB_MILLIS = 200
-    // 入场从 420ms/40ms 收紧到 240ms/24ms：工具型 App 动效超过 400ms 就显拖沓，
-    // 30 条账号原来要等 29×40+420 ≈ 1.6 秒才齐。
-    const val ENTER_MILLIS = 240
-    const val STAGGER_MILLIS = 24L
-    const val BAR_FILL_MILLIS = 320
-
-    /** 错峰延迟上限：第 N 张不再线性变慢，超过这个值一起出。 */
-    const val MAX_STAGGER_DELAY_MILLIS = 200
+    const val ENTER_MILLIS = 420
+    const val STAGGER_MILLIS = 40L
+    const val BAR_FILL_MILLIS = 600
 }
 
 /**
@@ -129,11 +114,7 @@ fun Modifier.staggeredAppear(index: Int): Modifier {
     LaunchedEffect(index) { shown = true }
     val progress by animateFloatAsState(
         targetValue = if (shown) 1f else 0f,
-        animationSpec = tween(
-            Motion.ENTER_MILLIS,
-            delayMillis = ((index * Motion.STAGGER_MILLIS).toInt()).coerceAtMost(Motion.MAX_STAGGER_DELAY_MILLIS),
-            easing = FastOutSlowInEasing,
-        ),
+        animationSpec = tween(Motion.ENTER_MILLIS, delayMillis = (index * Motion.STAGGER_MILLIS).toInt(), easing = FastOutSlowInEasing),
         label = "stagger$index",
     )
     return graphicsLayer {
@@ -172,14 +153,10 @@ fun Modifier.bouncyClick(
     enabled: Boolean = true,
     onClick: () -> Unit,
 ): Modifier {
+    var pressed by remember { mutableStateOf(false) }
     // 手势块只在 key 变化时重启，若不缓存最新 lambda，就会一直调用首次组合时的 onClick
     // （调用方传入的 lambda 常捕获会变的 UI 状态，会表现为「点一次后再也点不动」）。
     val currentOnClick by rememberUpdatedState(onClick)
-    // 用 clickable 而不是裸 pointerInput：后者没有 onClick 语义（无 Role.Button、无水波纹、
-    // TalkBack 无法激活——模型页的刷新/开放名单/测试三个高频按钮全靠它）。
-    // 手感靠 graphicsLayer 缩放保留，涟漪关掉以免和缩放叠加。
-    val interaction = remember { MutableInteractionSource() }
-    val pressed by interaction.collectIsPressedAsState()
     val scale by animateFloatAsState(
         targetValue = if (pressed) 0.85f else 1f,
         animationSpec = Springs.Gentle, // 低阻尼 → 明显的 Q 弹物理振荡
@@ -188,12 +165,18 @@ fun Modifier.bouncyClick(
     return graphicsLayer {
         scaleX = scale
         scaleY = scale
-    }.clickable(
-        interactionSource = interaction,
-        indication = null,
-        enabled = enabled,
-        onClick = { currentOnClick() },
-    )
+    }.pointerInput(enabled) {
+        if (!enabled) return@pointerInput
+        awaitEachGesture {
+            awaitFirstDown(requireUnconsumed = false)
+            pressed = true
+            val up = waitForUpOrCancellation()
+            pressed = false
+            if (up != null) {
+                currentOnClick()
+            }
+        }
+    }
 }
 
 /** 流光带的跨度（px），与渐变轴向一致。 */
@@ -329,7 +312,10 @@ fun Modifier.scrollFade(
 }
 
 /**
- * 呼吸指示灯：陶土色圆点做 3s 周期的缩放 + 亮度呼吸。
+ * 呼吸指示灯：圆点做 3s 周期的缩放 + 亮度呼吸；[haloSize] 非空时额外画一圈柔光外晕
+ * （占位取 [haloSize]，核心仍是 [size] 大小）。
+ *
+ * [breathing] 为 false 时不动画、无外晕，仅画一个静态圆点。
  *
  * 时序借鉴 open-claude-ui（MIT, Caho1）逆向的 `dframe-clay-breathe`
  * （scale 0.86→1、brightness 0.96→1.06、3.0s ease-in-out）。
@@ -338,7 +324,22 @@ fun Modifier.scrollFade(
 fun Modifier.breathingDot(
     color: Color,
     size: Dp = 8.dp,
+    breathing: Boolean = true,
+    haloSize: Dp? = null,
 ): Modifier {
+    // 外晕只在显式给出时占位：不传即维持原来的纯圆点尺寸，不改变已有调用方的布局
+    val boxSize = haloSize ?: size
+    if (!breathing) {
+        return this
+            .size(boxSize)
+            .drawBehind {
+                val center = Offset(this.size.width / 2f, this.size.height / 2f)
+                if (haloSize != null) {
+                    drawCircle(color = color.copy(alpha = 0.22f), radius = (boxSize / 2).toPx(), center = center)
+                }
+                drawCircle(color = color, radius = (size / 2).toPx(), center = center)
+            }
+    }
     val transition = rememberInfiniteTransition(label = "breathe")
     val scale by transition.animateFloat(
         initialValue = 0.86f,
@@ -358,57 +359,27 @@ fun Modifier.breathingDot(
         ),
         label = "breatheAlpha",
     )
+    val actualHalo = boxSize
     return this
-        .size(size)
+        .size(actualHalo)
         .graphicsLayer {
             scaleX = scale
             scaleY = scale
             this.alpha = alpha
         }
-        .clip(CircleShape)
-        .background(color)
-}
-
-/**
- * 三点波浪：三个点依次起伏，用于「正在请求 / 正在加载」。
- *
- * 时序借鉴 open-claude-ui（MIT, Caho1）的思考三点波浪：1.2s 一轮、每点错开 160ms、纵向位移 6px。
- */
-@Composable
-fun TypingDots(
-    color: Color,
-    modifier: Modifier = Modifier,
-    dotSize: Dp = 4.dp,
-) {
-    val transition = rememberInfiniteTransition(label = "typingDots")
-    Row(
-        modifier = modifier,
-        horizontalArrangement = Arrangement.spacedBy(dotSize),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        repeat(3) { index ->
-            val lift by transition.animateFloat(
-                initialValue = 0f,
-                targetValue = 1f,
-                animationSpec = infiniteRepeatable(
-                    animation = keyframes {
-                        durationMillis = 1200
-                        0f at (index * 160)
-                        0.5f at (index * 160 + 300)
-                        1f at (index * 160 + 600)
-                        1f at 1200
-                    },
-                    repeatMode = RepeatMode.Restart,
-                ),
-                label = "dot$index",
-            )
-            Box(
-                Modifier
-                    .size(dotSize)
-                    .graphicsLayer { translationY = -(lift * 6f) }
-                    .clip(CircleShape)
-                    .background(color.copy(alpha = 0.45f + 0.55f * lift)),
+        .drawBehind {
+            val center = Offset(this.size.width / 2f, this.size.height / 2f)
+            if (haloSize != null) {
+                drawCircle(
+                    color = color.copy(alpha = 0.22f),
+                    radius = (actualHalo / 2).toPx(),
+                    center = center,
+                )
+            }
+            drawCircle(
+                color = color,
+                radius = (size / 2).toPx(),
+                center = center,
             )
         }
-    }
 }

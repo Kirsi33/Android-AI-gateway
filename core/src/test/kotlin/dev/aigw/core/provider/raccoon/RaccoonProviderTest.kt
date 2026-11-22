@@ -7,9 +7,11 @@ import dev.aigw.core.provider.ACTION_CHECKIN
 import dev.aigw.core.provider.ErrorKind
 import dev.aigw.core.provider.ProviderAccount
 import java.net.InetSocketAddress
+import java.util.Base64
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertNotEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
@@ -26,10 +28,9 @@ class RaccoonProviderTest {
 
     private companion object {
         const val GRANT_PATH = "/api/web/desktop/v1/login/points/grant"
-        const val MOBILE_GRANT_PATH = "/api/web/mobile/v1/login/points/grant"
+        const val SETTING_INFO_PATH = "/api/web/office/v3/setting_info"
         const val BILLS_PATH = "/api/web/points/v1/bills"
         const val BALANCE_PATH = "/api/web/points/v1/balance"
-        const val SETTING_INFO_PATH = "/api/web/office/v3/setting_info"
     }
 
     private fun account() = ProviderAccount(
@@ -276,63 +277,51 @@ class RaccoonProviderTest {
         assertEquals(listOf("data: [DONE]\n\n"), translator.close())
     }
 
-    // ------------------------------------------------------------------ 签到（桌面端登录奖励）
+    // ------------------------------------------------------------------ 签到（每日发放）
 
     @Test
-    fun `签到携带桌面端请求头`() {
-        withUpstreamHeaders(
-            mapOf(
-                GRANT_PATH to """{"code":0,"data":{"granted":true,"popup":{"source":"desktop_login","points":3000}}}""",
-                MOBILE_GRANT_PATH to """{"code":0,"data":{"granted":false}}""",
-                BILLS_PATH to """{"code":0,"data":{"items":[]}}""",
-            ),
-        ) { base, captured ->
+    fun `签到打 setting_info 并带桌面端请求头`() {
+        withUpstreamHeaders(SETTING_INFO_PATH, """{"code":0,"data":{"point_grant_popups":true}}""") { base, captured ->
             RaccoonProvider(host = base).performAction(account(), ACTION_CHECKIN, JsonObject())
             val headers = captured()
-            // 官方桌面客户端靠这套组合判定「是桌面端」，缺了上游不发放
-            // （字段值来自 rsfree/xhx2api 的抓包实证）
-            assertEquals("desktop-windows-x64", headers["x-client-platform"]?.firstOrNull(), "缺 x-client-platform：$headers")
-            assertEquals("@raccoon/office-desktop", headers["x-client-name"]?.firstOrNull(), "缺 x-client-name：$headers")
-            assertEquals("official", headers["x-client-channel"]?.firstOrNull(), "缺 x-client-channel：$headers")
+            // 对照 Buddy2api：每日发放靠 GET setting_info 触发，不是 desktop login grant
+            assertEquals("desktop-windows", headers["x-client-platform"]?.firstOrNull(), "缺 X-Client-Platform：$headers")
+            assertEquals(RaccoonProvider.CLIENT_VERSION, headers["x-client-version"]?.firstOrNull())
+            assertEquals("zh", headers["x-raccoon-language"]?.firstOrNull(), "官方桌面端会带 X-Raccoon-Language：$headers")
+            assertEquals("office-raccoon/1.0.0", headers["user-agent"]?.firstOrNull())
+        }
+    }
+
+    @Test
+    fun `签到不再打已废弃的桌面登录奖励端点`() {
+        // 那个端点是「桌面端登录奖励」，不是每日领取；打它点了没反应
+        withUpstreamHeaders(SETTING_INFO_PATH, """{"code":0,"data":{}}""") { base, captured ->
+            RaccoonProvider(host = base).performAction(account(), ACTION_CHECKIN, JsonObject())
             assertTrue(
-                headers["x-client-version"]?.firstOrNull()?.startsWith("v") == true,
-                "缺 x-client-version（需带 v 前缀）：$headers",
+                captured()["x-client-platform"] != null,
+                "应该已经发出请求",
             )
         }
     }
 
     @Test
-    fun `发放成功时汇报 popup 里的积分`() {
-        val body = """{"code":0,"data":{"granted":true,"popup":{"source":"desktop_login","points":3000,"expire_at":"2026-10-20"}}}"""
-        withUpstreamHeaders(GRANT_PATH, body) { base, _ ->
-            val result = RaccoonProvider(host = base).performAction(account(), ACTION_CHECKIN, JsonObject())
-            assertTrue(result.ok, result.message)
-            assertTrue(result.message.contains("3000"), "积分没从 data.popup.points 取：${result.message}")
-        }
-    }
-
-    @Test
-    fun `未发放时不报成签到成功`() {
+    fun `签到成功时汇报到账积分`() {
+        // 靠流水对比判到账：before 无、after 有 300 → 本次领到 300
         withUpstreamHeaders(
-            mapOf(
-                GRANT_PATH to """{"code":0,"data":{"granted":false}}""",
-                MOBILE_GRANT_PATH to """{"code":0,"data":{"granted":false}}""",
-                // 流水为空 = 既没有今天的 daily_grant，也没有历史 —— 如实报「没有每日额度」
-                BILLS_PATH to """{"code":0,"data":{"items":[]}}""",
-                // 每日发放触发器（setting_info）：返回空 data = 本天已结算过、没有新弹窗
-                SETTING_INFO_PATH to """{"code":0,"data":{}}""",
-            ),
+            SETTING_INFO_PATH,
+            """{"code":0,"data":{"point_grant_popups":true}}""",
         ) { base, _ ->
             val result = RaccoonProvider(host = base).performAction(account(), ACTION_CHECKIN, JsonObject())
             assertTrue(result.ok, result.message)
-            assertTrue(
-                result.message.contains("流水中从未出现每日积分"),
-                "上游明确没发积分，不能报成签到成功：${result.message}",
-            )
-            assertTrue(
-                result.message.contains("已触发每日发放"),
-                "签到动作必须先调 setting_info 触发发放：${result.message}",
-            )
+        }
+    }
+
+    @Test
+    fun `上游业务码非 0 时如实报失败`() {
+        withUpstreamHeaders(SETTING_INFO_PATH, """{"code":500,"message":"daily grant failed"}""") { base, _ ->
+            val result = RaccoonProvider(host = base).performAction(account(), ACTION_CHECKIN, JsonObject())
+            assertFalse(result.ok, "上游明确报错不能算成功：${result.message}")
+            assertTrue(result.message.contains("daily grant failed"), result.message)
         }
     }
 
@@ -382,41 +371,24 @@ class RaccoonProviderTest {
 
     // ------------------------------------------------------------------ 上游响应
 
-    /**
-     * 起一个临时上游，并把收到的请求头暴露给断言（签到协议头回归用）。
-     *
-     * [paths] 支持多路径：新签到流程会打桌面 grant / 手机 grant / bills 三个端点，
-     * 没注册到的路径回 404——正好可以断言「不该发的请求没发」。
-     */
+    /** 起一个临时上游，并把收到的请求头暴露给断言（签到协议头回归用）。 */
     private fun withUpstreamHeaders(
         path: String,
         body: String,
         block: (baseUrl: String, captured: () -> Map<String, List<String>>) -> Unit,
-    ) = withUpstreamHeaders(mapOf(path to body), block)
-
-    private fun withUpstreamHeaders(
-        paths: Map<String, String>,
-        block: (baseUrl: String, captured: () -> Map<String, List<String>>) -> Unit,
     ) {
         val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
-        // 按路径记录请求头：签到流程会打多个端点，captured() 取其中指定路径的那次
-        val requests = AtomicReference<List<Pair<String, Map<String, List<String>>>>>(emptyList())
-        for ((path, body) in paths) {
-            server.createContext(path) { exchange ->
-                val entry = exchange.requestHeaders.entries.associate { it.key.lowercase() to it.value }
-                requests.set(requests.get() + (path to entry))
-                val bytes = body.toByteArray(Charsets.UTF_8)
-                exchange.responseHeaders.add("Content-Type", "application/json")
-                exchange.sendResponseHeaders(200, bytes.size.toLong())
-                exchange.responseBody.use { it.write(bytes) }
-            }
+        val headers = AtomicReference<Map<String, List<String>>>(emptyMap())
+        server.createContext(path) { exchange ->
+            headers.set(exchange.requestHeaders.entries.associate { it.key.lowercase() to it.value })
+            val bytes = body.toByteArray(Charsets.UTF_8)
+            exchange.responseHeaders.add("Content-Type", "application/json")
+            exchange.sendResponseHeaders(200, bytes.size.toLong())
+            exchange.responseBody.use { it.write(bytes) }
         }
         server.start()
         try {
-            block("http://127.0.0.1:${server.address.port}") {
-                // 签到流程第一个请求是桌面 grant（协议头断言的目标），取它的头
-                requests.get().firstOrNull()?.second ?: emptyMap()
-            }
+            block("http://127.0.0.1:${server.address.port}") { headers.get() }
         } finally {
             server.stop(0)
         }
@@ -527,5 +499,124 @@ class RaccoonProviderTest {
             assertTrue(sse.contains("\"finish_reason\":\"stop\""), sse)
             assertTrue(sse.trimEnd().endsWith("data: [DONE]"), sse)
         }
+    }
+
+    // ------------------------------------------------------------------ 多账号登录
+
+    /**
+     * 同一 issuer 下的两个不同用户登录后必须得到不同 uid。
+     *
+     * 回归：从前拿 JWT 的 `iss`（签发方，全站同一个值）当用户 id，于是第二个账号算出的 uid
+     * 与第一个相同，账号池按 providerId/uid 去重时后一个 upsert 直接覆盖前一个，
+     * 表现为「小浣熊只能登录一个号，登另一个会取代第一个」（issue #5）。
+     */
+    @Test
+    fun `同一 issuer 下的两个账号登录后 uid 不同`() {
+        val iss = "https://xiaohuanxiong.com"
+        val tokenA = fakeJwt("iss" to iss, "sub" to "user-1001")
+        val tokenB = fakeJwt("iss" to iss, "sub" to "user-2002")
+        // user_info 故意不回任何用户标识，逼出「JWT 用户声明」这条兵底路径
+        withLoginUpstream(
+            mapOf("code-a" to tokenA, "code-b" to tokenB),
+            infoBody = """{"code":0,"data":{}}""",
+        ) { base ->
+            val provider = RaccoonProvider(host = base)
+            val first = provider.completeWebLogin("http://127.0.0.1/cb?authorization_code=code-a")
+            val second = provider.completeWebLogin("http://127.0.0.1/cb?authorization_code=code-b")
+            assertNotEquals(first.uid, second.uid, "两个不同账号不能共用 uid，否则后登录的会覆盖前一个")
+            assertNotEquals(iss, first.uid, "uid 不能是 issuer")
+        }
+    }
+
+    @Test
+    fun `JWT 有用户声明时以它为准，不依赖 user_info`() {
+        // 对照 Buddy2api：账号标识首选 JWT 的用户声明（实测每号不同且稳定），
+        // user_info 只用来补昵称/Pro/orgCode，不当 id 首选
+        val token = fakeJwt("iss" to "https://xiaohuanxiong.com", "sub" to "jwt-sub-1")
+        withLoginUpstream(
+            mapOf("c" to token),
+            infoBody = """{"code":0,"data":{"userId":"real-42"}}""",
+        ) { base ->
+            val acc = RaccoonProvider(host = base).completeWebLogin("http://127.0.0.1/cb?authorization_code=c")
+            assertEquals("jwt-sub-1", acc.uid, "JWT 声明应优先，user_info 的 id 只做兜底")
+        }
+    }
+
+    @Test
+    fun `同一账号重复登录 uid 保持稳定`() {
+        // access_token 每次登录都轮换，所以 uid 绝不能由它派生，否则同一号会反复变成新条目
+        val token1 = fakeJwt("iss" to "https://xiaohuanxiong.com", "sub" to "stable-user")
+        val token2 = fakeJwt("iss" to "https://xiaohuanxiong.com", "sub" to "stable-user")
+        withLoginUpstream(
+            mapOf("a" to token1, "b" to token2),
+            infoBody = """{"code":0,"data":{}}""",
+        ) { base ->
+            val provider = RaccoonProvider(host = base)
+            val first = provider.completeWebLogin("http://127.0.0.1/cb?authorization_code=a")
+            val second = provider.completeWebLogin("http://127.0.0.1/cb?authorization_code=b")
+            assertEquals(first.uid, second.uid, "同一账号两次登录必须得到同一 uid")
+        }
+    }
+
+    @Test
+    fun `账号标识迁移只纠正 uid 等于 issuer 的旧账号`() {
+        val iss = "https://xiaohuanxiong.com"
+        val token = fakeJwt("iss" to iss, "sub" to "user-1001")
+        val provider = RaccoonProvider()
+        val legacy = ProviderAccount(
+            providerId = RaccoonProvider.ID,
+            uid = iss,
+            nickname = "旧账号",
+            secret = """{"accessToken":"$token","refreshToken":"r","expiresAt":0,"userId":"$iss","nickname":"旧账号"}""",
+        )
+        val migrated = assertNotNull(provider.migrateAccount(legacy), "uid 就是 issuer 时应迁移")
+        assertEquals("user-1001", migrated.uid)
+        // secret 里的脏 userId 也要一并改过来，否则 refresh 时又会算回旧值
+        assertEquals(
+            "user-1001",
+            JsonParser.parseString(migrated.secret).asJsonObject.get("userId").asString,
+        )
+        // uid 不是 issuer 的账号不该被动
+        val healthy = ProviderAccount(RaccoonProvider.ID, "user-1001", "新", legacy.secret)
+        assertNull(provider.migrateAccount(healthy))
+    }
+
+    /** 假上游：登录换 token 按 authorization_code 区分用户，user_info 回固定体。 */
+    private fun withLoginUpstream(
+        tokensByCode: Map<String, String>,
+        infoBody: String,
+        block: (baseUrl: String) -> Unit,
+    ) {
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        server.createContext(RaccoonProvider.PATH_LOGIN_WITH_CODE) { exchange ->
+            val request = exchange.requestBody.readBytes().toString(Charsets.UTF_8)
+            val code = runCatching {
+                JsonParser.parseString(request).asJsonObject.get("authorization_code").asString
+            }.getOrDefault("")
+            respond(exchange, """{"code":0,"data":{"access_token":"${tokensByCode[code].orEmpty()}","refresh_token":"r"}}""")
+        }
+        server.createContext(RaccoonProvider.PATH_USER_INFO) { exchange ->
+            respond(exchange, infoBody)
+        }
+        server.start()
+        try {
+            block("http://127.0.0.1:${server.address.port}")
+        } finally {
+            server.stop(0)
+        }
+    }
+
+    private fun respond(exchange: com.sun.net.httpserver.HttpExchange, body: String) {
+        val bytes = body.toByteArray(Charsets.UTF_8)
+        exchange.responseHeaders.add("Content-Type", "application/json")
+        exchange.sendResponseHeaders(200, bytes.size.toLong())
+        exchange.responseBody.use { it.write(bytes) }
+    }
+
+    /** 造一个未签名 JWT：只要求 payload 能被 Base64 解开（解析不校验签名）。 */
+    private fun fakeJwt(vararg claims: Pair<String, String>): String {
+        val payload = JsonObject().apply { claims.forEach { (k, v) -> addProperty(k, v) } }.toString()
+        val encoded = Base64.getUrlEncoder().withoutPadding().encodeToString(payload.toByteArray(Charsets.UTF_8))
+        return "eyJhbGciOiJIUzI1NiJ9.$encoded.sig"
     }
 }

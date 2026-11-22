@@ -2,14 +2,10 @@ package dev.aigw.core.gateway
 
 import dev.aigw.core.provider.ProviderRegistry
 import dev.aigw.core.provider.antigravity.AntigravityProvider
+import dev.aigw.core.provider.chatgpt.ChatGPTProvider
 import dev.aigw.core.provider.codebuddy.CodeBuddyProvider
-import dev.aigw.core.provider.dumate.DumateProvider
 import dev.aigw.core.provider.loomy.LoomyProvider
-import dev.aigw.core.provider.longcat.LongCatProvider
-import dev.aigw.core.provider.qoder.QoderProvider
-import dev.aigw.core.provider.qwenwork.QwenProvider
 import dev.aigw.core.provider.raccoon.RaccoonProvider
-import dev.aigw.core.provider.today.TodayProvider
 import dev.aigw.core.provider.trae.TraeConstants
 import dev.aigw.core.provider.trae.TraeProvider
 import dev.aigw.core.provider.trae.TraeVersion
@@ -57,45 +53,24 @@ internal fun registerBuiltinProviders(engine: GatewayEngine) {
     )
 
     registry.register(
-        CodeBuddyProvider(
-            region = { engine.providerSettings(CodeBuddyProvider.ID).option("region", CodeBuddyProvider.REGION_CN) },
-            nowMillis = { engine.now() },
-        ),
-    )
-
-    registry.register(
-        RaccoonProvider(
+        ChatGPTProvider(
             hooks = engine.hooks,
             nowMillis = { engine.now() },
         ),
     )
 
     registry.register(
-        LongCatProvider(
+        CodeBuddyProvider(
+            region = { engine.providerSettings(CodeBuddyProvider.ID).option("region", CodeBuddyProvider.REGION_CN) },
             nowMillis = { engine.now() },
+            hooks = engine.hooks,
+            promptRewrite = { engine.securitySettings().promptRewriteEnabled },
         ),
     )
 
     registry.register(
-        DumateProvider(
-            nowMillis = { engine.now() },
-        ),
-    )
-
-    registry.register(
-        QwenProvider(
-            nowMillis = { engine.now() },
-        ),
-    )
-
-    registry.register(
-        QoderProvider(
-            nowMillis = { engine.now() },
-        ),
-    )
-
-    registry.register(
-        TodayProvider(
+        RaccoonProvider(
+            hooks = engine.hooks,
             nowMillis = { engine.now() },
         ),
     )

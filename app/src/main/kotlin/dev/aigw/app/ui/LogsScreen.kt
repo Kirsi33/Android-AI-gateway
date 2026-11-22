@@ -9,9 +9,9 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -42,10 +42,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.compose.LocalLifecycleOwner
-import androidx.lifecycle.repeatOnLifecycle
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -55,15 +51,17 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import dev.aigw.app.ui.theme.WarningAmber
 import dev.aigw.core.gateway.GatewaySettings
 import dev.aigw.core.usage.CallRecord
 import dev.aigw.core.usage.CallStatus
+import dev.aigw.core.usage.formatMicroUsd
 import kotlinx.coroutines.delay
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -82,23 +80,17 @@ private enum class LevelFilter(val label: String) {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun LogsScreen(state: AppUiState, viewModel: AppViewModel) {
-    // 筛选与抽屉状态用 rememberSaveable：转屏/进程回收后用户正在读的第 N 条记录不该消失
-    var tab by rememberSaveable { mutableStateOf(LogTab.Calls) }
-    var filter by rememberSaveable { mutableStateOf(StatusFilter.ALL) }
-    var levelFilter by rememberSaveable { mutableStateOf(LevelFilter.ALL) }
-    var detailId by rememberSaveable { mutableStateOf<String?>(null) }
-    var showLogSettings by rememberSaveable { mutableStateOf(false) }
-    // 抽屉存 id 而不是整个 record：CallRecord 带大段原文，不适合进保存状态
-    val detail = detailId?.let { id -> state.calls.firstOrNull { it.id == id } }
+    var tab by remember { mutableStateOf(LogTab.Calls) }
+    var filter by remember { mutableStateOf(StatusFilter.ALL) }
+    var levelFilter by remember { mutableStateOf(LevelFilter.ALL) }
+    var detail by remember { mutableStateOf<CallRecord?>(null) }
+    var showLogSettings by remember { mutableStateOf(false) }
 
-    // 自动刷新只在页面可见时跑：原来 while(true) 进后台也每 5 秒解密一轮记录库
-    val lifecycleOwner = LocalLifecycleOwner.current
+    // 停留在本页时自动刷新（只刷记录，不动低频数据）
     LaunchedEffect(tab) {
-        lifecycleOwner.repeatOnLifecycle(Lifecycle.State.RESUMED) {
-            while (true) {
-                delay(5_000)
-                viewModel.refreshRecords()
-            }
+        while (true) {
+            delay(5_000)
+            viewModel.refreshRecords()
         }
     }
 
@@ -227,7 +219,12 @@ fun LogsScreen(state: AppUiState, viewModel: AppViewModel) {
         LazyColumn(
             state = listState,
             modifier = Modifier.weight(1f).fillMaxWidth().scrollFade(listState),
-            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 20.dp),
+            // 悬浮底栏浮在内容之上：底部要额外让出底栏高度，否则最后一条被完全盖住
+            contentPadding = PaddingValues(
+                start = 16.dp,
+                end = 16.dp,
+                bottom = 20.dp + LocalBottomContentPadding.current,
+            ),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
             if (tab == LogTab.Calls) {
@@ -246,7 +243,7 @@ fun LogsScreen(state: AppUiState, viewModel: AppViewModel) {
                         SectionCard {
                             CallRow(
                                 record,
-                                onClick = { detailId = record.id },
+                                onClick = { detail = record },
                                 // 长按只开确认框：删的是一条带完整原文的记录，误触代价太高
                                 onLongClick = { confirmDelete = true },
                             )
@@ -288,7 +285,7 @@ fun LogsScreen(state: AppUiState, viewModel: AppViewModel) {
     }
 
     detail?.let { record ->
-        ModalBottomSheet(onDismissRequest = { detailId = null }) {
+        ModalBottomSheet(onDismissRequest = { detail = null }) {
             CallDetailSheet(record, viewModel)
         }
     }
@@ -306,18 +303,15 @@ private fun CallRow(record: CallRecord, onClick: () -> Unit, onLongClick: () -> 
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
-                text = record.model.ifEmpty { "未指定模型" },
+                // 模型名缺失（旧记录或异常写入路径）时给明确占位；纯空白串同样回落，
+                // 否则头部会出现「看着像什么都没渲染」的空白。
+                text = record.model.ifBlank { "未指定模型" },
                 style = MaterialTheme.typography.titleMedium,
-                // 长模型名（如 vendor/xxx-yyy-zzz）会挤掉右侧状态标签
-                modifier = Modifier.weight(1f),
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
             )
-            Text(
-                text = statusLabel(record.status),
-                style = MaterialTheme.typography.labelSmall,
-                color = statusColor(record.status),
-            )
+            StatusBadge(record.status)
         }
         Text(
             text = buildString {
@@ -327,14 +321,18 @@ private fun CallRow(record: CallRecord, onClick: () -> Unit, onLongClick: () -> 
             },
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
         )
-        // FlowRow：芯片数量与宽度都随内容变（账号昵称可长可短），
-        // 用 Row 会把超出的芯片压成竖排单字。
+        // 胶囊行用 FlowRow：横向放不下时整块换行，任何宽度下每个胶囊都保持自然宽度，
+        // 不会被压到「剩余宽度」里把文字折成多行（旧实现里最后的「积分」胶囊因此变成
+        // 近似圆形的徽章，标签折成两行，看起来像「积 / 19 / 分」上下堆叠）。
         FlowRow(
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp),
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(5.dp),
+            verticalArrangement = Arrangement.spacedBy(5.dp),
         ) {
-            MetricChip("耗时", "${record.durationMillis}ms", MaterialTheme.colorScheme.onSurfaceVariant)
+            MetricChip("耗时", formatDuration(record.durationMillis), MaterialTheme.colorScheme.onSurfaceVariant)
             if (record.totalTokens > 0) {
                 MetricChip("tokens", formatTokens(record.totalTokens), MaterialTheme.colorScheme.primary)
             }
@@ -344,6 +342,24 @@ private fun CallRow(record: CallRecord, onClick: () -> Unit, onLongClick: () -> 
             }
             if (record.pointsConsumed > 0) {
                 MetricChip("积分", record.pointsConsumed.toString(), MaterialTheme.colorScheme.secondary)
+            }
+            if (record.tries > 1) {
+                MetricChip("尝试", record.tries.toString(), MaterialTheme.colorScheme.error)
+            }
+            if (record.retried) {
+                MetricChip("换号救回", "是", MaterialTheme.colorScheme.tertiary)
+            }
+            if (record.costKnown) {
+                MetricChip("费用", formatMicroUsd(record.costMicros), MaterialTheme.colorScheme.primary)
+            } else if (record.status == CallStatus.SUCCESS) {
+                // 未配价格的模型不能显示成 0 元，否则用户会以为真的免费
+                MetricChip("费用", "未定价", MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            if (record.clientKeyName.isNotEmpty()) {
+                MetricChip("密钥", record.clientKeyName, MaterialTheme.colorScheme.secondary)
+            }
+            if (record.affinityReused) {
+                MetricChip("会话亲和", "命中", MaterialTheme.colorScheme.onSurfaceVariant)
             }
             if (record.accountNickname.isNotEmpty()) {
                 MetricChip("账号", record.accountNickname, MaterialTheme.colorScheme.onSurfaceVariant)
@@ -355,20 +371,26 @@ private fun CallRow(record: CallRecord, onClick: () -> Unit, onLongClick: () -> 
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.error,
                 maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
             )
         }
     }
 }
 
-/** 一条指标胶囊：等宽数字 + 标签，用于把 token/命中/耗时等压成一行可扫读的信息。 */
+/**
+ * 一条指标胶囊：等宽数字 + 标签，用于把 token/命中/耗时等压成一行可扫读的信息。
+ *
+ * 两个 Text 都禁止折行（maxLines = 1 + softWrap = false）：宽度不足时只会省略显示，
+ * 绝不会折成多行把胶囊撑成方块（曾导致「积分」胶囊被挤窄后标签折行、外观像文字堆叠）。
+ */
 @Composable
 private fun MetricChip(label: String, value: String, tone: Color) {
     Row(
         modifier = Modifier
             .clip(CircleShape)
             .background(tone.copy(alpha = 0.10f))
-            .padding(horizontal = 8.dp, vertical = 3.dp),
-        horizontalArrangement = Arrangement.spacedBy(4.dp),
+            .padding(horizontal = 7.dp, vertical = 3.dp),
+        horizontalArrangement = Arrangement.spacedBy(3.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(
@@ -377,14 +399,38 @@ private fun MetricChip(label: String, value: String, tone: Color) {
             color = tone,
             fontWeight = FontWeight.SemiBold,
             maxLines = 1,
+            softWrap = false,
             overflow = TextOverflow.Ellipsis,
         )
         Text(
             text = label,
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            softWrap = false,
+            overflow = TextOverflow.Ellipsis,
         )
     }
+}
+
+/**
+ * 状态徽章：成功 / 失败 / 中断三态都有稳定的底色与文字。
+ *
+ * 不能只留一个无底色的小字——一旦头部字段异常，那一行看起来就像完全没渲染。
+ */
+@Composable
+private fun StatusBadge(status: CallStatus) {
+    val tone = statusColor(status)
+    Text(
+        text = statusLabel(status),
+        style = MaterialTheme.typography.labelSmall,
+        color = tone,
+        maxLines = 1,
+        modifier = Modifier
+            .clip(CircleShape)
+            .background(tone.copy(alpha = 0.10f))
+            .padding(horizontal = 7.dp, vertical = 3.dp),
+    )
 }
 
 @Composable
@@ -687,7 +733,7 @@ private fun statusLabel(status: CallStatus): String = when (status) {
 
 @Composable
 private fun levelColor(level: String): Color = when (level.uppercase()) {
-    "WARN" -> Color(0xFF8A5A00)
+    "WARN" -> WarningAmber
     "ERROR" -> MaterialTheme.colorScheme.error
     else -> MaterialTheme.colorScheme.onSurface
 }
@@ -720,7 +766,7 @@ private fun LogCapacityField(current: Int, onCommit: (Int) -> Unit) {
 private fun statusColor(status: CallStatus): Color = when (status) {
     CallStatus.SUCCESS -> MaterialTheme.colorScheme.tertiary
     CallStatus.FAILED -> MaterialTheme.colorScheme.error
-    CallStatus.ABORTED -> Color(0xFF8A5A00)
+    CallStatus.ABORTED -> WarningAmber
 }
 
 private val TIME_FORMAT = SimpleDateFormat("MM-dd HH:mm:ss", Locale.getDefault())

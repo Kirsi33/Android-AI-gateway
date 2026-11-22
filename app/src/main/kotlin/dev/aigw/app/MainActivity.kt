@@ -9,23 +9,46 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
-import androidx.activity.enableEdgeToEdge
 import androidx.compose.animation.AnimatedContent
+import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.platform.LocalContext
+import dev.chrisbanes.haze.HazeInput
+import dev.chrisbanes.haze.HazeState
+import dev.chrisbanes.haze.blur.HazeBlurStyle
+import dev.chrisbanes.haze.blur.HazeColorEffect
+import dev.chrisbanes.haze.blur.hazeBlur
+import dev.chrisbanes.haze.hazeSource
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.History
-import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.Home
-import androidx.compose.material.icons.filled.Hub
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Storage
@@ -37,17 +60,23 @@ import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.ScaffoldDefaults
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
@@ -56,16 +85,19 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import dev.aigw.app.data.CrashReporter
 import dev.aigw.app.service.GatewayTileService
 import dev.aigw.app.ui.pushPopSpec
 import dev.aigw.app.ui.tabContentSpec
+import dev.aigw.app.ui.LocalBottomContentPadding
 import dev.aigw.app.ui.AppUiState
 import dev.aigw.app.ui.ApiSettingsScreen
+import dev.aigw.app.ui.CrashLogScreen
 import dev.aigw.app.ui.AppViewModel
 import dev.aigw.app.ui.AppearanceThemeScreen
+import dev.aigw.app.ui.ThemeSettingsScreen
 import dev.aigw.app.ui.CustomProviderScreen
 import dev.aigw.app.ui.CreditCenterScreen
-import dev.aigw.app.ui.DataManagementScreen
 import dev.aigw.app.ui.HomeScreen
 import dev.aigw.app.ui.KeepAliveScreen
 import dev.aigw.app.ui.LogsScreen
@@ -78,6 +110,11 @@ import dev.aigw.app.ui.ProxyScreen
 import dev.aigw.app.ui.ResilienceScreen
 import dev.aigw.app.ui.SecurityProtectionScreen
 import dev.aigw.app.ui.SubPage
+import dev.aigw.app.ui.AccountTransferScreen
+import dev.aigw.app.ui.ClientKeysScreen
+import dev.aigw.app.ui.ModelPricingScreen
+import dev.aigw.app.ui.RequestRewriteScreen
+import dev.aigw.app.ui.RoutingGroupsScreen
 import dev.aigw.app.ui.TaskCenterScreen
 import dev.aigw.app.ui.UsageScreen
 import dev.aigw.app.ui.formatBytes
@@ -92,9 +129,6 @@ class MainActivity : ComponentActivity() {
 
     private var viewModel: AppViewModel? = null
 
-    /** 是否需要在首帧后主动检查一次更新（由「有新版本」通知点击带入）。 */
-    private var triggerUpdateCheck = false
-
     private val gatewayToggledReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             // 磁贴启停后通知界面刷新（磁贴无法直接触达 ViewModel）
@@ -102,33 +136,14 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    override fun onResume() {
-        super.onResume()
-        // 从浏览器做完设备授权回来：轮询在引擎线程里可能已经成功，这里补一次刷新
-        viewModel?.checkPendingDeviceLogin()
-    }
-
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
         registerGatewayToggledReceiver()
-        // 从「有新版本」通知点进来：直接触发一次检查，让更新弹窗自己浮出来
-        if (intent?.getBooleanExtra(dev.aigw.app.data.UpdateNotifier.EXTRA_SHOW_UPDATE, false) == true) {
-            intent?.removeExtra(dev.aigw.app.data.UpdateNotifier.EXTRA_SHOW_UPDATE)
-            triggerUpdateCheck = true
-        }
         setContent {
             val vm: AppViewModel = viewModel(factory = appViewModelFactory())
             viewModel = vm
             val state by vm.state.collectAsStateWithLifecycle()
-            // 通知点进来时补一次手动检查（弹窗不受「每天一次」的自动检查节流影响）
-            LaunchedEffect(triggerUpdateCheck) {
-                if (triggerUpdateCheck) {
-                    triggerUpdateCheck = false
-                    vm.checkUpdate()
-                }
-            }
-
             AiGatewayTheme(
                 dynamicColor = state.dynamicColor,
                 themeMode = state.themeMode,
@@ -165,8 +180,8 @@ class MainActivity : ComponentActivity() {
 
 private enum class Tab(val label: String, val icon: ImageVector) {
     Home("首页", Icons.Filled.Home),
-    Providers("供应商", Icons.Filled.Hub),
-    Models("模型", Icons.AutoMirrored.Filled.List),
+    Providers("供应", Icons.Filled.Person),
+    Models("模型", Icons.Filled.Storage),
     Logs("记录", Icons.Filled.History),
     Me("我的", Icons.Filled.Settings),
 }
@@ -175,8 +190,25 @@ private enum class Tab(val label: String, val icon: ImageVector) {
 private fun AppRoot(viewModel: AppViewModel, state: AppUiState) {
     var tab by remember { mutableStateOf(Tab.Home) }
     var subPage by remember { mutableStateOf<SubPage?>(null) }
+    // 上次崩溃过就直接打开崩溃页：用户重进时最想看的就是「为什么崩了」
+    var crashChecked by remember { mutableStateOf(false) }
 
     val snackbarHostState = remember { SnackbarHostState() }
+    // 玻璃采样状态：内容层写入，底栏读取
+    val hazeState = remember { HazeState() }
+    // 拿在组合上下文里，不能在 LaunchedEffect 的挂起体里调 @Composable
+    val context = LocalContext.current
+    LaunchedEffect(Unit) {
+        if (!crashChecked) {
+            crashChecked = true
+            // 只看「本次启动之前」写过的那一份：崩溃发生在上一进程，应用私有目录里的
+            // 最新文件就是它。消费一次后不再自动跳，避免每次启动都堵在崩溃页。
+            val latest = CrashReporter.list(context).firstOrNull()
+            if (latest != null && CrashReporter.consumeAutoOpen(context, latest)) {
+                subPage = SubPage.CrashLog
+            }
+        }
+    }
     LaunchedEffect(state.notice) {
         if (state.notice.isNotEmpty()) {
             snackbarHostState.showSnackbar(state.notice)
@@ -191,41 +223,49 @@ private fun AppRoot(viewModel: AppViewModel, state: AppUiState) {
     BackHandler(enabled = subPage != null) {
         subPage = when (val page = subPage) {
             is SubPage.ProviderCredits -> SubPage.CreditCenter
+            SubPage.AppearanceTheme -> SubPage.ThemeSettings
             is SubPage.CustomProviderEdit ->
                 page.key?.let { SubPage.ProviderDetail(ProviderUiRegistry.CUSTOM_PREFIX + it) }
             else -> null
         }
     }
 
+    CompositionLocalProvider(LocalBottomContentPadding provides if (state.floatingNavBar) 78.dp else 0.dp) {
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
         snackbarHost = { SnackbarHost(snackbarHostState) },
+        // 悬浮底栏时让内容铺到屏幕底部，由导航栏自己层叠在上面；
+        // 同时给内容区留出底栏高度，避免最后一屏内容被玻璃盖住。
+        contentWindowInsets = if (state.floatingNavBar) WindowInsets(0) else ScaffoldDefaults.contentWindowInsets,
         bottomBar = {
-            val selectedGold = LocalAppColors.current.goldStart
-            NavigationBar(containerColor = MaterialTheme.colorScheme.surface) {
-                Tab.entries.forEach { item ->
-                    NavigationBarItem(
-                        selected = subPage == null && tab == item,
-                        onClick = {
-                            subPage = null
-                            tab = item
-                            if (item == Tab.Models) viewModel.ensureModelsLoaded()
-                        },
-                        icon = { Icon(item.icon, contentDescription = item.label) },
-                        label = { Text(item.label) },
-                        colors = NavigationBarItemDefaults.colors(
-                            indicatorColor = Color.Transparent,
-                            selectedIconColor = selectedGold,
-                            selectedTextColor = selectedGold,
-                            unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                            unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                        ),
-                    )
-                }
+            if (state.floatingNavBar) {
+                FloatingNavBar(tab, subPage, hazeState, onSelect = { item ->
+                    subPage = null
+                    tab = item
+                    if (item == Tab.Models) viewModel.ensureModelsLoaded()
+                })
+            } else {
+                DockedNavBar(tab, subPage, onSelect = { item ->
+                    subPage = null
+                    tab = item
+                    if (item == Tab.Models) viewModel.ensureModelsLoaded()
+                })
             }
         },
     ) { insets ->
-        Box(Modifier.fillMaxSize().padding(bottom = insets.calculateBottomPadding())) {
+        Box(
+            Modifier
+                .fillMaxSize()
+                // 悬浮底栏时内容**铺满全屏**，不因 insets 向上抬：
+                // 否则底栏背后是一片空白背景，玻璃无像素可采样，看起来就是完全没模糊。
+                .then(
+                    if (state.floatingNavBar) {
+                        Modifier.hazeSource(hazeState)
+                    } else {
+                        Modifier.padding(bottom = insets.calculateBottomPadding())
+                    },
+                ),
+        ) {
             // 二级页推拉过渡：推入从右滑入，返回向右滑出
             AnimatedContent(
                 targetState = subPage,
@@ -241,8 +281,13 @@ private fun AppRoot(viewModel: AppViewModel, state: AppUiState) {
                     onEditCustom = { subPage = SubPage.CustomProviderEdit(it.removePrefix("custom:")) },
                 )
 
-                                is SubPage.CustomProviderEdit -> CustomProviderScreen(
+                is SubPage.CustomProviderEdit -> CustomProviderScreen(
                     existing = state.customProviders.firstOrNull { it.key == page.key },
+                    existingKeys = page.key
+                        ?.let { key -> state.accountsOf("${ProviderUiRegistry.CUSTOM_PREFIX}$key") }
+                        ?.map { viewModel.accountApiKey("${ProviderUiRegistry.CUSTOM_PREFIX}${page.key}", it.uid) }
+                        ?.filter { it.isNotEmpty() }
+                        .orEmpty(),
                     onSave = {
                         viewModel.saveCustomProvider(it)
                         subPage = SubPage.ProviderDetail(it.providerId)
@@ -251,13 +296,25 @@ private fun AppRoot(viewModel: AppViewModel, state: AppUiState) {
                         viewModel.removeCustomProvider(it)
                         subPage = null
                     },
+                    onFetchModels = { baseUrl, apiKey, onResult ->
+                        viewModel.fetchCustomModels(baseUrl, apiKey, onResult)
+                    },
                     onBack = {
                         subPage = page.key?.let { SubPage.ProviderDetail(ProviderUiRegistry.CUSTOM_PREFIX + it) }
                     },
                 )
 
                 SubPage.Usage -> UsageScreen(state, viewModel) { subPage = null }
-                SubPage.TaskCenter -> TaskCenterScreen(state, viewModel) { subPage = null }
+                SubPage.TaskCenter -> TaskCenterScreen(
+                    state = state,
+                    viewModel = viewModel,
+                    onOpenProviders = {
+                        // 空态里的「去供应商页」：切回供应商 tab，并关掉这个二级页
+                        tab = Tab.Providers
+                        subPage = null
+                    },
+                    onBack = { subPage = null },
+                )
                 SubPage.CreditCenter -> CreditCenterScreen(
                     state = state,
                     onOpen = { subPage = SubPage.ProviderCredits(it) },
@@ -274,8 +331,19 @@ private fun AppRoot(viewModel: AppViewModel, state: AppUiState) {
                 SubPage.ApiSettings -> ApiSettingsScreen(state, viewModel) { subPage = null }
                 SubPage.SecurityProtection -> SecurityProtectionScreen(state, viewModel) { subPage = null }
                 SubPage.Resilience -> ResilienceScreen(state, viewModel) { subPage = null }
-                SubPage.DataManagement -> DataManagementScreen(state, viewModel) { subPage = null }
-                SubPage.AppearanceTheme -> AppearanceThemeScreen(state, viewModel) { subPage = null }
+                SubPage.AppearanceTheme -> AppearanceThemeScreen(state, viewModel) { subPage = SubPage.ThemeSettings }
+                SubPage.ThemeSettings -> ThemeSettingsScreen(
+                    state = state,
+                    viewModel = viewModel,
+                    onOpenColors = { subPage = SubPage.AppearanceTheme },
+                    onBack = { subPage = null },
+                )
+                SubPage.AccountTransfer -> AccountTransferScreen(state, viewModel) { subPage = null }
+                SubPage.ClientKeys -> ClientKeysScreen(state, viewModel) { subPage = null }
+                SubPage.RoutingGroups -> RoutingGroupsScreen(state, viewModel) { subPage = null }
+                SubPage.ModelPricing -> ModelPricingScreen(state, viewModel) { subPage = null }
+                SubPage.RequestRewrite -> RequestRewriteScreen(state, viewModel) { subPage = null }
+                SubPage.CrashLog -> CrashLogScreen { subPage = null }
                 null -> MainTabs(
                     viewModel = viewModel,
                     state = state,
@@ -290,6 +358,7 @@ private fun AppRoot(viewModel: AppViewModel, state: AppUiState) {
                 }
             }
         }
+    }
     }
 
     // 「稍后」只在本次会话内生效：关掉后仍可用「检查更新」重新拉出更新弹窗
@@ -398,6 +467,149 @@ private fun AppRoot(viewModel: AppViewModel, state: AppUiState) {
     }
 }
 
+/** 贴边底栏（默认）。 */
+@Composable
+private fun DockedNavBar(tab: Tab, subPage: SubPage?, onSelect: (Tab) -> Unit) {
+    val selectedGold = LocalAppColors.current.goldStart
+    NavigationBar(containerColor = MaterialTheme.colorScheme.surface) {
+        Tab.entries.forEach { item ->
+            NavigationBarItem(
+                selected = subPage == null && tab == item,
+                onClick = { onSelect(item) },
+                icon = { Icon(item.icon, contentDescription = item.label) },
+                label = { Text(item.label) },
+                colors = NavigationBarItemDefaults.colors(
+                    indicatorColor = Color.Transparent,
+                    selectedIconColor = selectedGold,
+                    selectedTextColor = selectedGold,
+                    unselectedIconColor = Color(0xFF777777),
+                    unselectedTextColor = Color(0xFF777777),
+                ),
+            )
+        }
+    }
+}
+/**
+ * 悬浮底栏：iOS 26 液态玻璃胶囊。
+ *
+ * 形状是**胶囊**（Pill）：圆角半径 = 高度的一半，所以不写固定 dp，而是用 [CircleShape]；
+ * 宽度也不铺满，而是按内容收缩后居中——iOS 的悬浮栏就是一条“分频团”，
+ * 铺满整屏再加圆角矩形看起来完全不是那个东西。
+ */
+@Composable
+private fun FloatingNavBar(tab: Tab, subPage: SubPage?, haze: HazeState, onSelect: (Tab) -> Unit) {
+    val selectedGold = LocalAppColors.current.goldStart
+    val isLight = MaterialTheme.colorScheme.background.luminance() > 0.5f
+    val tintAlpha = if (isLight) 0.18f else 0.14f
+    val surfaceColor = MaterialTheme.colorScheme.surface
+    // 2.x 的 Style 按引用比较，每次重组新建会反复替换节点，必须 remember。
+    val glassStyle = remember(surfaceColor, tintAlpha) {
+        HazeBlurStyle {
+            backgroundColor(Color.Transparent)
+            blurRadius(40.dp)
+            noiseFactor(0.04f)
+            colorEffects(
+                listOf(
+                    HazeColorEffect.tint(surfaceColor.copy(alpha = tintAlpha)),
+                ),
+            )
+        }
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .navigationBarsPadding()
+            .padding(horizontal = 16.dp, vertical = 14.dp),
+        contentAlignment = Alignment.BottomCenter,
+    ) {
+        Box(
+            modifier = Modifier
+                .width(IntrinsicSize.Max)
+                .shadow(
+                    elevation = 16.dp,
+                    shape = CircleShape,
+                    ambientColor = Color.Black.copy(alpha = 0.30f),
+                    spotColor = Color.Black.copy(alpha = 0.40f),
+                )
+                .clip(CircleShape)
+                // 玻璃本体：模糊背景 + 极浅色调。不透明度必须低，
+                // 否则实色会把模糊盖住，看上去就是一块普通半透明底。
+                .hazeBlur(
+                    input = HazeInput.Sources(haze),
+                    style = glassStyle,
+                )
+                .drawWithContent {
+                    drawContent()
+                    // 胶囊内描边：玻璃边缘的一圈亮线
+                    val border = 1.dp.toPx()
+                    drawRoundRect(
+                        color = Color.White.copy(alpha = if (isLight) 0.60f else 0.20f),
+                        topLeft = Offset(border / 2f, border / 2f),
+                        size = Size(size.width - border, size.height - border),
+                        cornerRadius = CornerRadius(size.height / 2f),
+                        style = Stroke(width = border),
+                    )
+                    // 顶部高光：胶囊上半部分被照亮，且只在水平方向也渐变，不糊满整条
+                    val highlightHeight = size.height * 0.55f
+                    drawRect(
+                        brush = Brush.verticalGradient(
+                            colors = listOf(
+                                Color.White.copy(alpha = if (isLight) 0.55f else 0.18f),
+                                Color.Transparent,
+                            ),
+                            startY = 0f,
+                            endY = highlightHeight,
+                        ),
+                        size = Size(size.width, highlightHeight),
+                    )
+                },
+        ) {
+            Row(
+                modifier = Modifier.padding(horizontal = 10.dp, vertical = 12.dp),
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Tab.entries.forEach { item ->
+                    val selected = subPage == null && tab == item
+                    Row(
+                        modifier = Modifier
+                            .clip(CircleShape)
+                            // 选中项用一层极淡的亮色“胶囊内胶囊”，而不是改文字颜色
+                            .background(
+                                if (selected) {
+                                    LocalAppColors.current.goldStart.copy(alpha = if (isLight) 0.16f else 0.20f)
+                                } else {
+                                    Color.Transparent
+                                },
+                            )
+                            .clickable { onSelect(item) }
+                            .padding(horizontal = 14.dp, vertical = 11.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        Icon(
+                            imageVector = item.icon,
+                            contentDescription = item.label,
+                            tint = if (selected) selectedGold else MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(22.dp),
+                        )
+                        // 只给选中项显示文字，未选中只留图标：这才是 iOS 胶囊栏的形态
+                        if (selected) {
+                            Text(
+                                text = item.label,
+                                style = MaterialTheme.typography.labelMedium,
+                                color = selectedGold,
+                                maxLines = 1,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /** 主 Tab 页面：切换时按索引方向做小幅滑移 + 淡入淡出。 */
 @Composable
 private fun MainTabs(
@@ -416,8 +628,9 @@ private fun MainTabs(
             Tab.Home -> HomeScreen(
                 state = state,
                 viewModel = viewModel,
-                openProviders = { onTab(Tab.Providers) },
                 openTaskCenter = { onSubPage(SubPage.TaskCenter) },
+                openLogs = { onTab(Tab.Logs) },
+                openUsage = { onSubPage(SubPage.Usage) },
             )
             Tab.Providers -> ProviderListScreen(
                 state = state,

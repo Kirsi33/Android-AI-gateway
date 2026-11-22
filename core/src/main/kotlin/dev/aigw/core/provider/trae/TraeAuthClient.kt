@@ -22,18 +22,8 @@ class TraeAuthClient(private val version: TraeVersion) {
      */
     internal fun authHost(account: TraeAccount): String {
         val region = TraeRegion.infer(account.domain, account.apiHost)
-        val resolved = TraeUpstream.of(region, account.userRegion).authHost
-        val host = account.apiHost.trim()
-        // 自定义代理 host（非官方域名）优先，原样用
-        val official = host.isEmpty() ||
-            listOf("trae.cn", "trae.ai", "mchost.guru", "growsg", "coresg", "coreva")
-                .any { host.contains(it) }
-        if (!official) return host
-        // 官方 host 一律按区域重算：
-        //  - 国际版：新加坡 auth=growsg-normal，美区 auth=ug-normal.us（凭证 region 决定）；
-        //    存量凭证里的 api.trae.ai / 国内 api 都是错的，留着就会 404/401；
-        //  - 国内版缺省 api.trae.cn。
-        return resolved
+        val host = account.apiHost.ifEmpty { region.oauthHost }
+        return if (region == TraeRegion.INTL && host == TraeRegion.CN.oauthHost) region.oauthHost else host
     }
 
     /** refreshToken → 新 accessToken，并轮换 refreshToken。 */
@@ -42,10 +32,8 @@ class TraeAuthClient(private val version: TraeVersion) {
             throw TraeHttpException(0, TraeErrorKind.SESSION_DEAD, "缺少 refreshToken，需要重新登录")
         }
         val host = authHost(account)
-        val region = TraeRegion.infer(account.domain, account.apiHost)
         val body = JsonObject().apply {
-            // client_id 按区域取：国际版用国内的会 401「refresh token is invalid」
-            addProperty("ClientID", region.oauthClientId)
+            addProperty("ClientID", TraeConstants.CLIENT_ID)
             addProperty("RefreshToken", account.refreshToken)
             addProperty("ClientSecret", "-")
             addProperty("UserID", "")
@@ -76,109 +64,6 @@ class TraeAuthClient(private val version: TraeVersion) {
             expiresAt = expiresAtOf(result.long("TokenExpireAt"), result.long("TokenExpireDuration"), nowSeconds()),
         )
     }
-
-    /**
-     * 用网页会话的 Cookie 换 accessToken。
-     *
-     * 网页「桌面模式登录」不回调 userJwt，只回一条 Cookie；官方网页拿它调
-     * `GetUserToken` 取会话 token（抓包里能看到这个请求）。
-     * cookie 里通常有 sessionid / sid_guard 等，服务端认 Cookie 头。
-     */
-    fun fetchTokenByCookie(account: TraeAccount, cookie: String): TraeAccount {
-        val host = authHost(account)
-        // 第一步必须是 CheckLogin：网页登录态就在这批 cookie 里（sessionid/sid_tt/sid_guard），
-        // 而 GetUserToken 只认 Cloud-IDE-JWT。CheckLogin 还能回传 Host / UserID / Region，
-        // 正好补上 Cookie 里缺的区域信息。
-        val login = checkLoginByCookie(host, cookie)
-        if (!login.loggedIn) {
-            throw TraeHttpException(
-                login.status,
-                TraeErrorKind.SESSION_DEAD,
-                "Cookie 未被上游接受（CheckLogin IsLogin=false）。" +
-                    "关键 Cookie：sessionid=${hasKey(cookie, "sessionid")}, " +
-                    "sid_tt=${hasKey(cookie, "sid_tt")}, sid_guard=${hasKey(cookie, "sid_guard")}。" +
-                    "上游响应：${login.raw.take(160).ifEmpty { "（空）" }}",
-            )
-        }
-        val seeded = account.withIdentity(login.uid, "", login.tenantId)
-        val body = JsonObject().apply {
-            addProperty("UserID", seeded.uid.ifEmpty { account.uid })
-            addProperty("TenantID", seeded.enterpriseId.ifEmpty { account.enterpriseId })
-        }
-        val conn = TraeHttp.post(
-            url = host + TraeConstants.EP_GET_USER_TOKEN,
-            body = body.toString(),
-            connectTimeoutMs = TraeHttp.CONNECT_TIMEOUT_MS,
-            readTimeoutMs = TraeHttp.READ_TIMEOUT_MS,
-        ) {
-            TraeHeaders.oauth(it, version)
-            it.setRequestProperty("Cookie", cookie)
-        }
-
-        val status = conn.responseCode
-        val raw = TraeHttp.readBody(conn)
-        if (status >= 400) {
-            throw TraeHttpException(status, TraeErrors.fromStatus(status, raw), raw, TraeErrors.extractCode(raw))
-        }
-        val result = runCatching { JsonParser.parseString(raw).asJsonObject.objOrNull("Result") }.getOrNull()
-            ?: throw TraeHttpException(status, TraeErrorKind.SERVER, "GetUserToken 响应无法解析: ${raw.take(200)}")
-        val token = result.str("Token")
-        if (token.isEmpty()) {
-            throw TraeHttpException(
-                status,
-                TraeErrorKind.SESSION_DEAD,
-                "Cookie 换不到 token（GetUserToken 未返回 Token）。Cookie 键：${TraeLogin.cookieKeys(cookie).joinToString(",")}",
-            )
-        }
-        return seeded.withTokens(
-            accessToken = token,
-            refreshToken = "",
-            expiresAt = expiresAtOf(result.long("ExpiredAt"), 0L, nowSeconds()),
-        ).withIdentity(result.str("UserID").ifEmpty { seeded.uid }, "", result.str("TenantID"))
-    }
-
-    private data class CookieLogin(
-        val loggedIn: Boolean,
-        val uid: String,
-        val tenantId: String,
-        val status: Int,
-        val raw: String = "",
-    )
-
-    /** 用 Cookie 查网页登录态（官方网页每次打开都会调，走的正是 passport cookie）。 */
-    private fun checkLoginByCookie(host: String, cookie: String): CookieLogin {
-        val body = JsonObject().apply { addProperty("ReqSource", "IDE") }
-        // 字节系接口的 CSRF 是「cookie 里一份 + 请求头一份」，缺头会被判未登录
-        val csrf = TraeLogin.parseCookie(cookie).entries
-            .firstOrNull { it.key.contains("csrf", ignoreCase = true) }
-            ?.value
-        val conn = TraeHttp.post(
-            url = host + TraeConstants.EP_CHECK_LOGIN,
-            body = body.toString(),
-            connectTimeoutMs = TraeHttp.CONNECT_TIMEOUT_MS,
-            readTimeoutMs = TraeHttp.READ_TIMEOUT_MS,
-        ) {
-            TraeHeaders.oauth(it, version)
-            it.setRequestProperty("Cookie", cookie)
-            if (!csrf.isNullOrEmpty()) it.setRequestProperty("X-Csrf-Token", csrf)
-        }
-        val status = conn.responseCode
-        val raw = TraeHttp.readBody(conn)
-        if (status >= 400) return CookieLogin(false, "", "", status, raw)
-        val result = runCatching { JsonParser.parseString(raw).asJsonObject.objOrNull("Result") }
-            .getOrNull() ?: return CookieLogin(false, "", "", status, raw)
-        val loggedIn = result.get("IsLogin")?.takeIf { it.isJsonPrimitive }?.asBoolean ?: false
-        return CookieLogin(
-            loggedIn = loggedIn,
-            uid = result.str("UserID"),
-            tenantId = result.str("TenantID"),
-            status = status,
-            raw = raw,
-        )
-    }
-
-    private fun hasKey(cookie: String, key: String): Boolean =
-        TraeLogin.parseCookie(cookie).keys.any { it.equals(key, ignoreCase = true) }
 
     /** 补全 / 刷新账号身份信息。 */
     fun getUserInfo(account: TraeAccount): TraeAccount {

@@ -3,7 +3,6 @@ package dev.aigw.core.usage
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import dev.aigw.core.store.KeyValueStore
-import dev.aigw.core.util.objOrNull
 import dev.aigw.core.util.startOfDay
 import java.io.File
 
@@ -39,6 +38,12 @@ data class CallRecord(
     val cachedTokens: Long = 0,
     /** 上游回报的本次积分消耗（如 Loomy 的 points_consumed），无则 0。 */
     val pointsConsumed: Long = 0,
+    /**
+     * 首字延迟（毫秒）：从网关收到请求到第一字节内容写向客户端。
+     * -1 表示这次请求没有产生首字（失败/空回复/非流式未拿到内容）。
+     * 排障时它是「上游排队 vs 模型思考」的直接区分依据，所以必须落库而不是只打日志。
+     */
+    val firstByteMillis: Long = -1,
     val durationMillis: Long,
     val error: String,
     /** 请求体原文（截断保存），供「调用记录」详情查看。 */
@@ -47,6 +52,24 @@ data class CallRecord(
     val responseBody: String,
     /** 返回原文（截断保存）：流式为上游逐行报文，非流式为完整 JSON；排查 503/空回复用。 */
     val rawResponse: String = "",
+    /**
+     * 本次请求一共向上游尝试了几次（含最终成功的那次）。
+     *
+     * 与「请求数」分开记：一次请求换 3 个号才成功，请求数是 1、尝试数是 3。
+     * 把两者混为一谈会让成功率既不能反映客户端体验、也不能反映上游健康度。
+     */
+    val tries: Int = 1,
+    /** 是否靠换号/换供应商救回来的（尝试数 > 1 且最终成功）。 */
+    val retried: Boolean = false,
+    /** 调用方的客户端密钥 id / 名称；本机免鉴权调用为空。 */
+    val clientKeyId: String = "",
+    val clientKeyName: String = "",
+    /** 本次调用的费用（微美元，1e-6 USD）。 */
+    val costMicros: Long = 0L,
+    /** 费用是否算得出来；false 表示该模型没配价格，界面必须显示「未定价」而不是 0 元。 */
+    val costKnown: Boolean = false,
+    /** 是否复用了会话亲和（同会话仍落在上一轮的账号上）。 */
+    val affinityReused: Boolean = false,
 )
 
 /** 用量统计聚合。 */
@@ -61,56 +84,16 @@ data class UsageStats(
     val failed: Long = 0,
     /** 客户端中途断开（流式中断）的请求数；三者相加应等于 [requests]。 */
     val aborted: Long = 0,
+    /** 靠换号/换供应商救回来的请求数（是 [requests] 的子集，不是另一个分类）。 */
+    val retried: Long = 0,
+    /** 已算出费用的调用合计（微美元）。 */
+    val costMicros: Long = 0,
+    /** 有记录但价格未知的调用数：它的费用**没有**计入 [costMicros]，界面要一并显示。 */
+    val unpriced: Long = 0,
 ) {
     /** 命中率（0~100 的百分比）；没有输入 token 时返回 null（无意义，不编造 0%）。 */
     val cacheHitPercent: Double?
         get() = if (promptTokens > 0) cachedTokens.toDouble() * 100.0 / promptTokens else null
-}
-
-/** 单个维度（某个供应商 / 某个模型）的用量。 */
-data class UsageDimension(
-    /** 供应商 id（`trae`、`custom:xxx`）或模型名。 */
-    val key: String,
-    val stats: UsageStats,
-)
-
-/**
- * 按供应商 / 模型拆分的用量。
- *
- * 只从本版本开始累计：更早的记录没有维度聚合（当时的日聚合只有总数），
- * 用最近 100 条记录反推会与「累计」对不上，所以宁可少给，不给假的一致。
- */
-data class UsageBreakdown(
-    val byProvider: List<UsageDimension> = emptyList(),
-    val byModel: List<UsageDimension> = emptyList(),
-) {
-    val isEmpty: Boolean get() = byProvider.isEmpty() && byModel.isEmpty()
-}
-
-/** 一个时间桶内的维度聚合（供应商 + 模型）。 */
-private class DimensionBucket {
-    val byProvider = LinkedHashMap<String, UsageStats>()
-    val byModel = LinkedHashMap<String, UsageStats>()
-
-    fun plus(record: CallRecord) {
-        val providerKey = record.providerId.ifEmpty { "unknown" }
-        byProvider[providerKey] = (byProvider[providerKey] ?: UsageStats()) + record
-        val modelKey = record.model.ifEmpty { "unknown" }
-        byModel[modelKey] = (byModel[modelKey] ?: UsageStats()) + record
-    }
-
-    fun minus(record: CallRecord) {
-        val providerKey = record.providerId.ifEmpty { "unknown" }
-        byProvider[providerKey]?.let { remaining ->
-            val next = remaining - record
-            if (next.isZero()) byProvider.remove(providerKey) else byProvider[providerKey] = next
-        }
-        val modelKey = record.model.ifEmpty { "unknown" }
-        byModel[modelKey]?.let { remaining ->
-            val next = remaining - record
-            if (next.isZero()) byModel.remove(modelKey) else byModel[modelKey] = next
-        }
-    }
 }
 
 /**
@@ -139,10 +122,6 @@ class CallLogStore(
     /** 每日聚合，键为该日 00:00 的时间戳；仅保留最近 [RETENTION_DAYS] 天。 */
     private val daily = mutableMapOf<Long, UsageStats>()
 
-    /** 按供应商 / 模型的日聚合与累计聚合（与 [daily] / [totalAgg] 同步维护）。 */
-    private val dimDaily = mutableMapOf<Long, DimensionBucket>()
-    private var dimTotal = DimensionBucket()
-
     init {
         if (preloadOnConstruction) load()
     }
@@ -170,11 +149,6 @@ class CallLogStore(
         val updated = (daily[day] ?: UsageStats()) + record
         daily[day] = updated
         store.write(dayKeyOf(day), updated.toJson().toString())
-        dimTotal.plus(record)
-        store.write(DIM_TOTAL_KEY, dimTotal.toJson().toString())
-        val bucket = dimDaily.getOrPut(day) { DimensionBucket() }
-        bucket.plus(record)
-        store.write(dimDayKeyOf(day), bucket.toJson().toString())
         pruneDaily()
     }
 
@@ -211,13 +185,6 @@ class CallLogStore(
                 daily[day] = remaining
                 store.write(dayKeyOf(day), remaining.toJson().toString())
             }
-            // 维度聚合同步回退：删单条记录时界面上的细分也要跟着减，否则数字对不上
-            dimTotal.minus(removed)
-            store.write(DIM_TOTAL_KEY, dimTotal.toJson().toString())
-            dimDaily[day]?.let { bucket ->
-                bucket.minus(removed)
-                store.write(dimDayKeyOf(day), bucket.toJson().toString())
-            }
         }
     }
 
@@ -233,8 +200,6 @@ class CallLogStore(
         for (key in store.keys(USAGE_PREFIX)) store.delete(key)
         totalAgg = UsageStats()
         daily.clear()
-        dimTotal = DimensionBucket()
-        dimDaily.clear()
     }
 
     /** 删除早于保留窗口的日键；只清内存与存储的旧日聚合，不影响累计。 */
@@ -244,39 +209,11 @@ class CallLogStore(
             daily.remove(day)
             store.delete(dayKeyOf(day))
         }
-        for (day in dimDaily.keys.filter { it < cutoff }) {
-            dimDaily.remove(day)
-            store.delete(dimDayKeyOf(day))
-        }
     }
 
     /** 累计聚合：不受容量淘汰与过期清理影响，跨启动累加。 */
     @Synchronized
     fun totalStats(): UsageStats = totalAgg
-
-    /**
-     * [nowMillis] 所在天的按供应商 / 模型细分（请求数降序）。
-     *
-     * 只统计本版本之后写入的记录——更早的日聚合没有维度字段，硬凑会与总数矛盾。
-     */
-    @Synchronized
-    fun breakdownToday(nowMillis: Long): UsageBreakdown =
-        dimBreakdownOf(dimDaily[startOfDay(nowMillis)])
-
-    /** 累计的按供应商 / 模型细分（请求数降序）。 */
-    @Synchronized
-    fun breakdownTotal(): UsageBreakdown = dimBreakdownOf(dimTotal)
-
-    private fun dimBreakdownOf(bucket: DimensionBucket?): UsageBreakdown {
-        if (bucket == null) return UsageBreakdown()
-        fun sorted(map: Map<String, UsageStats>) = map.entries
-            .sortedByDescending { it.value.requests }
-            .map { UsageDimension(it.key, it.value) }
-        return UsageBreakdown(
-            byProvider = sorted(bucket.byProvider),
-            byModel = sorted(bucket.byModel),
-        )
-    }
 
     /** [nowMillis] 所在天的聚合；当天还没有记录时为全零。 */
     @Synchronized
@@ -410,11 +347,19 @@ class CallLogStore(
                     totalTokens = obj.get("totalTokens")?.asLong ?: 0L,
                     cachedTokens = obj.get("cachedTokens")?.asLong ?: 0L,
                     pointsConsumed = obj.get("pointsConsumed")?.asLong ?: 0L,
+                    firstByteMillis = obj.get("firstByteMillis")?.asLong ?: -1L,
                     durationMillis = obj.get("durationMillis")?.asLong ?: 0L,
                     error = obj.get("error")?.asString.orEmpty(),
                     requestBody = obj.get("requestBody")?.asString.orEmpty(),
                     responseBody = obj.get("responseBody")?.asString.orEmpty(),
                     rawResponse = obj.get("rawResponse")?.asString.orEmpty(),
+                    tries = obj.get("tries")?.asInt ?: 1,
+                    retried = obj.get("retried")?.asBoolean ?: false,
+                    clientKeyId = obj.get("clientKeyId")?.asString.orEmpty(),
+                    clientKeyName = obj.get("clientKeyName")?.asString.orEmpty(),
+                    costMicros = obj.get("costMicros")?.asLong ?: 0L,
+                    costKnown = obj.get("costKnown")?.asBoolean ?: false,
+                    affinityReused = obj.get("affinityReused")?.asBoolean ?: false,
                 ),
             )
         }
@@ -428,11 +373,6 @@ class CallLogStore(
         }
         while (records.size > capacity) records.removeLast()
         totalAgg = store.read(TOTAL_KEY)?.let(::usageStatsFromJson) ?: aggregate(records)
-        dimTotal = dimensionBucketFromJson(store.read(DIM_TOTAL_KEY))
-        for (key in store.keys(DIM_DAY_PREFIX)) {
-            val day = key.removePrefix(DIM_DAY_PREFIX).toLongOrNull() ?: continue
-            dimDaily[day] = dimensionBucketFromJson(store.read(key))
-        }
         for (key in store.keys(DAY_PREFIX)) {
             val day = key.removePrefix(DAY_PREFIX).toLongOrNull() ?: continue
             daily[day] = store.read(key)?.let(::usageStatsFromJson) ?: UsageStats()
@@ -455,8 +395,6 @@ class CallLogStore(
     private fun keyOf(id: String) = "$PREFIX$id"
 
     private fun dayKeyOf(day: Long) = "$DAY_PREFIX$day"
-
-    private fun dimDayKeyOf(day: Long) = "$DIM_DAY_PREFIX$day"
 
     /**
      * 把超出摘要长度的完整原文溢写到缓存目录（每字段一个文件，单文件上限 [MAX_SPILL_CHARS]）。
@@ -512,8 +450,6 @@ class CallLogStore(
         private const val USAGE_PREFIX = "usage/"
         private const val TOTAL_KEY = "usage/total"
         private const val DAY_PREFIX = "usage/day/"
-        private const val DIM_TOTAL_KEY = "usage/dim/total"
-        private const val DIM_DAY_PREFIX = "usage/dim/day/"
 
         /** 每日聚合保留天数（含今天）。 */
         const val RETENTION_DAYS = 30
@@ -552,35 +488,19 @@ private fun CallRecord.toJson(): JsonObject = JsonObject().apply {
     addProperty("totalTokens", totalTokens)
     addProperty("cachedTokens", cachedTokens)
     addProperty("pointsConsumed", pointsConsumed)
+    addProperty("firstByteMillis", firstByteMillis)
     addProperty("durationMillis", durationMillis)
     addProperty("error", error)
     addProperty("requestBody", requestBody)
     addProperty("responseBody", responseBody)
     addProperty("rawResponse", rawResponse)
-}
-
-private fun DimensionBucket.toJson(): JsonObject = JsonObject().apply {
-    fun mapJson(map: Map<String, UsageStats>) = JsonObject().apply {
-        for ((key, stats) in map) add(key, stats.toJson())
-    }
-    add("provider", mapJson(byProvider))
-    add("model", mapJson(byModel))
-}
-
-private fun dimensionBucketFromJson(raw: String?): DimensionBucket {
-    val bucket = DimensionBucket()
-    if (raw.isNullOrEmpty()) return bucket
-    val root = runCatching { JsonParser.parseString(raw).asJsonObject }.getOrNull() ?: return bucket
-    fun fill(target: MutableMap<String, UsageStats>, obj: JsonObject?) {
-        if (obj == null) return
-        for ((key, value) in obj.entrySet()) {
-            if (!value.isJsonObject) continue
-            target[key] = usageStatsFromJson(value.toString())
-        }
-    }
-    fill(bucket.byProvider, root.objOrNull("provider"))
-    fill(bucket.byModel, root.objOrNull("model"))
-    return bucket
+    addProperty("tries", tries)
+    addProperty("retried", retried)
+    addProperty("clientKeyId", clientKeyId)
+    addProperty("clientKeyName", clientKeyName)
+    addProperty("costMicros", costMicros)
+    addProperty("costKnown", costKnown)
+    addProperty("affinityReused", affinityReused)
 }
 
 private operator fun UsageStats.plus(record: CallRecord) = copy(
@@ -592,6 +512,11 @@ private operator fun UsageStats.plus(record: CallRecord) = copy(
     success = success + if (record.status == CallStatus.SUCCESS) 1 else 0,
     failed = failed + if (record.status == CallStatus.FAILED) 1 else 0,
     aborted = aborted + if (record.status == CallStatus.ABORTED) 1 else 0,
+    retried = retried + if (record.retried) 1 else 0,
+    // 未定价的调用不计入金额，单独计数：合计旁并排告知用户「另有 N 次未定价」，
+    // 把它算成 0 元会让总金额看起来偏低。
+    costMicros = costMicros + if (record.costKnown) record.costMicros else 0L,
+    unpriced = unpriced + if (record.costKnown) 0 else 1,
 )
 
 private operator fun UsageStats.minus(record: CallRecord) = copy(
@@ -603,6 +528,9 @@ private operator fun UsageStats.minus(record: CallRecord) = copy(
     success = (success - if (record.status == CallStatus.SUCCESS) 1 else 0).coerceAtLeast(0),
     failed = (failed - if (record.status == CallStatus.FAILED) 1 else 0).coerceAtLeast(0),
     aborted = (aborted - if (record.status == CallStatus.ABORTED) 1 else 0).coerceAtLeast(0),
+    retried = (retried - if (record.retried) 1 else 0).coerceAtLeast(0),
+    costMicros = (costMicros - if (record.costKnown) record.costMicros else 0L).coerceAtLeast(0),
+    unpriced = (unpriced - if (record.costKnown) 0 else 1).coerceAtLeast(0),
 )
 
 private fun UsageStats.toJson(): JsonObject = JsonObject().apply {
@@ -614,11 +542,15 @@ private fun UsageStats.toJson(): JsonObject = JsonObject().apply {
     addProperty("success", success)
     addProperty("failed", failed)
     addProperty("aborted", aborted)
+    addProperty("retried", retried)
+    addProperty("costMicros", costMicros)
+    addProperty("unpriced", unpriced)
 }
 
 private fun UsageStats.isZero(): Boolean =
     requests == 0L && promptTokens == 0L && completionTokens == 0L &&
-        totalTokens == 0L && cachedTokens == 0L && success == 0L && failed == 0L && aborted == 0L
+        totalTokens == 0L && cachedTokens == 0L && success == 0L && failed == 0L && aborted == 0L &&
+        retried == 0L && costMicros == 0L && unpriced == 0L
 
 private fun usageStatsFromJson(raw: String): UsageStats {
     val obj = runCatching { JsonParser.parseString(raw).asJsonObject }.getOrNull() ?: return UsageStats()
@@ -631,5 +563,8 @@ private fun usageStatsFromJson(raw: String): UsageStats {
         success = obj.get("success")?.asLong ?: 0L,
         failed = obj.get("failed")?.asLong ?: 0L,
         aborted = obj.get("aborted")?.asLong ?: 0L,
+        retried = obj.get("retried")?.asLong ?: 0L,
+        costMicros = obj.get("costMicros")?.asLong ?: 0L,
+        unpriced = obj.get("unpriced")?.asLong ?: 0L,
     )
 }

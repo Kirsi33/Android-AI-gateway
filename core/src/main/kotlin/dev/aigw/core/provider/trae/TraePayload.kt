@@ -31,44 +31,6 @@ object TraePayload {
         obj.addProperty("function", TraeConstants.FUNCTION)
 
         rewriteMessages(obj)
-        applyCacheControl(obj)
-        // 稳定会话标识：上游按 session 归组（官方 IDE 每会话带 session_id），
-        // 同一会话内稳定、跨会话不同，帮助上游命中前缀缓存。
-        if (obj.get("session_id") == null || obj.get("session_id").isJsonNull) {
-            stableSessionId(obj)?.let { obj.addProperty("session_id", it) }
-        }
-        // 官方 IDE 请求体带完整会话上下文字段（MITM 实证，见 Trae-workbuddyAssistant 文档）。
-        // 上游按这些字段识别「合法 IDE 会话」——缺失可能被路由到无缓存后端。
-        if (obj.get("conversation_id") == null) {
-            obj.addProperty("conversation_id", stableSessionId(obj) ?: java.util.UUID.randomUUID().toString())
-        }
-        if (obj.get("session_id") == null) {
-            obj.addProperty("session_id", java.util.UUID.randomUUID().toString())
-        }
-        if (obj.get("project_id") == null) {
-            obj.addProperty("project_id", java.util.UUID.randomUUID().toString())
-        }
-        if (obj.get("workspace_id") == null) {
-            obj.addProperty("workspace_id", "e04cdd")
-        }
-        if (obj.get("prompt_max_tokens") == null) {
-            obj.addProperty("prompt_max_tokens", 168000)
-        }
-        if (obj.get("mode") == null) {
-            obj.addProperty("mode", "FunctionCall")
-        }
-        if (obj.get("ide_version") == null) {
-            obj.addProperty("ide_version", "0.1.50")
-        }
-        if (obj.get("ide_version_code") == null) {
-            obj.addProperty("ide_version_code", "20260811")
-        }
-        if (obj.get("app_id") == null) {
-            obj.addProperty("app_id", TraeConstants.APP_ID)
-        }
-        if (obj.get("package_type") == null) {
-            obj.addProperty("package_type", "stable_cn")
-        }
 
         val model = obj.str("model").trim().ifEmpty { fallbackConfigName }
         obj.addProperty("config_name", model)
@@ -142,99 +104,10 @@ object TraePayload {
                     addProperty("text", content.asString)
                 })
                 message.add("content", wrapped)
-            } else if (content.isJsonArray) {
-                stripImages(message, content.asJsonArray)
             }
+            // 已是数组（多模态）→ 原样透传
         }
     }
-
-    /**
-     * 图片降级保护：SOLO 通道（llm_utils_chat）不支持 image_url 块。
-     * base64 图片原样透传会被上游当异常内容送审，误触发「sensitive content」拒绝。
-     * 这里把图片块替换成一行文字占位：会话不中断，模型知道用户发过图；纯文本消息不受影响。
-     */
-    private fun stripImages(message: JsonObject, content: JsonArray) {
-        var images = 0
-        val rebuilt = JsonArray()
-        for (item in content) {
-            val block = item as? JsonObject
-            if (block != null && block.str("type").trim().lowercase() == "image_url") {
-                images++
-                if (images == 1) {
-                    rebuilt.add(JsonObject().apply {
-                        addProperty("type", "text")
-                        addProperty("text", IMAGE_PLACEHOLDER)
-                    })
-                }
-                continue
-            }
-            rebuilt.add(item)
-        }
-        if (images > 0) message.add("content", rebuilt)
-    }
-
-    /**
-     * Anthropic 风格前缀缓存断点：上游 usage 回报 cache_creation/cache_read_input_tokens，
-     * 说明后端是 Anthropic 兼容缓存——必须显式打 cache_control 标记才会缓存，
-     * 否则恒为 0。这里打两个断点：
-     *  1. system 首块：缓存「工具定义 + 系统提示词」（每请求稳定的前缀大头）
-     *  2. 最后一条 user 的末块：缓存整段对话历史（增量延伸）
-     */
-    private fun applyCacheControl(obj: JsonObject) {
-        val messages = obj.get("messages") as? JsonArray ?: return
-        for (element in messages) {
-            val message = element as? JsonObject ?: continue
-            if (message.str("role") == "system") {
-                markLastTextBlock(message)
-                break
-            }
-        }
-        for (i in messages.size() - 1 downTo 0) {
-            val message = messages.get(i) as? JsonObject ?: continue
-            if (message.str("role") == "user") {
-                markLastTextBlock(message)
-                break
-            }
-        }
-    }
-
-    /** 给消息里最后一个 text 块加 cache_control（Anthropic 允许的断点标记）。 */
-    private fun markLastTextBlock(message: JsonObject) {
-        val content = message.get("content") as? JsonArray ?: return
-        for (i in content.size() - 1 downTo 0) {
-            val block = content.get(i) as? JsonObject ?: continue
-            if (block.str("type").trim().lowercase() == "text") {
-                block.add("cache_control", JsonObject().apply { addProperty("type", "ephemeral") })
-                return
-            }
-        }
-    }
-
-    /** 从首条 user 消息文本派生稳定会话 id（SHA-256 前 32 位十六进制）。 */
-    private fun stableSessionId(obj: JsonObject): String? {
-        val messages = obj.get("messages") as? JsonArray ?: return null
-        for (element in messages) {
-            val message = element as? JsonObject ?: continue
-            if (message.str("role") != "user") continue
-            val content = message.get("content") ?: continue
-            val text = when {
-                content.isJsonPrimitive -> content.asString
-                content.isJsonArray -> content.asJsonArray.joinToString("\n") { block ->
-                    (block as? JsonObject)?.str("text").orEmpty()
-                }
-                else -> continue
-            }
-            if (text.isBlank()) continue
-            val digest = java.security.MessageDigest.getInstance("SHA-256")
-                .digest(text.toByteArray())
-            return digest.joinToString("") { "%02x".format(it) }.take(32)
-        }
-        return null
-    }
-
-    /** 图片占位说明（多张图合并为一条）。 */
-    private const val IMAGE_PLACEHOLDER =
-        "[系统提示：用户发送了图片，但当前对话通道不支持图片输入，图片已被省略。请基于现有文本继续，必要时提示用户改用支持视觉的模型。]"
 
     private fun rewriteAssistantToolCalls(message: JsonObject) {
         val toolCalls = message.get("tool_calls") as? JsonArray ?: return

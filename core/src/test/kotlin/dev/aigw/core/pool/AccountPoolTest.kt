@@ -38,43 +38,73 @@ class AccountPoolTest {
         assertEquals("b", pool.pick(TRAE)?.uid)
     }
 
+    // ---------------------------------------------------------------- 账号优先级
+
     @Test
-    fun `优先级高的账号先被选中，即使余额更低`() {
+    fun `优先级高的账号先用，同级仍按余额`() {
         val pool = newPool()
         pool.upsert(account("a"))
         pool.upsert(account("b"))
-        pool.updateCredits(TRAE, "a", 900)
-        pool.updateCredits(TRAE, "b", 10)
-        // 默认同级按余额：a 先用
+        pool.updateCredits(TRAE, "a", 10)
+        pool.updateCredits(TRAE, "b", 900)
+        // 余额低但优先级高：用户手动排序的意图要盖过余额
+        pool.setPriority(TRAE, "a", 5)
         assertEquals("a", pool.pick(TRAE)?.uid)
-        // 把 b 提上来（同级时抬一档），b 应当先用，哪怕余额少得多
-        assertTrue(pool.movePriority(TRAE, "b", up = true))
+        // 同级时回到余额优先
+        pool.setPriority(TRAE, "b", 5)
         assertEquals("b", pool.pick(TRAE)?.uid)
     }
 
     @Test
-    fun `优先级调整在边界与未知账号上返回 false`() {
+    fun `上移下移交换相邻两个账号的优先级`() {
         val pool = newPool()
         pool.upsert(account("a"))
-        // 只有一个账号：上移越界
-        assertFalse(pool.movePriority(TRAE, "a", up = true))
-        assertFalse(pool.movePriority(TRAE, "a", up = false))
-        assertFalse(pool.movePriority(TRAE, "nope", up = true))
+        pool.upsert(account("b"))
+        pool.upsert(account("c"))
+        // 初始同级：列表按 uid 字典序
+        assertEquals(listOf("a", "b", "c"), pool.statuses(TRAE).map { it.uid })
+        // c 上移一位：与 b 交换，同级时抬一档
+        assertTrue(pool.movePriority(TRAE, "c", up = true))
+        assertEquals(listOf("c", "a", "b"), pool.statuses(TRAE).map { it.uid })
+        assertTrue(pool.statuses(TRAE).first { it.uid == "c" }.priority > 0)
+        // 已在顶部再上移：无变化
+        assertFalse(pool.movePriority(TRAE, "c", up = true))
+        // 下移回去
+        assertTrue(pool.movePriority(TRAE, "c", up = false))
+        assertEquals("a", pool.statuses(TRAE).first().uid)
     }
 
     @Test
-    fun `优先级会落盘并在重建后恢复`() {
+    fun `优先级落盘，重开账号池仍在`() {
         val store = InMemoryKeyValueStore()
         val pool = newPool(store)
         pool.upsert(account("a"))
         pool.upsert(account("b"))
-        pool.updateCredits(TRAE, "a", 900)
-        pool.updateCredits(TRAE, "b", 10)
-        assertTrue(pool.movePriority(TRAE, "b", up = true))
-
+        pool.updateCredits(TRAE, "b", 900)
+        pool.movePriority(TRAE, "b", up = true)
+        val orderBefore = pool.statuses(TRAE).map { it.uid }
+        assertEquals("b", orderBefore.first())
+        // 用同一个 store 重建：顺序与优先级都要回来
         val reopened = newPool(store)
-        assertEquals("b", reopened.pick(TRAE)?.uid, "重建后优先级应仍然生效")
-        assertTrue((reopened.status(TRAE, "b")?.priority ?: 0) > 0, "优先级要能被界面读到")
+        assertEquals(orderBefore, reopened.statuses(TRAE).map { it.uid })
+        assertEquals("b", reopened.pick(TRAE)?.uid)
+    }
+
+    @Test
+    fun `退回原顺序后优先标记不留在别的账号上`() {
+        val pool = newPool()
+        pool.upsert(account("a"))
+        pool.upsert(account("b"))
+        // 初始按 uid 字典序：a 在前
+        assertTrue(pool.statuses(TRAE).none { it.raised }, "初始不该有优先标记")
+        // b 上移一位：b 被提上去，标「优先」
+        assertTrue(pool.movePriority(TRAE, "b", up = true))
+        assertEquals("b", pool.statuses(TRAE).first().uid)
+        assertTrue(pool.statuses(TRAE).first { it.uid == "b" }.raised, "b 上移后应标优先")
+        // b 再下移回原位：两个账号都回到默认顺序，谁都不该带标记
+        assertTrue(pool.movePriority(TRAE, "b", up = false))
+        assertEquals(listOf("a", "b"), pool.statuses(TRAE).map { it.uid })
+        assertTrue(pool.statuses(TRAE).none { it.raised }, "退回原顺序后不该再有优先标记")
     }
 
     @Test

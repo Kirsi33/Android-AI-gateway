@@ -2,15 +2,11 @@ package dev.aigw.app.ui.providers
 
 import java.util.concurrent.ConcurrentHashMap
 import dev.aigw.app.ui.providers.antigravity.AntigravityUi
+import dev.aigw.app.ui.providers.chatgpt.ChatGPTUi
 import dev.aigw.app.ui.providers.codebuddy.CodeBuddyUi
 import dev.aigw.app.ui.providers.custom.CustomUi
-import dev.aigw.app.ui.providers.dumate.DumateUi
 import dev.aigw.app.ui.providers.loomy.LoomyUi
-import dev.aigw.app.ui.providers.longcat.LongCatUi
-import dev.aigw.app.ui.providers.qoder.QoderUi
-import dev.aigw.app.ui.providers.qwenwork.QwenUi
 import dev.aigw.app.ui.providers.raccoon.RaccoonUi
-import dev.aigw.app.ui.providers.today.TodayUi
 import dev.aigw.app.ui.providers.trae.TraeUi
 
 /**
@@ -24,14 +20,10 @@ object ProviderUiRegistry {
     private val builtin: Map<String, ProviderUi> = listOf(
         TraeUi,
         LoomyUi,
-        LongCatUi,
-        TodayUi,
         CodeBuddyUi,
         AntigravityUi,
+        ChatGPTUi,
         RaccoonUi,
-        QoderUi,
-        QwenUi,
-        DumateUi,
     ).associateBy { it.id }
 
     private val customCache = ConcurrentHashMap<String, ProviderUi>()

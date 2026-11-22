@@ -1,16 +1,19 @@
 package dev.aigw.core.provider.loomy
 
+import com.google.gson.JsonArray
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
-import dev.aigw.core.provider.ACTION_CHECKIN
-import dev.aigw.core.provider.ACTION_TASKS
 import dev.aigw.core.provider.AggregatedChatCall
+import dev.aigw.core.provider.ACTION_TASKS
+import dev.aigw.core.provider.AudioTranscriptionRequest
+import dev.aigw.core.provider.AudioTranscriptionResult
 import dev.aigw.core.provider.AuthKind
 import dev.aigw.core.provider.ChatCall
 import dev.aigw.core.provider.CreditInfo
 import dev.aigw.core.provider.ErrorKind
 import dev.aigw.core.provider.FailedChatCall
 import dev.aigw.core.provider.isStreamingBody
+import dev.aigw.core.provider.MediaCall
 import dev.aigw.core.provider.OpenAiSseAggregator
 import dev.aigw.core.provider.Provider
 import dev.aigw.core.provider.ProviderAccount
@@ -19,12 +22,19 @@ import dev.aigw.core.provider.ProviderActionResult
 import dev.aigw.core.provider.ProviderCapability
 import dev.aigw.core.provider.ProviderModel
 import dev.aigw.core.provider.ProviderModelCatalogView
+import dev.aigw.core.provider.ProviderTask
+import dev.aigw.core.provider.ProviderTaskListView
 import dev.aigw.core.provider.QuotaPack
 import dev.aigw.core.provider.requestedModelOf
 import dev.aigw.core.provider.SmsLoginSupport
 import dev.aigw.core.provider.StreamFailureChatCall
 import dev.aigw.core.provider.StreamingChatCall
 import dev.aigw.core.provider.UpstreamError
+import dev.aigw.core.util.arrayOrNull
+import dev.aigw.core.util.asObjectOrNull
+import dev.aigw.core.util.objOrNull
+import dev.aigw.core.util.stringOrNull
+import java.util.Base64
 
 /**
  * Loomy（讯飞）免费积分通道。
@@ -37,8 +47,9 @@ class LoomyProvider(
     private val defaultModel: () -> String,
     private val nowMillis: () -> Long = System::currentTimeMillis,
     private val pointsClient: LoomyPointsClient = LoomyPointsClient(),
+    private val taskClient: LoomyTaskClient = LoomyTaskClient(),
     private val hooks: ProviderHooks = ProviderHooks(),
-) : Provider, SmsLoginSupport {
+) : Provider, SmsLoginSupport, dev.aigw.core.provider.ConversationalTranscriber {
 
     override val id: String = ID
     override val displayName: String = "Loomy"
@@ -48,7 +59,6 @@ class LoomyProvider(
 
     private val authClient = LoomyAuthClient(nowMillis = nowMillis)
     private val chatClient = LoomyChatClient()
-    private val taskClient = LoomyTaskClient()
     private val catalog = LoomyModelCatalog(nowMillis = nowMillis)
 
     // ------------------------------------------------------------------ 模型
@@ -66,6 +76,7 @@ class LoomyProvider(
                         if (it.reasoning) put("reasoning", "1")
                         if (it.toolCall) put("tool_call", "1")
                         if (it.attachment) put("attachment", "1")
+                        if (it.audio) put("audio", "1")
                     },
                 )
             },
@@ -138,6 +149,112 @@ class LoomyProvider(
         return UpstreamError(kind.toErrorKind(), exception.message ?: "上游错误")
     }
 
+    /**
+     * 语音转写：上游是 OpenAI 兼容协议，直接把音频作为 `input_audio` part 发给
+     * **模型目录里声明了音频输入**的模型，让它逐字转写。
+     *
+     * 目录里没有音频模型、或上游其实不认这个 part 时，如实报错而不返回编造文本。
+     */
+    override val supportsAudioTranscription: Boolean get() = true
+
+    override fun transcribeAudio(
+        account: ProviderAccount,
+        request: AudioTranscriptionRequest,
+    ): MediaCall<AudioTranscriptionResult> {
+        val loomy = parseOrNull(account) ?: return MediaCall.Failure(401, "账号凭证无法解析")
+        val model = audioModelOf(request.model, account)
+            ?: return MediaCall.Failure(
+                400,
+                "该账号的模型目录里没有声明音频输入的模型，无法用对话通道转写",
+            )
+        val instruction = buildString {
+            append("把这段录音逐字转写成文本，只输出转写正文，不要解释、不要加标题或引言。")
+            if (request.language.isNotEmpty()) append(" 录音语言是 ${request.language}。")
+            if (request.prompt.isNotEmpty()) append(" 上下文提示：${request.prompt}")
+        }
+        val body = JsonObject().apply {
+            addProperty("model", model)
+            addProperty("stream", true)
+            add("messages", JsonArray().apply {
+                add(JsonObject().apply {
+                    addProperty("role", "user")
+                    add("content", JsonArray().apply {
+                        add(JsonObject().apply {
+                            addProperty("type", "input_audio")
+                            add("input_audio", JsonObject().apply {
+                                addProperty("data", Base64.getEncoder().encodeToString(request.audio))
+                                addProperty("format", request.mimeType.substringAfter('/', "wav").ifEmpty { "wav" })
+                            })
+                        })
+                        add(JsonObject().apply {
+                            addProperty("type", "text")
+                            addProperty("text", instruction)
+                        })
+                    })
+                })
+            })
+        }.toString()
+
+        val call = try {
+            chatClient.openStream(loomy, body)
+        } catch (e: LoomyApiException) {
+            return MediaCall.Failure(e.status, e.body)
+        }
+        if (call.status !in 200..299) {
+            val errorBody = call.errorBody
+            call.close()
+            return MediaCall.Failure(call.status, errorBody)
+        }
+        val text = try {
+            if (call.isEventStream) {
+                readTranscriptionStream(call.stream)
+            } else {
+                val raw = call.stream?.use { it.readBytes().toString(Charsets.UTF_8) }.orEmpty()
+                // 上游「HTTP 200 + 业务错误码」：不能当成功
+                val code = LoomyErrors.extractCode(raw)
+                if (code.isNotEmpty() && code != LoomyConstants.CODE_OK) {
+                    return MediaCall.Failure(200, LoomyErrors.extractMessage(raw))
+                }
+                runCatching { JsonParser.parseString(raw).asJsonObject }.getOrNull()
+                    ?.arrayOrNull("choices")?.firstOrNull()?.asObjectOrNull()
+                    ?.objOrNull("message")?.stringOrNull("content").orEmpty()
+            }
+        } catch (e: Exception) {
+            return MediaCall.Failure(0, e.message ?: "读取上游响应失败")
+        } finally {
+            call.close()
+        }
+        if (text.isBlank()) return MediaCall.Failure(502, "上游未返回转写文本")
+        return MediaCall.Success(AudioTranscriptionResult(text = text.trim(), language = request.language))
+    }
+
+    /** 只在模型目录真的声明了音频输入时才选中；不靠模型名猜。 */
+    private fun audioModelOf(requested: String, account: ProviderAccount): String? {
+        val audioCapable = catalog.models(parseOrNull(account)?.session).filter { it.audio }
+        val model = requested.trim().removePrefix("models/").trim()
+        if (model.isNotEmpty()) {
+            audioCapable.firstOrNull { it.id.equals(model, ignoreCase = true) }?.let { return it.id }
+        }
+        return audioCapable.firstOrNull()?.id
+    }
+
+    private fun readTranscriptionStream(stream: java.io.InputStream?): String {
+        if (stream == null) return ""
+        val text = StringBuilder()
+        stream.bufferedReader(Charsets.UTF_8).use { reader ->
+            while (true) {
+                val line = reader.readLine() ?: break
+                if (!line.startsWith("data:")) continue
+                val payload = line.removePrefix("data:").trim()
+                if (payload.isEmpty() || payload == "[DONE]") continue
+                val obj = runCatching { JsonParser.parseString(payload).asJsonObject }.getOrNull() ?: continue
+                obj.arrayOrNull("choices")?.firstOrNull()?.asObjectOrNull()
+                    ?.objOrNull("delta")?.stringOrNull("content")?.let { text.append(it) }
+            }
+        }
+        return text.toString()
+    }
+
     // ------------------------------------------------------------------ 额度 / 动作
 
     override fun creditInfo(account: ProviderAccount): CreditInfo? {
@@ -156,20 +273,11 @@ class LoomyProvider(
                 snapshot.dailyBalance >= 0 -> snapshot.dailyBalance
                 else -> 0L
             }
-            // records 只有三个余额字段；dailyQuota/dailyConsumed/dailyCycleDate 只有
-            // first-login 给（rsfree 实证：只读 records，「每日赠送额度/当日已用」恒为空）。
-            // first-login 幂等且官方客户端每次启动都调——每次刷额度顺手调一次，漏了它
-            // 当日 5000 赠送可能静默拿不到。
-            val checkin = runCatching { pointsClient.firstLogin(loomy.session) }.getOrNull()
-            val checkinDetail = checkin?.takeIf { it.dailyQuota > 0 }?.let {
-                val dailyLeft = if (it.dailyBalance >= 0) it.dailyBalance else it.dailyQuota - it.dailyConsumed
-                "，每日额度 $dailyLeft/${it.dailyQuota}" + if (it.cycleDate.isNotEmpty()) "（${it.cycleDate}）" else ""
-            }.orEmpty()
             CreditInfo(
                 balance = snapshot.balance + daily,
                 known = snapshot.known,
                 detail = when {
-                    snapshot.known -> "${snapshot.source}=${snapshot.balance}，当日剩余=${formatOrDash(if (daily > 0) daily else -1L)}$checkinDetail"
+                    snapshot.known -> "${snapshot.source}=${snapshot.balance}，当日剩余=${formatOrDash(if (daily > 0) daily else -1L)}"
                     // 两个账本都没拿到数：带响应片段，便于区分 session 失效与接口口径变化
                     else -> "未取到余额（响应片段：${snapshot.personalRaw.take(120)}）"
                 },
@@ -213,7 +321,35 @@ class LoomyProvider(
                 }
             }
         } catch (e: Exception) {
+            // 同上：额度包拉不到时留原因，不让「失败」与「本来就没有」混淆
+            hooks.onLog("Loomy 拉取额度包失败：${e.message ?: "未知错误"}")
             emptyList()
+        }
+    }
+
+    /**
+     * 新手任务明细（只读，不发任何写操作）。
+     *
+     * Loomy 的任务只有「完成 / 未完成」两态，没有进度与目标，这里映射成 target=1、current=0|1：
+     * 于是 UI 的「已完成」判定（进度达标或已领取）与真实状态一致，也顺带把每条任务的积分当奖励展示。
+     */
+    override fun taskList(account: ProviderAccount): ProviderTaskListView? {
+        val loomy = parseOrNull(account) ?: return null
+        return try {
+            val snapshot = taskClient.tasks(loomy.session)
+            ProviderTaskListView(
+                tasks = snapshot.tasks.map { task ->
+                    ProviderTask(
+                        code = task.key,
+                        title = task.title,
+                        current = if (task.completed) 1L else 0L,
+                        target = 1L,
+                        rewardCredit = task.points.toLong(),
+                    )
+                },
+            )
+        } catch (e: Exception) {
+            ProviderTaskListView(emptyList(), error = e.message ?: "拉取任务列表失败")
         }
     }
 
@@ -250,43 +386,31 @@ class LoomyProvider(
                     }
                 }
 
-                /**
-                 * 每日签到 = 官方客户端启动即调的 points/first-login（幂等）。
-                 *
-                 * 每日 5000 赠送在「每日登录后自动刷新」，漏调不报错、只是当日赠送拿不到——
-                 * 之前没实现这个动作，用户在界面上找不到「签到」入口，赠送可能被静默漏领。
-                 * 响应自带全套额度口径，顺手把额度快照一并写回。
-                 */
-                ACTION_CHECKIN -> {
-                    val result = pointsClient.firstLogin(loomy.session)
-                    val message = when {
-                        result.alreadyProcessed -> buildString {
-                            append("今日已在登录时领取")
-                            if (result.dailyQuota > 0) {
-                                append("（当日剩余 ")
-                                append(if (result.dailyBalance >= 0) result.dailyBalance else result.dailyQuota - result.dailyConsumed)
-                                append("/${result.dailyQuota}）")
-                            }
-                        }
-                        else -> buildString {
-                            append("签到成功")
-                            if (result.dailyQuota > 0) append("，当日额度 ${result.dailyQuota}")
-                        }
-                    }
-                    ProviderActionResult.success(message)
-                }
-
-                // 同时认通用名 ACTION_TASKS 与私有名 ACTION_COMPLETE_ALL_TASKS：
-                // UI 与批量动作传的都是 "tasks"，只认私有名会让按钮永远落到 unsupported，
-                // 用户看到的是「该供应商不支持『tasks』」——这个坑在旧 fork 修过一次，合并后又回来了。
-                ACTION_TASKS, ACTION_COMPLETE_ALL_TASKS -> {
+                // 认通用动作名 ACTION_TASKS：UI 的「一键完成新手任务」与批量任务传的都是它。
+                // 从前只认私有的 complete_all_tasks，于是两者都落到 unsupported，
+                // 用户看到「该供应商不支持「tasks」」。
+                ACTION_TASKS -> {
                     val pending = taskClient.tasks(loomy.session).tasks.filter { !it.completed }
                     if (pending.isEmpty()) return ProviderActionResult.success("所有任务都已完成")
-                    val lines = pending.map { task ->
-                        val result = taskClient.complete(loomy.session, task.key)
-                        "${task.title}：${if (result.alreadyCompleted) "此前已完成" else "已完成"}"
+                    // 逐条提交：任务本身对应真实动作（首次对话、生成 PPT 等），服务端会校验，
+                    // 单条被拒不该中断整批、更不该把已经完成的那几条一起丢掉。
+                    val done = ArrayList<String>(pending.size)
+                    val failed = ArrayList<String>()
+                    for (task in pending) {
+                        runCatching { taskClient.complete(loomy.session, task.key) }
+                            .onSuccess { result ->
+                                done.add("${task.title}（${if (result.alreadyCompleted) "此前已完成" else "已完成"}）")
+                            }
+                            .onFailure { e -> failed.add("${task.title}（${e.message ?: "失败"}）") }
                     }
-                    ProviderActionResult.success(lines.joinToString("；"))
+                    val message = buildString {
+                        if (done.isNotEmpty()) append(done.joinToString("；"))
+                        if (failed.isNotEmpty()) {
+                            if (isNotEmpty()) append("；")
+                            append("未能完成：").append(failed.joinToString("；"))
+                        }
+                    }
+                    ProviderActionResult(failed.isEmpty(), message)
                 }
 
                 else -> ProviderActionResult.unsupported(action)
@@ -351,7 +475,6 @@ class LoomyProvider(
         const val ACTION_REDEEM_INVITE = "redeem_invite"
         const val ACTION_REDEEM_CODE = "redeem_code"
         const val ACTION_COMPLETE_TASK = "complete_task"
-        const val ACTION_COMPLETE_ALL_TASKS = "complete_all_tasks"
 
         /** 中国大陆手机号：11 位、1 开头。 */
         private val CN_PHONE = Regex("1[3-9]\\d{9}")

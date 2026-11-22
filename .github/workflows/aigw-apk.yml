@@ -1,0 +1,75 @@
+name: AI Gateway APK (fixed signing)
+
+# 专属出包流水线：
+#   * 固定 keystore（DEBUG_KEYSTORE_B64 secret）→ 版本之间可覆盖安装，不必卸载
+#   * 只产 release 包（上游只有一个 release 变体，R8 裁剪后体积最小）
+#   * 产物以 artifact 形式保留 90 天，不发 Release
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v4
+        with:
+          packages: 'platform-tools platforms;android-37.0 build-tools;36.0.0'
+
+      - uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: '9.9.1'
+
+      - name: 还原固定签名 keystore
+        env:
+          KS_B64: ${{ secrets.DEBUG_KEYSTORE_B64 }}
+        run: |
+          if [ -z "$KS_B64" ]; then
+            echo "::error::缺少 DEBUG_KEYSTORE_B64 secret，无法固定签名"
+            exit 1
+          fi
+          echo "$KS_B64" | base64 -d > "$GITHUB_WORKSPACE/aigw.keystore"
+          cat > keystore.properties <<'EOF'
+          storeFile=aigw.keystore
+          storePassword=Aigw2026Fix
+          keyAlias=aigw
+          keyPassword=Aigw2026Fix
+          EOF
+          ls -l aigw.keystore
+
+      - name: 打包 release
+        run: gradle :app:assembleRelease --console=plain
+
+      - name: 校验签名
+        run: |
+          APK=$(find app/build/outputs/apk/release -name '*.apk' | head -1)
+          echo "产物：$APK"
+          "$ANDROID_HOME"/build-tools/36.0.0/apksigner verify --print-certs "$APK" | head -4
+
+      - name: 读取版本号
+        id: version
+        run: |
+          VERSION=$(grep -m1 'versionName' app/build.gradle.kts | sed -E 's/.*"(.*)".*/\1/')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "本次版本：$VERSION"
+
+      - name: 重命名产物
+        run: |
+          APK=$(find app/build/outputs/apk/release -name '*.apk' | head -1)
+          cp "$APK" "aigw-${{ steps.version.outputs.version }}-fixed.apk"
+
+      - name: 上传 APK
+        uses: actions/upload-artifact@v7
+        with:
+          name: aigw-${{ steps.version.outputs.version }}-fixed
+          path: aigw-${{ steps.version.outputs.version }}-fixed.apk
+          retention-days: 90

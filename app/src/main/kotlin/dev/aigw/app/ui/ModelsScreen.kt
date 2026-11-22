@@ -28,8 +28,6 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.lazy.rememberLazyListState
-import dev.aigw.app.ui.scrollFade
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -127,14 +125,6 @@ fun ModelsScreen(state: AppUiState, viewModel: AppViewModel) {
             title = "模型",
             subtitle = subtitleText,
             actions = {
-                OnlyUsableToggle(
-                    enabled = state.settings.onlyUsableModels,
-                    onClick = {
-                        viewModel.updateSettings(
-                            state.settings.copy(onlyUsableModels = !state.settings.onlyUsableModels),
-                        )
-                    },
-                )
                 ExposureToggle(
                     enabled = exposure.filterEnabled,
                     onClick = {
@@ -179,17 +169,18 @@ fun ModelsScreen(state: AppUiState, viewModel: AppViewModel) {
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.error,
                     )
-                    // 页头的刷新是图标，报错时不一定能被发现；这里给一个明确的重试入口
-                    OutlineActionButton("重新拉取") { viewModel.refreshModels(forceRefresh = true) }
                 }
             }
         }
 
-        val listState = rememberLazyListState()
         LazyColumn(
-            state = listState,
-            modifier = Modifier.weight(1f).fillMaxWidth().scrollFade(listState),
-            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 20.dp),
+            modifier = Modifier.weight(1f).fillMaxWidth(),
+            // 悬浮底栏浮在内容之上：底部要额外让出底栏高度，否则最后一项被完全盖住
+            contentPadding = PaddingValues(
+                start = 16.dp,
+                end = 16.dp,
+                bottom = 20.dp + LocalBottomContentPadding.current,
+            ),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
             if (grouped.isEmpty()) {
@@ -203,7 +194,12 @@ fun ModelsScreen(state: AppUiState, viewModel: AppViewModel) {
                 } else {
                     item(key = "empty") {
                         SectionCard(enterIndex = 1) {
-                            EmptyHint("还没有模型", "点右上角刷新；无可用账号的供应商可能不展示动态模型。")
+                            EmptyHint(
+                                title = "还没有模型",
+                                message = "无可用账号的供应商不会返回动态模型；可以先刷新试试。",
+                                actionLabel = "重新拉取",
+                                onAction = { viewModel.refreshModels(forceRefresh = true) },
+                            )
                         }
                     }
                 }
@@ -380,50 +376,6 @@ private fun ExposureToggle(enabled: Boolean, onClick: () -> Unit) {
     }
 }
 
-/**
- * 「只看可用」开关：隐藏上游的非对话内部条目（如 Trae 的内部 config 模型）。
- *
- * 上游早就有 `GatewaySettings.onlyUsableModels` 这个开关并在模型推导时过滤，
- * 只是一直没有界面入口——补上，免得用户以为列表里那些怪条目是能用的模型。
- */
-@Composable
-private fun OnlyUsableToggle(enabled: Boolean, onClick: () -> Unit) {
-    Row(
-        modifier = Modifier
-            .clip(CircleShape)
-            .background(
-                if (enabled) MaterialTheme.colorScheme.primaryContainer
-                else MaterialTheme.colorScheme.surface,
-            )
-            .border(
-                width = 1.dp,
-                color = if (enabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline,
-                shape = CircleShape,
-            )
-            .bouncyClick(onClick = onClick)
-            .padding(horizontal = 10.dp, vertical = 5.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(5.dp),
-    ) {
-        Box(
-            modifier = Modifier
-                .size(7.dp)
-                .clip(CircleShape)
-                .background(
-                    if (enabled) MaterialTheme.colorScheme.primary
-                    else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
-                ),
-        )
-        Text(
-            text = if (enabled) "只看可用" else "全部模型",
-            style = MaterialTheme.typography.labelSmall,
-            fontWeight = FontWeight.SemiBold,
-            color = if (enabled) MaterialTheme.colorScheme.onPrimaryContainer
-            else MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-    }
-}
-
 /** 单个模型行：左侧模型 id 与信息（点击复制），中部测速状态，右侧测速按钮。 */
 @Composable
 private fun ModelRow(
@@ -483,14 +435,21 @@ private fun ModelRow(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            // 能力标记：只有上游明确给了才显示，缺就不渲染（不猜）
+            // 能力标记：只有上游/供应商明确给了才显示，缺就不渲染（不猜）。
+            // 各家写 extra 的口径不统一（CodeBuddy 写 tools/vision="true"，Loomy 写 tool_call/attachment="1"），
+            // 这里把同义 key 与两种真假写法都认下，否则能力存在却显示不出来。
+            val extra = model.model.extra
+            fun flag(vararg keys: String): Boolean = keys.any { key ->
+                val v = extra[key]?.trim()?.lowercase()
+                v == "true" || v == "1"
+            }
             val tags = buildList {
-                if (model.model.extra["reasoning"] == "true") add("思考")
-                if (model.model.extra["search"] == "true") add("联网")
-                if (model.model.extra["vision"] == "true") add("识图")
-                if (model.model.extra["tools"] == "true") add("工具")
-                model.model.extra["maxOutput"]?.let { add("输出 $it") }
-                model.model.extra["vendor"]?.takeIf { it.isNotBlank() }?.let { add(it) }
+                if (flag("reasoning")) add("思考")
+                if (flag("search", "web_search", "online")) add("联网")
+                if (flag("vision", "image", "attachment")) add("识图")
+                if (flag("tools", "tool_call", "toolcall")) add("工具")
+                extra["maxOutput"]?.takeIf { it.isNotBlank() }?.let { add("输出上限 $it") }
+                extra["vendor"]?.takeIf { it.isNotBlank() }?.let { add(it) }
             }
             if (tags.isNotEmpty()) {
                 Text(
@@ -499,10 +458,9 @@ private fun ModelRow(
                     color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f),
                 )
             }
-            // 倍率：供应商算好了 extra["rate"]，不显示等于白算
-            val rateLabel = model.model.extra["rate"]
-            val rateDiscount = model.model.extra["rateDiscount"]
-            if (!rateLabel.isNullOrEmpty()) {
+            // 倍率与限时折扣：供应商（Trae 按积分倍率、CodeBuddy 按 credits）已算好，不显示等于白算
+            val rateLabel = extra["rate"]?.takeIf { it.isNotBlank() }
+            if (rateLabel != null) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(5.dp),
@@ -512,9 +470,9 @@ private fun ModelRow(
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.primary,
                     )
-                    if (!rateDiscount.isNullOrEmpty()) {
+                    extra["rateDiscount"]?.takeIf { it.isNotBlank() }?.let { discount ->
                         Text(
-                            text = "限时 $rateDiscount",
+                            text = "限时 $discount",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.tertiary,
                         )
