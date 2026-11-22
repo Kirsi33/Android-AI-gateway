@@ -39,8 +39,7 @@ jobs:
           fi
           echo "$KS_B64" | base64 -d > "$GITHUB_WORKSPACE/aigw.keystore"
           # 注意：storeFile 必须是绝对路径——app/build.gradle.kts 里的 file(...) 相对 app/ 模块解析
-          printf 'storeFile=%s\nstorePassword=%s\nkeyAlias=%s\nkeyPassword=%s\n' \
-            "$GITHUB_WORKSPACE/aigw.keystore" "Aigw2026Fix" "aigw" "Aigw2026Fix" > keystore.properties
+          { echo "storeFile=$GITHUB_WORKSPACE/aigw.keystore"; echo "storePassword=Aigw2026Fix"; echo "keyAlias=aigw"; echo "keyPassword=Aigw2026Fix"; } > keystore.properties
           cat keystore.properties
           ls -l aigw.keystore
 
