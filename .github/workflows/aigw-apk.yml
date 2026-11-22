@@ -38,12 +38,10 @@ jobs:
             exit 1
           fi
           echo "$KS_B64" | base64 -d > "$GITHUB_WORKSPACE/aigw.keystore"
-          cat > keystore.properties <<'EOF'
-          storeFile=aigw.keystore
-          storePassword=Aigw2026Fix
-          keyAlias=aigw
-          keyPassword=Aigw2026Fix
-          EOF
+          # 注意：storeFile 必须是绝对路径——app/build.gradle.kts 里的 file(...) 相对 app/ 模块解析
+          printf 'storeFile=%s\nstorePassword=%s\nkeyAlias=%s\nkeyPassword=%s\n' \
+            "$GITHUB_WORKSPACE/aigw.keystore" "Aigw2026Fix" "aigw" "Aigw2026Fix" > keystore.properties
+          cat keystore.properties
           ls -l aigw.keystore
 
       - name: 打包 release
