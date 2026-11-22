@@ -470,7 +470,7 @@ fun EmptyHint(
  * 这类中中组合，也不会动「登录 · trae.cn」这类域名后缀。
  */
 fun pureCn(text: String): String =
-    text.replace(Regex("\s+·\s+[A-Z][A-Za-z0-9.\- &/]*$"), "")
+    text.replace(Regex("\\s+·\\s+[A-Z][A-Za-z0-9.\\- &/]*$"), "")
 
 /** 标题统一入口：所有页面标题/小节标签/瓷贴标签都过这里。 */
 fun cnTitle(text: String): String = pureCn(text)
