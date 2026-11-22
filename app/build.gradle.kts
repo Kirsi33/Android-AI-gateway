@@ -31,7 +31,8 @@ android {
     buildToolsVersion = "36.0.0"
 
     defaultConfig {
-        applicationId = "dev.aigw.app"
+        // 与官方包 dev.aigw.app 隔离：两个包可同时安装，官方更新不与我们冲突
+        applicationId = "dev.aigw.app.cn"
         minSdk = 26
         targetSdk = 36
         versionCode = 230

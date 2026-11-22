@@ -85,7 +85,10 @@ fun isNewerVersion(remote: String, local: String): Boolean {
  */
 object UpdateRepository {
 
-    private const val API = "https://api.github.com/repos/xibai6668/Android-AI-gateway/releases/latest"
+    // 应用内更新只允许装本仓库自己签名（CN=Kirsi33 AI Gateway）的包：
+    // 指向上游会拉到官方 dev.aigw.app 的 APK，与本包 applicationId 不同，装了会凭空多出一个应用。
+    // 上游的新功能由源码层合并搬运，不靠客户端自动更新。
+    private const val API = "https://api.github.com/repos/Kirsi33/Android-AI-gateway/releases/latest"
     private const val UA = "ai-gateway-android"
 
     fun fetchLatest(
@@ -125,7 +128,7 @@ object UpdateRepository {
         val obj = JsonParser.parseString(body).asJsonObject
         val version = obj.str("tag_name").trim().removePrefix("v")
         if (version.isEmpty()) throw IllegalStateException("未找到版本信息")
-        val pageUrl = obj.str("html_url").ifEmpty { "https://github.com/xibai6668/Android-AI-gateway/releases" }
+        val pageUrl = obj.str("html_url").ifEmpty { "https://github.com/Kirsi33/Android-AI-gateway/releases" }
         val notes = obj.str("body").trim()
         // 发版产物固定命名为 ai-gateway-<version>-release.apk；没有就退回最大的 .apk 资产
         val assets = obj.arrayOrNull("assets")?.mapNotNull { it.takeIf { a -> a.isJsonObject }?.asJsonObject }.orEmpty()
