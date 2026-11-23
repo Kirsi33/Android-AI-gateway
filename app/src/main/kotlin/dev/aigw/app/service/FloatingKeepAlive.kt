@@ -174,7 +174,7 @@ object FloatingKeepAlive {
         target.setPadding(dp(app, padH), dp(app, padV), dp(app, padH), dp(app, padV))
         target.background = GradientDrawable().apply {
             // 胶囊半径 = 高度的一半，随字号一起缩放
-            cornerRadius = dp(app, ((sp * 0.55f) + (sp * 0.55f))).toFloat()
+            cornerRadius = dp(app, (sp * 1.1f).roundToInt()).toFloat()
             setColor(0xB3222222.toInt())
         }
     }
