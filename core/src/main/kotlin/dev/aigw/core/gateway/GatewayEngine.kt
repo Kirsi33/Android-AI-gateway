@@ -174,6 +174,16 @@ fun interface LanAddressProvider {
 }
 
 /**
+ * 额外需要统计/清理的缓存目录。
+ *
+ * Android 侧提供更新包缓存与崩溃日志所在目录；它们是文件系统数据，不在键值存储里，
+ * 但往往是应用占用的真正大头。core 不能引用 Android 路径，所以由 App 注入。
+ */
+fun interface StorageDirProvider {
+    fun groups(): List<StorageAudit.DirectoryGroup>
+}
+
+/**
  * 网关引擎：把账号池、各供应商、HTTP 服务、日志与设置串起来。
  * UI 直接调用这里的方法，不需要走 HTTP。
  */
@@ -189,6 +199,8 @@ class GatewayEngine(
     preloadCallLogs: Boolean = true,
     /** 完整原文溢出目录：加密存储只留每字段 8K 摘要，超出部分写这里供详情页回读；null 时仅摘要。 */
     spillDir: java.io.File? = null,
+    /** 额外的缓存目录（更新包、崩溃日志等），用于统计与清理；null 时只统计键值存储。 */
+    private val storageDirs: StorageDirProvider = StorageDirProvider { emptyList() },
 ) {
     val settingsRepository = SettingsRepository(store)
     val pool = AccountPool(store, nowMillis)
@@ -431,7 +443,11 @@ class GatewayEngine(
         migrateLegacyProxyExclusions()
         installProxy()
         sanitizer.reloadPipeline(securitySettings.extraWords)
-        promptRewriter.reload(securitySettings.effectivePromptPresets(), securitySettings.promptRewriteRules)
+        promptRewriter.reload(
+            securitySettings.effectivePromptPresets(),
+            securitySettings.promptRewriteRules,
+            securitySettings.promptRewriteDisabledRules.toSet(),
+        )
         lastAutoPurgeDay = nowMillis() / DAY_MILLIS
         if (preloadCallLogs) {
             runCatching { purgeExpiredRecords() }
@@ -472,14 +488,22 @@ class GatewayEngine(
         securitySettings = updated
         store.write(dev.aigw.core.security.SecuritySettings.STORE_KEY, updated.toJson().toString())
         sanitizer.reloadPipeline(updated.extraWords)
-        promptRewriter.reload(updated.effectivePromptPresets(), updated.promptRewriteRules)
+        promptRewriter.reload(
+            updated.effectivePromptPresets(),
+            updated.promptRewriteRules,
+            updated.promptRewriteDisabledRules.toSet(),
+        )
         log("安全防护设置已更新（脱敏=${if (updated.sanitizeEnabled) "开启" else "关闭"}，限速=${updated.minIntervalMillis}ms，抖动=${updated.jitterMillis}ms）")
     }
 
     /** 重新加载脱敏处理链与规则词表。 */
     fun reloadSanitizerPipeline(): Int {
         sanitizer.reloadPipeline(securitySettings.extraWords)
-        promptRewriter.reload(securitySettings.effectivePromptPresets(), securitySettings.promptRewriteRules)
+        promptRewriter.reload(
+            securitySettings.effectivePromptPresets(),
+            securitySettings.promptRewriteRules,
+            securitySettings.promptRewriteDisabledRules.toSet(),
+        )
         val count = sanitizer.currentRulesCount()
         log("反审核脱敏处理链已重新加载，当前生效规则词汇数：$count")
         return count
@@ -751,9 +775,16 @@ class GatewayEngine(
             server?.stop()
             server = null
             requestLog.flush()
+            // 停止是最后一个能把待提交写入落盘的机会：服务被用户/系统停掉后
+            // 进程可能很快回收，合并窗口里的调用记录与用量会跟着丢。
+            store.flush()
             log("网关已停止")
         }
     }
+
+    /** 存储待提交状态（仅合并提交型存储有内容）；供 `/metrics` 与健康页展示。 */
+    fun storeFlushStats(): dev.aigw.core.store.FlushStats? =
+        (store as? dev.aigw.core.store.BatchedKeyValueStore)?.flushStats()
 
     fun isRunning(): Boolean = server != null
 
@@ -2124,7 +2155,54 @@ class GatewayEngine(
     // ------------------------------------------------------------------ 数据管理
 
     /** 存储占用明细。 */
-    fun storageReport(): StorageReport = StorageAudit.audit(store)
+    fun storageReport(): StorageReport = StorageAudit.audit(store, storageDirs.groups())
+
+    /**
+     * 清理缓存类数据（更新包、崩溃日志、完整原文溢出），保留调用记录与用量。
+     *
+     * 一次性回收「不影响网关工作」的那部分占用：记录列表、额度台账与账号不受影响。
+     * 真正想连记录一起清，走各自单独的清空入口。
+     *
+     * @return 释放的字节数与删掉的文件数。
+     */
+    fun clearCaches(): Pair<Long, Long> {
+        var bytes = 0L
+        var files = 0L
+        for (group in storageDirs.groups()) {
+            if (!group.clearable) continue
+            val (freed, removed) = deleteDirectoryContents(group.dir)
+            bytes += freed
+            files += removed
+        }
+        // 溢出原文是占用大头，且删掉只影响「详情页看全文」，一并清掉。
+        val (spillFiles, spillBytes) = callLogStore.clearFullText()
+        bytes += spillBytes
+        files += spillFiles.toLong()
+        if (files > 0) {
+            log("已清理缓存：${StorageAudit.formatSize(bytes)}（$files 个文件）")
+        }
+        return bytes to files
+    }
+
+    /** 递归删除目录内容但保留目录本身；返回（释放字节, 删除文件数）。 */
+    private fun deleteDirectoryContents(dir: java.io.File): Pair<Long, Long> {
+        if (!dir.isDirectory) return 0L to 0L
+        var bytes = 0L
+        var removed = 0L
+        // 先收集再删：遍历中删除会让 walkTopDown 的惰性遍历漏掉部分条目。
+        val targets = dir.walkTopDown().filter { it.isFile }.toList()
+        for (file in targets) {
+            val size = file.length()
+            if (file.delete()) {
+                bytes += size
+                removed++
+            }
+        }
+        // 顺手清掉删空的子目录，避免留下一堆空文件夹
+        dir.walkBottomUp().filter { it != dir && it.isDirectory && it.list()?.isEmpty() == true }
+            .forEach { it.delete() }
+        return bytes to removed
+    }
 
     /** 清理早于「保留天数」的记录；返回删除条数。 */
     fun purgeExpiredRecords(): Int {

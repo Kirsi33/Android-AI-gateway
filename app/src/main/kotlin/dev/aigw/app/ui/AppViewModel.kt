@@ -18,6 +18,7 @@ import dev.aigw.app.data.ApkInstaller
 import dev.aigw.app.data.KeepAlive
 import dev.aigw.app.data.KeepAliveStatus
 import dev.aigw.app.gatewayEngine
+import dev.aigw.app.updateApkDir
 import dev.aigw.app.ui.theme.ThemeMode
 import dev.aigw.app.ui.theme.defaultAppColors
 import dev.aigw.app.ui.theme.formatHex
@@ -60,6 +61,7 @@ import dev.aigw.core.update.UpdateRepository
 import dev.aigw.core.update.UpdateSources
 import dev.aigw.core.usage.CallRecord
 import dev.aigw.core.usage.LogLine
+import dev.aigw.core.usage.StorageAudit
 import dev.aigw.core.usage.StorageReport
 import dev.aigw.core.usage.UsageStats
 import kotlinx.coroutines.Dispatchers
@@ -638,6 +640,16 @@ class AppViewModel(
         }
     }
 
+    /**
+     * 清理缓存类占用（更新包、崩溃日志、完整原文溢出），保留调用记录与用量。
+     *
+     * 这是「空间吃紧但不想丢历史」时的默认动作：删掉的只是能从记录重新生成或无关紧要的副本。
+     */
+    fun clearCaches() = action(alsoRefreshStorage = true) {
+        val (bytes, files) = engine.clearCaches()
+        if (files == 0L) "没有可清理的缓存" else "已清理 ${StorageAudit.formatSize(bytes)}（$files 个文件）"
+    }
+
     fun refreshModels(silent: Boolean = false, forceRefresh: Boolean = false) {
         val gen = ++modelsGeneration
         modelsFetchedAt = System.currentTimeMillis()
@@ -1058,6 +1070,52 @@ class AppViewModel(
     fun removePromptRewriteRule(rule: dev.aigw.core.security.PromptRule) {
         val settings = engine.securitySettings()
         updateSecuritySettings(settings.copy(promptRewriteRules = settings.promptRewriteRules - rule))
+    }
+
+    /** 禁用一条内置替换规则（内置规则写死在代码里，用禁用列表实现「删除」）。 */
+    fun disableBuiltinPromptRule(ruleName: String) {
+        val settings = engine.securitySettings()
+        if (settings.isBuiltinRuleDisabled(ruleName)) return
+        updateSecuritySettings(
+            settings.copy(promptRewriteDisabledRules = settings.promptRewriteDisabledRules + ruleName),
+        )
+    }
+
+    /** 恢复一条被禁用的内置规则。 */
+    fun enableBuiltinPromptRule(ruleName: String) {
+        val settings = engine.securitySettings()
+        updateSecuritySettings(
+            settings.copy(promptRewriteDisabledRules = settings.promptRewriteDisabledRules - ruleName),
+        )
+    }
+
+    /** 恢复全部被禁用的内置规则。 */
+    fun enableAllBuiltinPromptRules() {
+        val settings = engine.securitySettings()
+        if (settings.promptRewriteDisabledRules.isEmpty()) return
+        updateSecuritySettings(settings.copy(promptRewriteDisabledRules = emptyList()))
+    }
+
+    /** 导出全部自定义规则（JSON 文本），供用户存成文件或分享。 */
+    fun exportPromptRewriteRules(): String =
+        dev.aigw.core.security.PromptRiskRewriter.encodeRules(engine.securitySettings().promptRewriteRules)
+
+    /**
+     * 导入规则。同名（name）的覆盖，其余追加，所以重复导入同一份文件不会堆出重复规则。
+     *
+     * @return 导入的条数；解析失败返回 -1。
+     */
+    fun importPromptRewriteRules(raw: String): Int {
+        val parsed = dev.aigw.core.security.PromptRiskRewriter.decodeRules(raw)
+            ?: return -1
+        if (parsed.isEmpty()) return 0
+        val settings = engine.securitySettings()
+        val existing = settings.promptRewriteRules.associateBy { it.name }
+        val merged = LinkedHashMap<String, dev.aigw.core.security.PromptRule>()
+        for ((name, rule) in existing) merged[name] = rule
+        for (rule in parsed) merged[rule.name] = rule
+        updateSecuritySettings(settings.copy(promptRewriteRules = merged.values.toList()))
+        return parsed.size
     }
 
     fun setDynamicColor(enabled: Boolean) {
@@ -1921,8 +1979,15 @@ class AppViewModel(
         }
         cancelRequested = false
         _state.value = _state.value.copy(updateDownload = UpdateDownload.Probing)
-        val target = File(File(app.cacheDir, "updates").apply { mkdirs() }, "update-${info.version}.apk")
+        val target = File(app.updateApkDir().apply { mkdirs() }, "update-${info.version}.apk")
         updateJob = viewModelScope.launch {
+            // 下载前先清掉旧包：每次升级都留一份 APK，几轮下来就是几十 MB。
+            // 放在 IO 线程做，避免目录很大时卡主线程。
+            withContext(Dispatchers.IO) {
+                app.updateApkDir().listFiles()?.forEach { old ->
+                    if (old.isFile && old.absolutePath != target.absolutePath) old.delete()
+                }
+            }
             // 线路按实测带宽降序；全部探测失败时退回内置顺序逐一尝试
             val candidates = withContext(Dispatchers.IO) {
                 MirrorSpeedTest().measure(apkUrl, UpdateSources.DOWNLOAD)
