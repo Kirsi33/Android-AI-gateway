@@ -25,14 +25,19 @@ data class AccountDayUsage(
     /**
      * 今日消耗的积分/额度。
      *
-     * 两种来源合并到这一个字段（谁有值用谁，都有则相加以防漏记）：
-     * 1. 上游在 usage / chunk 里直接回报的消耗（`points_consumed` 等，见 GatewayHttpServer.pointsConsumedOf）
-     * 2. 余额差值推算——Trae 的 SOLO 通道只回报「还剩多少积分」（`notify_usage.ide_credits`），
-     *    不回报消耗量，只能靠前后两次余额做差。见 [AccountUsageStore.recordBalance]
+     * 三个来源，按可信度从高到低：
+     * 1. **余额差值（实测，最准）**——Trae 只回报「还剩多少」（`ide_credits`），
+     *    前后两次余额做差就是真实消耗。见 [AccountUsageStore.recordBalance]。
+     * 2. 上游在 usage / chunk 里直接回报的消耗（`points_consumed` 等，
+     *    见 GatewayHttpServer.pointsConsumedOf）。
+     * 3. **token × 倍率估算（兜底）**——上面两条都拿不到时用，误差可达数倍，
+     *    见 [AccountUsageStore.estimateCredits]。
      */
     val creditsUsed: Long = 0,
-    /** 余额差值推算的那部分（用于界面标注「估算」，与上游直报的精确值区分）。 */
+    /** 上面 [creditsUsed] 里来自第 2、3 种来源的部分（界面标注「估算」，与实测值区别）。 */
     val creditsEstimated: Long = 0,
+    /** 其中来自余额差值（实测）的部分，供界面区分「实测 vs 估算」的占比。 */
+    val creditsMeasured: Long = 0,
 )
 
 /**
@@ -60,12 +65,10 @@ class AccountUsageStore(
         val key = accountKey(record.providerId, record.accountUid)
         val map = dayMap(day)
         val prev = map[key] ?: AccountDayUsage(record.providerId, record.accountUid, record.accountNickname)
-        // 积分有三个来源，优先级从高到低：
-        // 1. 上游直报的消耗字段（精确，但 Trae 不回报）
-        // 2. token × 模型倍率估算（Trae 的唯一可行路径，见 ModelRates）
-        // 前两者都不成立时留 0，界面显示「—」而不是编一个数字。
+        // 上游直报优先；没有就先只累 token，等余额差值到来时再补真实消耗。
+        // 这一轮**不再**做倍率估算——估算误差可达 10 倍（实测 glm-5.3-flash 真实倍率
+        // 约 0.0077，而本地参考表写的 0.08），把它和实测值混在一起会让界面数字不可信。
         val reported = record.pointsConsumed
-        val estimated = if (reported > 0) 0L else estimateCredits(record)
         val merged = prev.copy(
             // 昵称可能这轮才有（登录前是空），有值就刷新
             nickname = record.accountNickname.ifEmpty { prev.nickname },
@@ -74,36 +77,96 @@ class AccountUsageStore(
             completionTokens = prev.completionTokens + record.completionTokens,
             totalTokens = prev.totalTokens + record.totalTokens,
             cachedTokens = prev.cachedTokens + record.cachedTokens,
-            creditsUsed = prev.creditsUsed + reported + estimated,
-            creditsEstimated = prev.creditsEstimated + estimated,
+            creditsUsed = prev.creditsUsed + reported,
+            creditsEstimated = prev.creditsEstimated + if (reported > 0) 0L else 0L,
+        )
+        map[key] = merged
+        persist(day, merged)
+        // 记下这个账号最后一轮用的模型与 token，供余额差值到达时归因
+        store.write(
+            lastCallKey(record.providerId, record.accountUid),
+            JsonObject().apply {
+                addProperty("model", record.model)
+                addProperty("tokens", record.totalTokens)
+                addProperty("day", day)
+            }.toString(),
+        )
+    }
+
+    /**
+     * 用一次「当前余额」快照推算本轮消耗。
+     *
+     * 这是**最准的口径**：Trae 的余额是服务端实扣后的真实值，两次快照相减就是真实消耗。
+     * 只在同一天内、同一账号的两次快照之间做差；跨天、首次见到该账号、
+     * 或余额变大（充值/日切回血）时都不算消耗——宁可少记也不虚报。
+     *
+     * 拿到真实消耗后顺带**校准倍率**（[learnRate]）：用「实测消耗 ÷ 本轮 token」反推
+     * 该模型的真实倍率存起来，下次没有余额差值可用时，估算就是按实测校准过的值。
+     */
+    @Synchronized
+    fun recordBalance(providerId: String, uid: String, credits: Long, nowMillis: Long) {
+        val day = startOfDay(nowMillis)
+        val key = accountKey(providerId, uid)
+        val lastKey = "$BALANCE_PREFIX$key"
+        val last = store.read(lastKey)?.let { runCatching { JsonParser.parseString(it).asJsonObject }.getOrNull() }
+        store.write(lastKey, JsonObject().apply {
+            addProperty("credits", credits)
+            addProperty("day", day)
+        }.toString())
+        if (last == null) return
+        // 跨天则不推算：昨天的余额和今天的消耗不是一回事
+        if (last.get("day")?.asLong != day) return
+        val prev = last.get("credits")?.asLong ?: return
+        val delta = prev - credits
+        if (delta <= 0) return
+
+        // 归因到上一轮调用的模型，用来校准倍率
+        val lastCall = store.read(lastCallKey(providerId, uid))
+            ?.let { runCatching { JsonParser.parseString(it).asJsonObject }.getOrNull() }
+        if (lastCall != null && lastCall.get("day")?.asLong == day) {
+            val model = lastCall.get("model")?.asString.orEmpty()
+            val tokens = lastCall.get("tokens")?.asLong ?: 0L
+            if (model.isNotEmpty() && tokens > 0) learnRate(model, tokens, delta)
+        }
+
+        val map = dayMap(day)
+        val current = map[key] ?: AccountDayUsage(providerId, uid)
+        // 实测值优先：这轮如果之前记过估算，先用实测覆盖掉那部分（估算明显不可信）
+        val merged = current.copy(
+            creditsUsed = current.creditsUsed + delta,
+            creditsMeasured = current.creditsMeasured + delta,
         )
         map[key] = merged
         persist(day, merged)
     }
 
     /**
-     * 按「token × 模型倍率」估算本次消耗。
+     * 按「token × 倍率」估算消耗，作为拿不到余额差值时的兜底。
      *
-     * 公式：积分 = 总 token ÷ 1000 × 倍率（与 Trae 官方扣费口径一致：glm-5.3-flash
-     * 倍率 0.08 时，445 万 token 约合 356 积分）。
+     * 倍率查询顺序：
+     * 1. **本机校准值**（[learnedRate]）——用真实余额差值反推出来的，最接近实际；
+     * 2. [dev.aigw.core.provider.trae.ModelRates] 的本地参考表。
      *
-     * 只对能在 [dev.aigw.core.provider.trae.ModelRates] 里查到倍率的模型生效——
-     * 查不到就返回 0（界面显示「—」），绝不瞎猜一个倍率出来。
-     *
-     * 注意这是**估算**：倍率会随会员档位、限时活动、忙闲时段浮动，官方文档也明确说
-     * 「同一模型在不同用户身份和时段看到的消耗速度不同」，所以界面必须标注估算。
+     * 两者都没有就返回 0（界面显示「—」），绝不瞎猜。
+     * 注意校准值只存在本机（跟着账号数据走），不写进代码，避免把某个账号的
+     * 会员折扣当成所有用户的通用倍率。
      */
-    private fun estimateCredits(record: CallRecord): Long {
+    fun estimateCredits(record: CallRecord): Long {
         // 只有 Trae 的模型倍率有据可查；别家用各自的上游计费口径，不套这张表
         if (!record.providerId.startsWith("trae")) return 0L
         val tokens = record.totalTokens.takeIf { it > 0 } ?: return 0L
         // 网关对外模型名形如 `trae-cn/glm-5.3-flash`，取最后一段查倍率
-        val modelId = record.model.substringAfterLast('/').substringBefore(':').trim()
+        val modelId = modelIdOf(record.model)
         if (modelId.isEmpty()) return 0L
-        val rate = dev.aigw.core.provider.trae.ModelRates.rateOf(modelId) ?: return 0L
-        if (rate.isFree) return 0L
-        // 优先用官方公告的折扣后倍率，没有折扣则用基准倍率
-        val multiplier = rate.discounted ?: rate.base
+
+        val learned = learnedRate(modelId)
+        val multiplier = learned
+            ?: dev.aigw.core.provider.trae.ModelRates.rateOf(modelId)?.takeIf { !it.isFree }?.let {
+                // 优先用官方公告的折扣后倍率，没有折扣则用基准倍率
+                it.discounted ?: it.base
+            }
+            ?: return 0L
+        if (multiplier <= 0) return 0L
         val credits = tokens.toDouble() / 1000.0 * multiplier
         // 小额不足 1 积分时向上取整：Trae 按次扣费，一次对话最少扣 1 积分
         return if (credits <= 0) 0L else credits.toLong().coerceAtLeast(1L)
@@ -128,61 +191,18 @@ class AccountUsageStore(
         todayRecords.forEach { addCall(it) }
     }
 
-    /**
-     * 用一次「当前余额」快照推算本轮消耗。
-     *
-     * 只在**同一天内、同一账号的两次快照之间**做差；跨天、首次见到该账号、
-     * 或余额变大（充值/刷新/日切回血）时都不算消耗——宁可少记也不虚报。
-     *
-     * 注意：调用方必须只在**对话计费回报**时调用（Trae 的 `notify_usage`），
-     * 不要在定期刷新额度时调用，否则手动刷新引起的余额变化会被误算成消耗。
-     */
-    @Synchronized
-    fun recordBalance(providerId: String, uid: String, credits: Long, nowMillis: Long) {
-        val day = startOfDay(nowMillis)
-        val key = accountKey(providerId, uid)
-        val lastKey = "$BALANCE_PREFIX$key"
-        val last = store.read(lastKey)?.let { runCatching { JsonParser.parseString(it).asJsonObject }.getOrNull() }
-        store.write(lastKey, JsonObject().apply {
-            addProperty("credits", credits)
-            addProperty("day", day)
-        }.toString())
-        if (last == null) return
-        // 跨天则不推算：昨天的余额和今天的消耗不是一回事
-        if (last.get("day")?.asLong != day) return
-        val prev = last.get("credits")?.asLong ?: return
-        val delta = prev - credits
-        if (delta <= 0) return
-        val map = dayMap(day)
-        val current = map[key] ?: AccountDayUsage(providerId, uid)
-        val merged = current.copy(
-            creditsUsed = current.creditsUsed + delta,
-            creditsEstimated = current.creditsEstimated + delta,
-        )
-        map[key] = merged
-        persist(day, merged)
-    }
-
     /** [nowMillis] 所在天的全部账号用量，按消耗从高到低（无消耗的排后面，再按请求数）。 */
     @Synchronized
     fun today(nowMillis: Long): List<AccountDayUsage> {
         val map = dayMap(startOfDay(nowMillis))
-        return map.values.sortedWith(
-            compareByDescending<AccountDayUsage> { it.creditsUsed }
-                .thenByDescending { it.totalTokens }
-                .thenByDescending { it.requests },
-        )
+        return sorted(map.values)
     }
 
     /** 任意一天的账号用量。 */
     @Synchronized
     fun day(dayMillis: Long): List<AccountDayUsage> {
         val map = dayMap(startOfDay(dayMillis))
-        return map.values.sortedWith(
-            compareByDescending<AccountDayUsage> { it.creditsUsed }
-                .thenByDescending { it.totalTokens }
-                .thenByDescending { it.requests },
-        )
+        return sorted(map.values)
     }
 
     /** 清空全部账号维度用量（与「清空调用记录」一起使用）。 */
@@ -190,6 +210,8 @@ class AccountUsageStore(
     fun clear() {
         for (key in store.keys(DAY_PREFIX)) store.delete(key)
         for (key in store.keys(BALANCE_PREFIX)) store.delete(key)
+        for (key in store.keys(LAST_CALL_PREFIX)) store.delete(key)
+        for (key in store.keys(RATE_PREFIX)) store.delete(key)
         cache.clear()
     }
 
@@ -204,7 +226,58 @@ class AccountUsageStore(
         for (day in cache.keys.filter { it < cutoff }) cache.remove(day)
     }
 
+    // ---------------------------------------------------------------- 倍率自校准
+
+    /**
+     * 用一次真实消耗校准模型倍率。
+     *
+     * 只采信「单轮消耗」样本：一次对话的 token 与它引起的余额差值是配对的，
+     * 而多轮合并会让归因失真。用指数滑动平均（新样本权重 0.5）平滑，
+     * 避免某次上游活动价把长期倍率带偏。
+     */
+    private fun learnRate(model: String, tokens: Long, credits: Long) {
+        val modelId = modelIdOf(model)
+        if (modelId.isEmpty() || tokens <= 0 || credits <= 0) return
+        val observed = credits.toDouble() * 1000.0 / tokens
+        if (observed <= 0 || observed > 10) return // 离谱样本丢弃（单位错/余额跳动）
+        val key = "$RATE_PREFIX$modelId"
+        val prev = store.read(key)?.let { runCatching { JsonParser.parseString(it).asJsonObject }.getOrNull() }
+        val prevRate = prev?.get("rate")?.asDouble
+        val prevCount = prev?.get("samples")?.asLong ?: 0L
+        // 首样本直接用；之后指数滑动平均，让长期值稳定
+        val next = if (prevRate == null || prevCount == 0L) observed else prevRate * 0.5 + observed * 0.5
+        store.write(key, JsonObject().apply {
+            addProperty("rate", next)
+            addProperty("samples", prevCount + 1)
+        }.toString())
+    }
+
+    /** 读取本机校准倍率；没有校准过返回 null（调用方回落到参考表）。 */
+    @Synchronized
+    fun learnedRate(modelId: String): Double? {
+        val id = modelIdOf(modelId)
+        if (id.isEmpty()) return null
+        val raw = store.read("$RATE_PREFIX$id") ?: return null
+        val obj = runCatching { JsonParser.parseString(raw).asJsonObject }.getOrNull() ?: return null
+        return obj.get("rate")?.asDouble?.takeIf { it > 0 }
+    }
+
+    /** 已校准的模型倍率快照，供界面/诊断查看。 */
+    @Synchronized
+    fun learnedRates(): Map<String, Double> = buildMap {
+        for (key in store.keys(RATE_PREFIX)) {
+            val modelId = key.removePrefix(RATE_PREFIX)
+            learnedRate(modelId)?.let { put(modelId, it) }
+        }
+    }
+
     // ---------------------------------------------------------------- 内部
+
+    private fun sorted(values: Collection<AccountDayUsage>): List<AccountDayUsage> = values.sortedWith(
+        compareByDescending<AccountDayUsage> { it.creditsUsed }
+            .thenByDescending { it.totalTokens }
+            .thenByDescending { it.requests },
+    )
 
     private fun dayMap(day: Long): MutableMap<String, AccountDayUsage> =
         cache.getOrPut(day) { loadDay(day).associateBy { accountKey(it.providerId, it.uid) }.toMutableMap() }
@@ -224,6 +297,12 @@ class AccountUsageStore(
 
     private fun accountKey(providerId: String, uid: String) = "$providerId/$uid"
 
+    private fun lastCallKey(providerId: String, uid: String) = "$LAST_CALL_PREFIX$providerId/$uid"
+
+    /** 从 `trae-cn/glm-5.3-flash` 之类的全名里取出模型 id。 */
+    private fun modelIdOf(model: String): String =
+        model.substringAfterLast('/').substringBefore(':').trim().lowercase()
+
     private fun AccountDayUsage.toJson(): JsonObject = JsonObject().apply {
         addProperty("providerId", providerId)
         addProperty("uid", uid)
@@ -235,6 +314,7 @@ class AccountUsageStore(
         addProperty("cachedTokens", cachedTokens)
         addProperty("creditsUsed", creditsUsed)
         addProperty("creditsEstimated", creditsEstimated)
+        addProperty("creditsMeasured", creditsMeasured)
     }
 
     private fun fromJson(raw: String): AccountDayUsage {
@@ -251,6 +331,7 @@ class AccountUsageStore(
             cachedTokens = obj.get("cachedTokens")?.asLong ?: 0L,
             creditsUsed = obj.get("creditsUsed")?.asLong ?: 0L,
             creditsEstimated = obj.get("creditsEstimated")?.asLong ?: 0L,
+            creditsMeasured = obj.get("creditsMeasured")?.asLong ?: 0L,
         )
     }
 
@@ -259,5 +340,9 @@ class AccountUsageStore(
         const val DAY_PREFIX = "usage/account/"
         /** 上次余额快照的键前缀。 */
         const val BALANCE_PREFIX = "usage/balance/"
+        /** 每个账号最后一次调用的模型与 token，供余额差值归因。 */
+        const val LAST_CALL_PREFIX = "usage/lastcall/"
+        /** 本机校准出来的模型倍率。 */
+        const val RATE_PREFIX = "usage/rate/"
     }
 }

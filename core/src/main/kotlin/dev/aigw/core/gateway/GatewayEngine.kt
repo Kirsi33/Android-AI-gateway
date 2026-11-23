@@ -953,6 +953,11 @@ class GatewayEngine(
             return CreditRefreshResult(providerId, uid, account.nickname, 0, false, reason)
         }
         pool.updateCredits(providerId, uid, info.balance, info.known, info.detail, info.unit)
+        // 余额差值 = 真实消耗。这是账号维度统计里最准的口径（Trae 只回报余额、不回报消耗），
+        // 手动「刷新额度」与对话后的自动补刷都会走到这里。
+        if (info.known && info.balance > 0) {
+            accountUsage.recordBalance(providerId, uid, info.balance, nowMillis())
+        }
         if (info.known) {
             log("额度刷新 $providerId/${account.nickname.ifEmpty { uid }}：${info.balance}（${info.detail}）")
         } else {

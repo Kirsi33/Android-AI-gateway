@@ -107,7 +107,7 @@ class AccountUsageStoreTest {
     }
 
     @Test
-    fun `上游直报消耗与余额推算相加`() {
+    fun `上游直报消耗与余额差值都是累加`() {
         val store = storeWith(InMemoryKeyValueStore())
         val now = System.currentTimeMillis()
         store.recordBalance("trae", "u1", 1000, now)
@@ -116,8 +116,10 @@ class AccountUsageStoreTest {
 
         val today = store.today(now)
         assertEquals(1, today.size)
+        // 直报 30 + 差值 100
         assertEquals(130L, today[0].creditsUsed)
-        assertEquals(100L, today[0].creditsEstimated)
+        // 其中差值部分是实测
+        assertEquals(100L, today[0].creditsMeasured)
     }
 
     @Test
@@ -153,46 +155,74 @@ class AccountUsageStoreTest {
     }
 
     @Test
-    fun `按模型倍率估算积分 - glm-5_3-flash`() {
+    fun `addCall 只累 token 不估算积分`() {
         val store = storeWith(InMemoryKeyValueStore())
         val now = System.currentTimeMillis()
-        // glm-5.3-flash 倍率 0.08：1,000,000 token -> 1000000/1000*0.08 = 80 积分
         store.addCall(
             record("u1", now, prompt = 900_000, completion = 100_000).copy(model = "trae-cn/glm-5.3-flash"),
         )
 
-        val today = store.today(now)
-        assertEquals(80L, today[0].creditsUsed)
-        // 倍率估出来的必须计入「估算」，界面才能如实标注
-        assertEquals(80L, today[0].creditsEstimated)
+        // 没有余额差值就没法知道真实消耗；绝不拿倍率表硬凑一个数字出来
+        val row = store.today(now)[0]
+        assertEquals(0L, row.creditsUsed)
+        assertEquals(1_000_000L, row.totalTokens)
+    }
+
+    @Test
+    fun `估算接口按参考倍率计算`() {
+        val store = storeWith(InMemoryKeyValueStore())
+        // glm-5.3-flash 参考表倍率 0.08：1,000,000 token -> 80 积分
+        val credits = store.estimateCredits(
+            record("u1", 0, prompt = 900_000, completion = 100_000).copy(model = "trae-cn/glm-5.3-flash"),
+        )
+        assertEquals(80L, credits)
+    }
+
+    @Test
+    fun `余额差值会校准倍率并优先于参考表`() {
+        val store = storeWith(InMemoryKeyValueStore())
+        val now = System.currentTimeMillis()
+        // 实测：100 万 token 只扣了 10 积分（真实倍率约 0.01，远低于参考表的 0.08）
+        store.addCall(
+            record("u1", now, prompt = 900_000, completion = 100_000).copy(model = "trae-cn/glm-5.3-flash"),
+        )
+        store.recordBalance("trae", "u1", 1000, now)
+        store.recordBalance("trae", "u1", 990, now + 1000)
+
+        assertEquals(10L, store.today(now)[0].creditsUsed)
+        assertEquals(10L, store.today(now)[0].creditsMeasured)
+
+        // 校准后估算应贴近实测（约 0.01），而不是参考表的 0.08
+        val learned = store.learnedRate("glm-5.3-flash")
+        assertTrue(learned != null && learned < 0.02, "校准倍率应约为 0.01，实际 $learned")
+        val estimated = store.estimateCredits(
+            record("u2", 0, prompt = 900_000, completion = 100_000).copy(model = "trae-cn/glm-5.3-flash"),
+        )
+        assertEquals(10L, estimated)
     }
 
     @Test
     fun `倍率表里没有的模型不估值`() {
         val store = storeWith(InMemoryKeyValueStore())
-        val now = System.currentTimeMillis()
-        store.addCall(
-            record("u1", now, prompt = 900_000, completion = 100_000).copy(model = "trae-cn/unknown-model-xyz"),
+        val credits = store.estimateCredits(
+            record("u1", 0, prompt = 900_000, completion = 100_000).copy(model = "trae-cn/unknown-model-xyz"),
         )
-
         // 查不到倍率就不猜，留 0 让界面显示「—」
-        assertEquals(0L, store.today(now)[0].creditsUsed)
+        assertEquals(0L, credits)
     }
 
     @Test
     fun `非 trae 供应商不套倍率表`() {
         val store = storeWith(InMemoryKeyValueStore())
-        val now = System.currentTimeMillis()
-        store.addCall(
-            record("u1", now, prompt = 900_000, completion = 100_000, providerId = "codebuddy")
+        val credits = store.estimateCredits(
+            record("u1", 0, prompt = 900_000, completion = 100_000, providerId = "codebuddy")
                 .copy(model = "glm-5.3-flash"),
         )
-
-        assertEquals(0L, store.today(now)[0].creditsUsed)
+        assertEquals(0L, credits)
     }
 
     @Test
-    fun `上游直报存在时不叠加倍率估算`() {
+    fun `上游直报的消耗直接计入`() {
         val store = storeWith(InMemoryKeyValueStore())
         val now = System.currentTimeMillis()
         store.addCall(
@@ -201,8 +231,8 @@ class AccountUsageStoreTest {
         )
 
         val row = store.today(now)[0]
-        // 精确值优先：42，而不是 42+80
         assertEquals(42L, row.creditsUsed)
+        // 上游直报是精确值，不该被标成估算
         assertEquals(0L, row.creditsEstimated)
     }
 }

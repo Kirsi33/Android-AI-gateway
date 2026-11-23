@@ -69,7 +69,8 @@ fun AccountUsageSection(usage: List<AccountDayUsage>) {
     }
     // 口径说明：用户必须知道这个数字是怎么来的、准不准，否则「积分」二字会被当成账单
     Text(
-        text = "积分按「token ÷ 1000 × 模型倍率」估算；倍率随会员档位与活动浮动，仅作参考。",
+        text = "「实测」= 刷新额度时的余额差值，准确；
+「估算」= 按 token × 模型倍率推算，仅供参考。",
         style = MaterialTheme.typography.labelSmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f),
         modifier = Modifier.padding(top = 6.dp),
@@ -117,9 +118,21 @@ private fun AccountUsageRow(item: AccountDayUsage, gold: Color) {
                     color = if (item.creditsUsed > 0) gold else MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 // 全部由余额差值推算时标「估算」——Trae 只回报剩余、不回报消耗
-                if (item.creditsEstimated > 0) {
-                    Text(
-                        text = if (item.creditsEstimated >= item.creditsUsed) "倍率估算" else "含估算",
+                // 口径标签：实测 = 余额差值（准）；估算 = token×倍率（可能差几倍）
+                when {
+                    item.creditsUsed <= 0 -> Unit
+                    item.creditsMeasured > 0 && item.creditsMeasured >= item.creditsUsed -> Text(
+                        text = "实测",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.tertiary,
+                    )
+                    item.creditsMeasured > 0 -> Text(
+                        text = "部分实测",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    else -> Text(
+                        text = "估算",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
