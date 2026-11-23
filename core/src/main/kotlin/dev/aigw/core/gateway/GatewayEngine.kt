@@ -205,6 +205,8 @@ class GatewayEngine(
     val settingsRepository = SettingsRepository(store)
     val pool = AccountPool(store, nowMillis)
     val callLogStore = CallLogStore(store, preloadOnConstruction = preloadCallLogs, spillDir = spillDir)
+    /** 账号维度日用量：独立键空间，不与上游的全局聚合混存。 */
+    val accountUsage = dev.aigw.core.usage.AccountUsageStore(store)
     val requestLog = RequestLog(store, nowMillis = nowMillis)
     val registry = ProviderRegistry()
 
@@ -320,6 +322,9 @@ class GatewayEngine(
         onBilling = { providerId, uid, credits ->
             pool.updateCredits(providerId, uid, credits, known = true, detail = "来自对话计费回报")
             log("计费回报（$providerId/$uid）：可用额度=$credits")
+            // 账号维度日消耗：Trae SOLO 通道只回报「还剩多少」，靠两次余额做差推算本轮消耗。
+            // 只在此处（对话计费回报）调用，不在定期刷新额度时调，避免把手动刷新的余额变化算成消耗。
+            recordAccountBalance(providerId, uid, credits)
         },
         onAccountError = { providerId, uid, error ->
             // 只有凭证失效才硬禁用；其它错误不再冷却账号，每次如实上报
@@ -791,6 +796,19 @@ class GatewayEngine(
     fun localUrl(): String = "http://127.0.0.1:${settings.port}/v1"
 
     fun lanUrls(): List<String> = lanAddressProvider.lanAddresses().map { "http://$it:${settings.port}/v1" }
+
+    /** 今日各账号用量（按消耗降序）。 */
+    fun accountUsageToday(): List<dev.aigw.core.usage.AccountDayUsage> = accountUsage.today(nowMillis())
+
+    /**
+     * 上游回报「当前剩余积分」时调用，用余额差值推算本轮消耗。
+     *
+     * 只应在**对话计费回报**路径调用（Trae 的 notify_usage）；定期刷新额度时调会把
+     * 手动刷新引起的余额变化误算成消耗。
+     */
+    fun recordAccountBalance(providerId: String, uid: String, credits: Long) {
+        accountUsage.recordBalance(providerId, uid, credits, nowMillis())
+    }
 
     fun status(): GatewayStatus = GatewayStatus(
         running = isRunning(),

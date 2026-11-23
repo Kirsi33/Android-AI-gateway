@@ -427,6 +427,10 @@ fun UsageScreen(state: AppUiState, viewModel: AppViewModel, onBack: () -> Unit) 
                 StatCell(formatCount(state.today.aborted), "中断")
             }
             CostLine(state.today)
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            // 账号维度：各账号今日消耗。实现在独立的 AccountUsageSection.kt 里，
+            // 这样上游改本页布局时这块不会跟着冲突。
+            AccountUsageSection(state.accountUsageToday)
         }
 
         SectionCard(enterIndex = 5) {

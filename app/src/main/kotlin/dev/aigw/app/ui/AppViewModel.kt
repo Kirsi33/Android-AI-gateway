@@ -63,6 +63,7 @@ import dev.aigw.core.usage.CallRecord
 import dev.aigw.core.usage.LogLine
 import dev.aigw.core.usage.StorageAudit
 import dev.aigw.core.usage.StorageReport
+import dev.aigw.core.usage.AccountDayUsage
 import dev.aigw.core.usage.UsageStats
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -279,6 +280,8 @@ data class AppUiState(
     val daily: List<UsageStats> = emptyList(),
     /** 全部记录汇总（今日 + 历史）。 */
     val total: UsageStats = UsageStats(),
+    /** 今日各账号用量（按消耗降序），账号维度统计。 */
+    val accountUsageToday: List<AccountDayUsage> = emptyList(),
     val providers: List<ProviderInfo> = emptyList(),
     val accounts: List<AccountStatus> = emptyList(),
     val customProviders: List<CustomProviderConfig> = emptyList(),
@@ -385,6 +388,7 @@ private class Snapshot(
     val today: UsageStats,
     val daily: List<UsageStats>,
     val total: UsageStats,
+    val accountUsageToday: List<AccountDayUsage>,
     val providers: List<ProviderInfo>,
     val accounts: List<AccountStatus>,
     val customProviders: List<CustomProviderConfig>,
@@ -539,6 +543,7 @@ class AppViewModel(
                     today = engine.callLogStore.todayStats(System.currentTimeMillis()),
                     daily = engine.callLogStore.dailyStats(System.currentTimeMillis()),
                     total = engine.callLogStore.totalStats(),
+                    accountUsageToday = engine.accountUsageToday(),
                     providers = engine.providers(),
                     accounts = engine.accounts(),
                     customProviders = engine.settingsRepository.loadCustomProviders(),
@@ -573,6 +578,7 @@ class AppViewModel(
                 today = snapshot.today,
                 daily = snapshot.daily,
                 total = snapshot.total,
+                accountUsageToday = snapshot.accountUsageToday,
                 providers = snapshot.providers,
                 accounts = snapshot.accounts,
                 customProviders = snapshot.customProviders,
@@ -1918,6 +1924,8 @@ class AppViewModel(
 
     fun clearCalls() = action(alsoRefreshStorage = true) {
         engine.callLogStore.clear()
+        // 账号维度日用量一并清掉：否则清空记录后「各账号今日消耗」仍有残留数字
+        engine.accountUsage.clear()
         "调用记录已清空"
     }
 

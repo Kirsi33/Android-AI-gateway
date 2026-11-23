@@ -2357,37 +2357,38 @@ class GatewayHttpServer(
                 ?: (promptTokens + completionTokens)
             engine.clientKeyUsage.charge(key.id, tokens, costMicros ?: 0L)
         }
-        engine.callLogStore.add(
-            CallRecord(
-                id = id,
-                startedAtMillis = startedAt,
-                providerId = providerId,
-                model = model,
-                accountUid = uid,
-                accountNickname = nickname,
-                streaming = streaming,
-                status = status,
-                httpStatus = httpStatus,
-                promptTokens = promptTokens,
-                completionTokens = completionTokens,
-                totalTokens = usage?.get("total_tokens")?.asLong ?: 0L,
-                cachedTokens = cachedTokens,
-                pointsConsumed = pointsConsumed,
-                firstByteMillis = firstByteMillis,
-                durationMillis = System.currentTimeMillis() - startedAt,
-                error = error,
-                requestBody = requestBody,
-                responseBody = responseText,
-                rawResponse = rawResponse,
-                tries = meta.tries,
-                retried = meta.retried,
-                clientKeyId = meta.clientKey?.id.orEmpty(),
-                clientKeyName = meta.clientKey?.name.orEmpty(),
-                costMicros = costMicros ?: 0L,
-                costKnown = costMicros != null,
-                affinityReused = meta.affinityReused,
-            ),
+        val callRecord = CallRecord(
+            id = id,
+            startedAtMillis = startedAt,
+            providerId = providerId,
+            model = model,
+            accountUid = uid,
+            accountNickname = nickname,
+            streaming = streaming,
+            status = status,
+            httpStatus = httpStatus,
+            promptTokens = promptTokens,
+            completionTokens = completionTokens,
+            totalTokens = usage?.get("total_tokens")?.asLong ?: 0L,
+            cachedTokens = cachedTokens,
+            pointsConsumed = pointsConsumed,
+            firstByteMillis = firstByteMillis,
+            durationMillis = System.currentTimeMillis() - startedAt,
+            error = error,
+            requestBody = requestBody,
+            responseBody = responseText,
+            rawResponse = rawResponse,
+            tries = meta.tries,
+            retried = meta.retried,
+            clientKeyId = meta.clientKey?.id.orEmpty(),
+            clientKeyName = meta.clientKey?.name.orEmpty(),
+            costMicros = costMicros ?: 0L,
+            costKnown = costMicros != null,
+            affinityReused = meta.affinityReused,
         )
+        engine.callLogStore.add(callRecord)
+        // 账号维度日用量：与全局聚合并行记录，互不影响（上游更新时这两块互不覆盖）
+        engine.accountUsage.addCall(callRecord)
     }
 
     private fun log(text: String) = engine.log(text)
