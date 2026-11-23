@@ -798,7 +798,12 @@ class GatewayEngine(
     fun lanUrls(): List<String> = lanAddressProvider.lanAddresses().map { "http://$it:${settings.port}/v1" }
 
     /** 今日各账号用量（按消耗降序）。 */
-    fun accountUsageToday(): List<dev.aigw.core.usage.AccountDayUsage> = accountUsage.today(nowMillis())
+    fun accountUsageToday(): List<dev.aigw.core.usage.AccountDayUsage> {
+        // 升级后首次查询时把当天的历史记录补进来：账号维度统计是后加的，
+        // 不补的话「今日请求 143」与「各账号 2 次」会自相矛盾。幂等，重复调用安全。
+        accountUsage.backfillFrom(callLogStore.list(), nowMillis())
+        return accountUsage.today(nowMillis())
+    }
 
     /**
      * 上游回报「当前剩余积分」时调用，用余额差值推算本轮消耗。

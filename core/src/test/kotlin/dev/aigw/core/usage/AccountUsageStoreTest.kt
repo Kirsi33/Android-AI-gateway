@@ -151,4 +151,58 @@ class AccountUsageStoreTest {
 
         assertEquals("张三", store.today(now)[0].nickname)
     }
+
+    @Test
+    fun `按模型倍率估算积分 - glm-5_3-flash`() {
+        val store = storeWith(InMemoryKeyValueStore())
+        val now = System.currentTimeMillis()
+        // glm-5.3-flash 倍率 0.08：1,000,000 token -> 1000000/1000*0.08 = 80 积分
+        store.addCall(
+            record("u1", now, prompt = 900_000, completion = 100_000).copy(model = "trae-cn/glm-5.3-flash"),
+        )
+
+        val today = store.today(now)
+        assertEquals(80L, today[0].creditsUsed)
+        // 倍率估出来的必须计入「估算」，界面才能如实标注
+        assertEquals(80L, today[0].creditsEstimated)
+    }
+
+    @Test
+    fun `倍率表里没有的模型不估值`() {
+        val store = storeWith(InMemoryKeyValueStore())
+        val now = System.currentTimeMillis()
+        store.addCall(
+            record("u1", now, prompt = 900_000, completion = 100_000).copy(model = "trae-cn/unknown-model-xyz"),
+        )
+
+        // 查不到倍率就不猜，留 0 让界面显示「—」
+        assertEquals(0L, store.today(now)[0].creditsUsed)
+    }
+
+    @Test
+    fun `非 trae 供应商不套倍率表`() {
+        val store = storeWith(InMemoryKeyValueStore())
+        val now = System.currentTimeMillis()
+        store.addCall(
+            record("u1", now, prompt = 900_000, completion = 100_000, providerId = "codebuddy")
+                .copy(model = "glm-5.3-flash"),
+        )
+
+        assertEquals(0L, store.today(now)[0].creditsUsed)
+    }
+
+    @Test
+    fun `上游直报存在时不叠加倍率估算`() {
+        val store = storeWith(InMemoryKeyValueStore())
+        val now = System.currentTimeMillis()
+        store.addCall(
+            record("u1", now, prompt = 900_000, completion = 100_000, points = 42)
+                .copy(model = "trae-cn/glm-5.3-flash"),
+        )
+
+        val row = store.today(now)[0]
+        // 精确值优先：42，而不是 42+80
+        assertEquals(42L, row.creditsUsed)
+        assertEquals(0L, row.creditsEstimated)
+    }
 }

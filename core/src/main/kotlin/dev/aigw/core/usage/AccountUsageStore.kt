@@ -60,6 +60,12 @@ class AccountUsageStore(
         val key = accountKey(record.providerId, record.accountUid)
         val map = dayMap(day)
         val prev = map[key] ?: AccountDayUsage(record.providerId, record.accountUid, record.accountNickname)
+        // 积分有三个来源，优先级从高到低：
+        // 1. 上游直报的消耗字段（精确，但 Trae 不回报）
+        // 2. token × 模型倍率估算（Trae 的唯一可行路径，见 ModelRates）
+        // 前两者都不成立时留 0，界面显示「—」而不是编一个数字。
+        val reported = record.pointsConsumed
+        val estimated = if (reported > 0) 0L else estimateCredits(record)
         val merged = prev.copy(
             // 昵称可能这轮才有（登录前是空），有值就刷新
             nickname = record.accountNickname.ifEmpty { prev.nickname },
@@ -68,10 +74,58 @@ class AccountUsageStore(
             completionTokens = prev.completionTokens + record.completionTokens,
             totalTokens = prev.totalTokens + record.totalTokens,
             cachedTokens = prev.cachedTokens + record.cachedTokens,
-            creditsUsed = prev.creditsUsed + record.pointsConsumed,
+            creditsUsed = prev.creditsUsed + reported + estimated,
+            creditsEstimated = prev.creditsEstimated + estimated,
         )
         map[key] = merged
         persist(day, merged)
+    }
+
+    /**
+     * 按「token × 模型倍率」估算本次消耗。
+     *
+     * 公式：积分 = 总 token ÷ 1000 × 倍率（与 Trae 官方扣费口径一致：glm-5.3-flash
+     * 倍率 0.08 时，445 万 token 约合 356 积分）。
+     *
+     * 只对能在 [dev.aigw.core.provider.trae.ModelRates] 里查到倍率的模型生效——
+     * 查不到就返回 0（界面显示「—」），绝不瞎猜一个倍率出来。
+     *
+     * 注意这是**估算**：倍率会随会员档位、限时活动、忙闲时段浮动，官方文档也明确说
+     * 「同一模型在不同用户身份和时段看到的消耗速度不同」，所以界面必须标注估算。
+     */
+    private fun estimateCredits(record: CallRecord): Long {
+        // 只有 Trae 的模型倍率有据可查；别家用各自的上游计费口径，不套这张表
+        if (!record.providerId.startsWith("trae")) return 0L
+        val tokens = record.totalTokens.takeIf { it > 0 } ?: return 0L
+        // 网关对外模型名形如 `trae-cn/glm-5.3-flash`，取最后一段查倍率
+        val modelId = record.model.substringAfterLast('/').substringBefore(':').trim()
+        if (modelId.isEmpty()) return 0L
+        val rate = dev.aigw.core.provider.trae.ModelRates.rateOf(modelId) ?: return 0L
+        if (rate.isFree) return 0L
+        // 优先用官方公告的折扣后倍率，没有折扣则用基准倍率
+        val multiplier = rate.discounted ?: rate.base
+        val credits = tokens.toDouble() / 1000.0 * multiplier
+        // 小额不足 1 积分时向上取整：Trae 按次扣费，一次对话最少扣 1 积分
+        return if (credits <= 0) 0L else credits.toLong().coerceAtLeast(1L)
+    }
+
+    /**
+     * 首次启用本功能时，把调用记录里当天的历史回填进来。
+     *
+     * 为什么需要：账号维度统计是后加的，升级前已经跑过的请求只存在 [CallLogStore] 里，
+     * 不补的话界面上「今日请求 143」与「各账号 2 次」会自相矛盾。
+     *
+     * 幂等：只有当天的账号统计数据**完全为空**才回填；已有数据一律不动，
+     * 避免把实时累加出的精确值（含余额差值）覆盖成重算值。
+     * 局限：只能回填 [CallLogStore] 里还留着的记录（受其容量上限约束），更早的无从补起。
+     */
+    @Synchronized
+    fun backfillFrom(records: List<CallRecord>, nowMillis: Long) {
+        val day = startOfDay(nowMillis)
+        if (dayMap(day).isNotEmpty()) return
+        val todayRecords = records.filter { startOfDay(it.startedAtMillis) == day }
+        if (todayRecords.isEmpty()) return
+        todayRecords.forEach { addCall(it) }
     }
 
     /**
