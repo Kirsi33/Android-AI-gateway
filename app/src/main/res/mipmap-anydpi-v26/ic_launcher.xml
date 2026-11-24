@@ -1,5 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- 自适应图标：前景是位图（伊莉雅），由系统按遮罩裁切。
+     前景 PNG 位于 mipmap-*/ic_launcher_foreground_img.png（108dp 满幅，内容居中 86%）。 -->
 <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
     <background android:drawable="@color/ic_launcher_background" />
-    <foreground android:drawable="@drawable/ic_launcher_foreground" />
+    <foreground android:drawable="@mipmap/ic_launcher_foreground_img" />
 </adaptive-icon>
