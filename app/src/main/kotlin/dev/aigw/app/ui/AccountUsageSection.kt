@@ -33,10 +33,17 @@ import java.util.Locale
  *
  * 数据口径见 [AccountDayUsage]：积分消耗可能是上游直报的精确值，也可能是
  * 靠余额差值推算的估算值（Trae SOLO 通道只能这么来），估算部分单独标注。
+ *
+ * [compact] 供首页「今日用量」卡片使用：不显示空态与口径说明、账号超过 [COMPACT_LIMIT]
+ * 个后折叠成一行「还有 N 个账号」，保证首页卡片不会被撑高。
  */
 @Composable
-fun AccountUsageSection(usage: List<AccountDayUsage>) {
+fun AccountUsageSection(
+    usage: List<AccountDayUsage>,
+    compact: Boolean = false,
+) {
     if (usage.isEmpty()) {
+        if (compact) return
         Text(
             text = "今天还没有调用。发起对话后，这里会按账号列出各自的消耗。",
             style = MaterialTheme.typography.bodySmall,
@@ -64,23 +71,37 @@ fun AccountUsageSection(usage: List<AccountDayUsage>) {
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
-    for (item in usage) {
-        AccountUsageRow(item, gold)
+    val shown = if (compact) usage.take(COMPACT_LIMIT) else usage
+    for (item in shown) {
+        AccountUsageRow(item, gold, compact)
+    }
+    if (compact && usage.size > shown.size) {
+        Text(
+            text = "还有 ${usage.size - shown.size} 个账号，点上方「用量统计」查看全部",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f),
+            modifier = Modifier.padding(top = 4.dp),
+        )
     }
     // 口径说明：用户必须知道这个数字是怎么来的、准不准，否则「积分」二字会被当成账单
-    Text(
-        text = "「实测」= 刷新额度时的余额差值，准确；「估算」= 按 token × 模型倍率推算，仅供参考。",
-        style = MaterialTheme.typography.labelSmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f),
-        modifier = Modifier.padding(top = 6.dp),
-    )
+    if (!compact) {
+        Text(
+            text = "「实测」= 刷新额度时的余额差值，准确；「估算」= 按 token × 模型倍率推算，仅供参考。",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f),
+            modifier = Modifier.padding(top = 6.dp),
+        )
+    }
 }
 
+/** 首页紧凑模式下最多列几个账号。 */
+private const val COMPACT_LIMIT = 3
+
 @Composable
-private fun AccountUsageRow(item: AccountDayUsage, gold: Color) {
-    Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+private fun AccountUsageRow(item: AccountDayUsage, gold: Color, compact: Boolean = false) {
+    Column(verticalArrangement = Arrangement.spacedBy(if (compact) 2.dp else 3.dp)) {
         Row(
-            modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
+            modifier = Modifier.fillMaxWidth().padding(top = if (compact) 4.dp else 6.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {

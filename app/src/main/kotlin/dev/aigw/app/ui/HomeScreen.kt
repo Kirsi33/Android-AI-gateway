@@ -351,6 +351,12 @@ private fun UsageSummaryCard(state: AppUiState, openUsage: () -> Unit) {
                 modifier = Modifier.weight(1f),
             )
         }
+        // 各账号今日消耗：与「用量统计」页同一份数据，首页做紧凑版（最多 3 行）。
+        // 放在这里正是为了配「刷新额度」按钮——只有刷新额度才产生余额差值，才有「实测」数字。
+        if (state.accountUsageToday.isNotEmpty()) {
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            AccountUsageSection(state.accountUsageToday, compact = true)
+        }
     }
 }
 
