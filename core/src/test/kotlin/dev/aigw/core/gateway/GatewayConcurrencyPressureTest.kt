@@ -106,19 +106,34 @@ class GatewayConcurrencyPressureTest {
 
         val ok = AtomicInteger()
         val failed = AtomicInteger()
+        val failures = java.util.concurrent.ConcurrentLinkedQueue<String>()
         val pool = Executors.newFixedThreadPool(32)
         try {
             val start = CountDownLatch(1)
             val futures = (1..32).map {
                 pool.submit {
                     start.await()
-                    val (status, _) = chat(server.listeningPort)
-                    if (status == 200) ok.incrementAndGet() else failed.incrementAndGet()
+                    val (status, body) = chat(server.listeningPort)
+                    if (status == 200) {
+                        ok.incrementAndGet()
+                    } else {
+                        failed.incrementAndGet()
+                        failures += "$status: ${body.take(160)}"
+                    }
                 }
             }
             start.countDown()
             futures.forEach { it.get(60, TimeUnit.SECONDS) }
-            assertEquals(32, ok.get(), "全部并发请求都应成功，失败 ${failed.get()} 个")
+            val errors = engine.requestLog.lines()
+                .filter { it.level == "ERROR" }
+                .take(5)
+                .joinToString(" | ") { it.text }
+            assertEquals(
+                32,
+                ok.get(),
+                "全部并发请求都应成功，失败 ${failed.get()} 个：${failures.take(8).joinToString(" | ")}" +
+                    "；错误日志：$errors",
+            )
         } finally {
             pool.shutdownNow()
             server.stop()

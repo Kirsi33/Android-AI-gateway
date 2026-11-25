@@ -83,7 +83,8 @@ class AccountUsageStoreTest {
         val today = store.today(now)
         assertEquals(1, today.size)
         assertEquals(120L, today[0].creditsUsed)
-        assertEquals(120L, today[0].creditsEstimated)
+        // 估算口径已停用（只信余额差值）；creditsEstimated 保留字段兼容旧数据，恒为 0
+        assertEquals(0L, today[0].creditsEstimated)
     }
 
     @Test

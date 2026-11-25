@@ -78,7 +78,8 @@ class AccountUsageStore(
             totalTokens = prev.totalTokens + record.totalTokens,
             cachedTokens = prev.cachedTokens + record.cachedTokens,
             creditsUsed = prev.creditsUsed + reported,
-            creditsEstimated = prev.creditsEstimated + if (reported > 0) 0L else 0L,
+            // 估算口径已停用：这一轮不再按 token×倍率记账，creditsEstimated 只兼容保留
+            creditsEstimated = prev.creditsEstimated,
         )
         map[key] = merged
         persist(day, merged)

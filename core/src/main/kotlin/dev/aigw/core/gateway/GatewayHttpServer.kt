@@ -95,7 +95,16 @@ class GatewayHttpServer(
                 }
             }
         } catch (e: Exception) {
-            engine.logError("处理 $uri 失败：${e.message}")
+            // 很多异常（NPE/CME/部分 IO）message 为 null，只打 message 等于什么都看不到
+            val where = if (e.stackTrace.isNotEmpty()) {
+                " @ " + e.stackTrace.take(3).joinToString(" <- ") {
+                    "${it.className.substringAfterLast('.')}.${it.methodName}:${it.lineNumber}"
+                }
+            } else {
+                ""
+            }
+            val what = "${e.javaClass.simpleName}: ${e.message.orEmpty().ifEmpty { "(no message)" }}$where"
+            engine.logError("处理 $uri 失败：$what")
             errorResponse(500, "internal_error", e.message ?: "网关内部错误")
         }
         return response.applyCors(session)
