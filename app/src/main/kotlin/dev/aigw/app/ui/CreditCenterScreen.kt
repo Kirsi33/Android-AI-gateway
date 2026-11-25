@@ -135,6 +135,15 @@ fun ProviderCreditsScreen(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 } else {
+                    // 3 天内到期的额度包先汇总一句，免得用户滚到下面才发现
+                    val expiringSoon = packs.count { isExpiringSoon(it.expireAt * 1000L) }
+                    if (expiringSoon > 0) {
+                        Text(
+                            text = "⚠ $expiringSoon 个额度包将在 3 天内过期",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    }
                     for (pack in packs) {
                         Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                             Text(
@@ -158,11 +167,23 @@ fun ProviderCreditsScreen(
                             // 额度包到期时间（Trae 的 expire_time / end_time 等）；不过期的不显示
                             val expireText = formatExpireText(pack.expireAt * 1000L)
                             if (expireText.isNotEmpty()) {
-                                Text(
-                                    text = "有效期至 $expireText",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = LocalAppColors.current.goldStart,
-                                )
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                ) {
+                                    Text(
+                                        text = "有效期至 $expireText",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = LocalAppColors.current.goldStart,
+                                    )
+                                    if (isExpiringSoon(pack.expireAt * 1000L)) {
+                                        Text(
+                                            text = "快过期",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.error,
+                                        )
+                                    }
+                                }
                             }
                         }
                     }

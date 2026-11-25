@@ -682,6 +682,15 @@ internal fun formatExpireText(epochMillis: Long): String {
     }
 }
 
+/** 「快过期」判定窗口：3 天内到期的额度包/积分批次。 */
+internal const val EXPIRING_SOON_MILLIS = 3L * 24 * 60 * 60 * 1000
+
+/** 是否在 [EXPIRING_SOON_MILLIS] 内到期；已过期或没有到期时间都不算。 */
+internal fun isExpiringSoon(
+    epochMillis: Long,
+    nowMillis: Long = System.currentTimeMillis(),
+): Boolean = epochMillis > nowMillis && epochMillis - nowMillis <= EXPIRING_SOON_MILLIS
+
 /**
  * 一笔积分/额度流水：左侧事件名与时间（收入行再带有效期），右侧带符号的变动值。
  *
@@ -721,11 +730,23 @@ fun PointsBillRow(bill: dev.aigw.core.provider.PointsBill, modifier: Modifier = 
             }
             // 收入行（每日发放等）才有有效期；充值/奖励积分不带 expire_at
             if (expire.isNotEmpty()) {
-                Text(
-                    text = "有效期至 $expire",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = LocalAppColors.current.goldStart,
-                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    Text(
+                        text = "有效期至 $expire",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = LocalAppColors.current.goldStart,
+                    )
+                    if (isExpiringSoon(bill.expireAtMillis)) {
+                        Text(
+                            text = "快过期",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    }
+                }
             }
         }
         Text(
