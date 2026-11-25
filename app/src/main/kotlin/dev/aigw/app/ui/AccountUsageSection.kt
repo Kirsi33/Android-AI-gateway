@@ -22,6 +22,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import dev.aigw.app.ui.theme.LocalAppColors
+import dev.aigw.core.usage.ACCOUNT_USAGE_CREDITS_VERSION
 import dev.aigw.core.usage.AccountDayUsage
 import java.util.Locale
 
@@ -31,8 +32,8 @@ import java.util.Locale
  * 单独成文件（而不是塞进 MeScreen）是为了让上游更新 MeScreen 时少冲突：
  * 这里只有我们自己的代码，上游改用量统计页的布局不会波及。
  *
- * 数据口径见 [AccountDayUsage]：积分消耗可能是上游直报的精确值，也可能是
- * 靠余额差值推算的估算值（Trae SOLO 通道只能这么来），估算部分单独标注。
+ * 数据口径见 [AccountDayUsage]：余额差值与上游直报都是真实值，同一快照区间内取较大值
+ * 去重（避免同一笔消耗被算两次）；旧的 token × 倍率估算已停用，只可能出现在历史数据里。
  *
  * [compact] 供首页「今日用量」卡片使用：不显示空态与口径说明、账号超过 [COMPACT_LIMIT]
  * 个后折叠成一行「还有 N 个账号」，保证首页卡片不会被撑高。
@@ -42,7 +43,10 @@ fun AccountUsageSection(
     usage: List<AccountDayUsage>,
     compact: Boolean = false,
 ) {
-    if (usage.isEmpty()) {
+    // 空 uid 是「所有账号都试过仍失败」的归属桶，进了账号列表只会变成一行「未绑定账号」；
+    // 顶部失败计数已经涵盖它，这里只统计能归属到具体账号的调用。
+    val bound = usage.filter { it.uid.isNotEmpty() }
+    if (bound.isEmpty()) {
         if (compact) return
         Text(
             text = "今天还没有调用。发起对话后，这里会按账号列出各自的消耗。",
@@ -52,8 +56,8 @@ fun AccountUsageSection(
         return
     }
     val gold = LocalAppColors.current.goldStart
-    val totalCredits = usage.sumOf { it.creditsUsed }
-    val totalRequests = usage.sumOf { it.requests }
+    val totalCredits = bound.sumOf { it.creditsUsed }
+    val totalRequests = bound.sumOf { it.requests }
     Row(
         modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
@@ -66,18 +70,18 @@ fun AccountUsageSection(
             color = if (totalCredits > 0) gold else MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Text(
-            text = "· ${usage.size} 个账号 · ${formatCount(totalRequests)} 次请求",
+            text = "· ${bound.size} 个账号 · ${formatCount(totalRequests)} 次请求",
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
-    val shown = if (compact) usage.take(COMPACT_LIMIT) else usage
+    val shown = if (compact) bound.take(COMPACT_LIMIT) else bound
     for (item in shown) {
         AccountUsageRow(item, gold, compact)
     }
-    if (compact && usage.size > shown.size) {
+    if (compact && bound.size > shown.size) {
         Text(
-            text = "还有 ${usage.size - shown.size} 个账号，点上方「用量统计」查看全部",
+            text = "还有 ${bound.size - shown.size} 个账号，点上方「用量统计」查看全部",
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f),
             modifier = Modifier.padding(top = 4.dp),
@@ -86,7 +90,9 @@ fun AccountUsageSection(
     // 口径说明：用户必须知道这个数字是怎么来的、准不准，否则「积分」二字会被当成账单
     if (!compact) {
         Text(
-            text = "「实测」= 刷新额度时的余额差值，准确；「估算」= 按 token × 模型倍率推算，仅供参考。",
+            text = "「实测」= 上游直报积分或刷新额度时的余额差值（同一区间不重复计）；" +
+                "「旧口径」= 修复前的统计（可能重复计），次日自动消失；" +
+                "「估算」= 已停用的 token × 倍率旧数据。",
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f),
             modifier = Modifier.padding(top = 6.dp),
@@ -137,22 +143,27 @@ private fun AccountUsageRow(item: AccountDayUsage, gold: Color, compact: Boolean
                     fontWeight = FontWeight.SemiBold,
                     color = if (item.creditsUsed > 0) gold else MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                // 全部由余额差值推算时标「估算」——Trae 只回报剩余、不回报消耗
-                // 口径标签：实测 = 余额差值（准）；估算 = token×倍率（可能差几倍）
+                // 口径标签：余额差值与上游直报都是真实值（同区间已去重）→ 实测；
+                // creditsEstimated 只可能来自已停用的 token×倍率旧数据 → 估算/部分估算
                 when {
                     item.creditsUsed <= 0 -> Unit
-                    item.creditsMeasured > 0 && item.creditsMeasured >= item.creditsUsed -> Text(
+                    item.creditsVersion < ACCOUNT_USAGE_CREDITS_VERSION -> Text(
+                        text = "旧口径",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    item.creditsEstimated <= 0 -> Text(
                         text = "实测",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.tertiary,
                     )
-                    item.creditsMeasured > 0 -> Text(
-                        text = "部分实测",
+                    item.creditsEstimated >= item.creditsUsed -> Text(
+                        text = "估算",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     else -> Text(
-                        text = "估算",
+                        text = "部分估算",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )

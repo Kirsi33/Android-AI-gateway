@@ -108,7 +108,7 @@ class AccountUsageStoreTest {
     }
 
     @Test
-    fun `上游直报消耗与余额差值都是累加`() {
+    fun `同一区间的直报与余额差值取大不重复计`() {
         val store = storeWith(InMemoryKeyValueStore())
         val now = System.currentTimeMillis()
         store.recordBalance("trae", "u1", 1000, now)
@@ -117,10 +117,59 @@ class AccountUsageStoreTest {
 
         val today = store.today(now)
         assertEquals(1, today.size)
-        // 直报 30 + 差值 100
-        assertEquals(130L, today[0].creditsUsed)
-        // 其中差值部分是实测
+        // 余额差值 100 已经覆盖了直报的 30（同一笔消耗），取大 = 100，不能加成 130
+        assertEquals(100L, today[0].creditsUsed)
         assertEquals(100L, today[0].creditsMeasured)
+        assertEquals(30L, today[0].creditsReported)
+        assertEquals(2, today[0].creditsVersion)
+    }
+
+    @Test
+    fun `修复前的历史行保持旧口径不会被新调用洗白`() {
+        val inner = InMemoryKeyValueStore()
+        val now = System.currentTimeMillis()
+        val day = dev.aigw.core.util.startOfDay(now)
+        // 模拟修复前落盘的行：没有 creditsVersion / creditsReported
+        inner.write(
+            "usage/account/$day/trae/u1",
+            """{"providerId":"trae","uid":"u1","creditsUsed":196,"creditsMeasured":100,"creditsEstimated":0}""",
+        )
+        val store = storeWith(inner)
+        store.addCall(record("u1", now + 100, points = 10))
+
+        val row = store.today(now)[0]
+        assertEquals(0, row.creditsVersion, "历史行不应被新调用升级成已修复口径")
+        assertEquals(206L, row.creditsUsed)
+    }
+
+    @Test
+    fun `直报大于余额差值时以直报为准`() {
+        val store = storeWith(InMemoryKeyValueStore())
+        val now = System.currentTimeMillis()
+        store.recordBalance("trae", "u1", 1000, now)
+        store.addCall(record("u1", now + 100, points = 80))
+        // 差值只有 50（例如部分扣费还没反映到该账本）；直报 80 更完整
+        store.recordBalance("trae", "u1", 950, now + 200)
+
+        val today = store.today(now)
+        assertEquals(80L, today[0].creditsUsed)
+        assertEquals(50L, today[0].creditsMeasured)
+        assertEquals(80L, today[0].creditsReported)
+    }
+
+    @Test
+    fun `快照区间的直报只抵扣一次`() {
+        val store = storeWith(InMemoryKeyValueStore())
+        val now = System.currentTimeMillis()
+        store.recordBalance("trae", "u1", 1000, now)
+        store.addCall(record("u1", now + 100, points = 30))
+        store.recordBalance("trae", "u1", 900, now + 200) // 区间一：max(100, 30) = 100
+        store.addCall(record("u1", now + 300, points = 20))
+        store.recordBalance("trae", "u1", 870, now + 400) // 区间二：max(30, 20) = 30
+
+        val today = store.today(now)
+        assertEquals(130L, today[0].creditsUsed)
+        assertEquals(50L, today[0].creditsReported)
     }
 
     @Test

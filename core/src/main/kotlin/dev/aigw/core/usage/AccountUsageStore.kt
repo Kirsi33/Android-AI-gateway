@@ -25,20 +25,37 @@ data class AccountDayUsage(
     /**
      * 今日消耗的积分/额度。
      *
-     * 三个来源，按可信度从高到低：
-     * 1. **余额差值（实测，最准）**——Trae 只回报「还剩多少」（`ide_credits`），
-     *    前后两次余额做差就是真实消耗。见 [AccountUsageStore.recordBalance]。
+     * 两个真实来源：
+     * 1. **余额差值（最准）**——前后两次余额快照做差就是这段时间的真实消耗
+     *    （Trae 只回报「还剩多少」）。见 [AccountUsageStore.recordBalance]。
      * 2. 上游在 usage / chunk 里直接回报的消耗（`points_consumed` 等，
      *    见 GatewayHttpServer.pointsConsumedOf）。
-     * 3. **token × 倍率估算（兜底）**——上面两条都拿不到时用，误差可达数倍，
-     *    见 [AccountUsageStore.estimateCredits]。
+     *
+     * 两者可能描述**同一笔**消耗（Loomy 的直报与当日赠送余额就是同一本账），
+     * 所以同一快照区间内取两者较大值，而不是相加。
      */
     val creditsUsed: Long = 0,
-    /** 上面 [creditsUsed] 里来自第 2、3 种来源的部分（界面标注「估算」，与实测值区别）。 */
+    /**
+     * 旧的 token × 倍率估算部分，**仅供兼容历史数据**。
+     *
+     * 取不到余额差值与上游直报时才会用到，误差可达数倍，现已停写（新数据恒为 0）。
+     */
     val creditsEstimated: Long = 0,
-    /** 其中来自余额差值（实测）的部分，供界面区分「实测 vs 估算」的占比。 */
+    /** [creditsUsed] 里来自余额差值的部分（实测口径）。 */
     val creditsMeasured: Long = 0,
+    /** 今日上游直报的积分累计；与余额快照配合做区间去重。 */
+    val creditsReported: Long = 0,
+    /**
+     * 积分记账口径版本。
+     *
+     * 2 = 直报与余额差值按快照区间取大去重；0 = 修复前落盘的数据（两者直接相加，
+     * 可能重复计）。旧行保持 0 直到次日新建，界面标「旧口径」，不会被误当成准确值。
+     */
+    val creditsVersion: Int = ACCOUNT_USAGE_CREDITS_VERSION,
 )
+
+/** 当前积分记账口径版本；见 [AccountDayUsage.creditsVersion]。 */
+const val ACCOUNT_USAGE_CREDITS_VERSION = 2
 
 /**
  * 按「天 × 账号」记录用量。
@@ -78,6 +95,8 @@ class AccountUsageStore(
             totalTokens = prev.totalTokens + record.totalTokens,
             cachedTokens = prev.cachedTokens + record.cachedTokens,
             creditsUsed = prev.creditsUsed + reported,
+            // 直报单独累计：余额差值到达时要拿它做区间去重，不能重复相加
+            creditsReported = prev.creditsReported + reported,
             // 估算口径已停用：这一轮不再按 token×倍率记账，creditsEstimated 只兼容保留
             creditsEstimated = prev.creditsEstimated,
         )
@@ -109,10 +128,14 @@ class AccountUsageStore(
         val day = startOfDay(nowMillis)
         val key = accountKey(providerId, uid)
         val lastKey = "$BALANCE_PREFIX$key"
+        val map = dayMap(day)
+        val current = map[key] ?: AccountDayUsage(providerId, uid)
         val last = store.read(lastKey)?.let { runCatching { JsonParser.parseString(it).asJsonObject }.getOrNull() }
+        // 快照里记下「此刻的直报累计」：下次差值只覆盖这之后新增的直报
         store.write(lastKey, JsonObject().apply {
             addProperty("credits", credits)
             addProperty("day", day)
+            addProperty("reported", current.creditsReported)
         }.toString())
         if (last == null) return
         // 跨天则不推算：昨天的余额和今天的消耗不是一回事
@@ -130,11 +153,14 @@ class AccountUsageStore(
             if (model.isNotEmpty() && tokens > 0) learnRate(model, tokens, delta)
         }
 
-        val map = dayMap(day)
-        val current = map[key] ?: AccountDayUsage(providerId, uid)
-        // 实测值优先：这轮如果之前记过估算，先用实测覆盖掉那部分（估算明显不可信）
+        // 余额差值覆盖区间内的全部消耗，上游直报往往只是它的一部分（Loomy 的直报
+        // 与当日赠送余额是同一本账）：取较大值，不做加法，避免重复计。
+        val lastReported = last.get("reported")?.asLong ?: 0L
+        val reportedSince = (current.creditsReported - lastReported).coerceAtLeast(0L)
+        // 直报已经覆盖了差值时 extra=0（总消耗不多加），但差值仍然算「实测」的一部分
+        val extra = (delta - reportedSince).coerceAtLeast(0L)
         val merged = current.copy(
-            creditsUsed = current.creditsUsed + delta,
+            creditsUsed = current.creditsUsed + extra,
             creditsMeasured = current.creditsMeasured + delta,
         )
         map[key] = merged
@@ -316,6 +342,8 @@ class AccountUsageStore(
         addProperty("creditsUsed", creditsUsed)
         addProperty("creditsEstimated", creditsEstimated)
         addProperty("creditsMeasured", creditsMeasured)
+        addProperty("creditsReported", creditsReported)
+        addProperty("creditsVersion", creditsVersion)
     }
 
     private fun fromJson(raw: String): AccountDayUsage {
@@ -333,6 +361,9 @@ class AccountUsageStore(
             creditsUsed = obj.get("creditsUsed")?.asLong ?: 0L,
             creditsEstimated = obj.get("creditsEstimated")?.asLong ?: 0L,
             creditsMeasured = obj.get("creditsMeasured")?.asLong ?: 0L,
+            creditsReported = obj.get("creditsReported")?.asLong ?: 0L,
+            // 老数据没有版本字段 = 修复前口径，保持 0，界面据此标「旧口径」
+            creditsVersion = obj.get("creditsVersion")?.asInt ?: 0,
         )
     }
 
