@@ -667,6 +667,22 @@ fun QuotaPackBar(pack: dev.aigw.core.provider.QuotaPack) {
 }
 
 /**
+ * 把到期时刻（毫秒）格式化成「MM-dd HH:mm」；23:59:59 统一写成「MM-dd 24:00」。
+ *
+ * 每日积分/部分额度包的到期时刻是当天 23:59:59，网页端按「24:00」展示，这里保持一致。
+ * 0 或负数返回空串（表示上游没给或不过期）。
+ */
+internal fun formatExpireText(epochMillis: Long): String {
+    if (epochMillis <= 0) return ""
+    val at = java.time.Instant.ofEpochMilli(epochMillis).atZone(java.time.ZoneId.systemDefault())
+    return if (at.hour == 23 && at.minute == 59) {
+        at.format(java.time.format.DateTimeFormatter.ofPattern("MM-dd")) + " 24:00"
+    } else {
+        at.format(java.time.format.DateTimeFormatter.ofPattern("MM-dd HH:mm"))
+    }
+}
+
+/**
  * 一笔积分/额度流水：左侧事件名与时间（收入行再带有效期），右侧带符号的变动值。
  *
  * 供应商无关：小浣熊的积分明细与「额度中心」的流水共用这一处渲染。
@@ -683,20 +699,7 @@ fun PointsBillRow(bill: dev.aigw.core.provider.PointsBill, modifier: Modifier = 
             ""
         }
     }
-    val expire = remember(bill.expireAtMillis) {
-        if (bill.expireAtMillis > 0) {
-            val at = java.time.Instant.ofEpochMilli(bill.expireAtMillis)
-                .atZone(java.time.ZoneId.systemDefault())
-            // 上游每日积分到期时刻是 23:59:59，网页端统一写成「MM-dd 24:00」，这里保持一致
-            if (at.hour == 23 && at.minute == 59) {
-                at.format(java.time.format.DateTimeFormatter.ofPattern("MM-dd")) + " 24:00"
-            } else {
-                at.format(java.time.format.DateTimeFormatter.ofPattern("MM-dd HH:mm"))
-            }
-        } else {
-            ""
-        }
-    }
+    val expire = remember(bill.expireAtMillis) { formatExpireText(bill.expireAtMillis) }
     Row(
         modifier = modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,

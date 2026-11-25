@@ -16,6 +16,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import dev.aigw.app.ui.theme.LocalAppColors
 import dev.aigw.core.provider.PointsBillFilter
 import dev.aigw.core.provider.ProviderCapability
 
@@ -154,6 +155,15 @@ fun ProviderCreditsScreen(
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
+                            // 额度包到期时间（Trae 的 expire_time / end_time 等）；不过期的不显示
+                            val expireText = formatExpireText(pack.expireAt * 1000L)
+                            if (expireText.isNotEmpty()) {
+                                Text(
+                                    text = "有效期至 $expireText",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = LocalAppColors.current.goldStart,
+                                )
+                            }
                         }
                     }
                 }
