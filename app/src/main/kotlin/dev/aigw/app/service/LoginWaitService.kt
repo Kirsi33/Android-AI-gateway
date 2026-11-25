@@ -59,7 +59,6 @@ class LoginWaitService : Service() {
         )
         return NotificationCompat.Builder(this, AiGatewayApp.CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_stat_gateway)
-            .setLargeIcon(android.graphics.BitmapFactory.decodeResource(resources, R.drawable.ic_notif_large))
             .setContentTitle(getString(R.string.login_wait_title))
             .setContentText(getString(R.string.login_wait_text))
             .setOngoing(true)

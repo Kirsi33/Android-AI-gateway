@@ -189,7 +189,6 @@ object LiveStatusNotifier {
             // 官方实时更新要件：ongoing + contentTitle，且不得是 group summary / colorized / 自定义 RemoteViews
             .setOngoing(true)
             .setSmallIcon(R.drawable.ic_stat_gateway)
-            .setLargeIcon(android.graphics.BitmapFactory.decodeResource(context.resources, R.drawable.ic_notif_large))
             .setContentTitle(title)
             .setContentText(text)
             .setContentIntent(open)

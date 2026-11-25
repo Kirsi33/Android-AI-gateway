@@ -320,7 +320,6 @@ class GatewayService : Service() {
     private fun notifyUnrecoverable() {
         val notification = NotificationCompat.Builder(this, AiGatewayApp.CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_stat_gateway)
-            .setLargeIcon(android.graphics.BitmapFactory.decodeResource(resources, R.drawable.ic_notif_large))
             .setContentTitle(getString(R.string.app_name))
             .setContentText("本地网关已停止：端口无法恢复监听，请打开应用重新启动")
             .setAutoCancel(true)
@@ -390,8 +389,8 @@ class GatewayService : Service() {
     private fun buildNotification(port: Int): Notification {
         return NotificationCompat.Builder(this, AiGatewayApp.CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_stat_gateway)
-            // 彩色的伊莉雅大图标：折叠态右侧与展开态都能看到「是谁在跑」
-            .setLargeIcon(android.graphics.BitmapFactory.decodeResource(resources, R.drawable.ic_notif_large))
+            // 不再设置 setLargeIcon：本机 ROM 会在折叠态右侧再显示一张大图，
+            // 与左侧应用图标重复；用户只要左边那一枚伊莉雅图标
             .setContentTitle(getString(R.string.app_name))
             .setContentText("本地网关运行中 · 端口 $port")
             .setOngoing(true)
