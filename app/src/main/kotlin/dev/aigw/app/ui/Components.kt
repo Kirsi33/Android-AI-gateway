@@ -685,8 +685,14 @@ fun PointsBillRow(bill: dev.aigw.core.provider.PointsBill, modifier: Modifier = 
     }
     val expire = remember(bill.expireAtMillis) {
         if (bill.expireAtMillis > 0) {
-            java.text.SimpleDateFormat("MM-dd HH:mm", java.util.Locale.getDefault())
-                .format(java.util.Date(bill.expireAtMillis))
+            val at = java.time.Instant.ofEpochMilli(bill.expireAtMillis)
+                .atZone(java.time.ZoneId.systemDefault())
+            // 上游每日积分到期时刻是 23:59:59，网页端统一写成「MM-dd 24:00」，这里保持一致
+            if (at.hour == 23 && at.minute == 59) {
+                at.format(java.time.format.DateTimeFormatter.ofPattern("MM-dd")) + " 24:00"
+            } else {
+                at.format(java.time.format.DateTimeFormatter.ofPattern("MM-dd HH:mm"))
+            }
         } else {
             ""
         }
