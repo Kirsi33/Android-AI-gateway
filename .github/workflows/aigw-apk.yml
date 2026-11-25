@@ -43,6 +43,10 @@ jobs:
           cat keystore.properties
           ls -l aigw.keystore
 
+      # 出包前先跑 core 单测：只靠 CI 出包（本机不开机）时，编译过不代表协议解析没坏
+      - name: 单元测试（core）
+        run: gradle :core:test --console=plain
+
       - name: 打包 release
         run: gradle :app:assembleRelease --console=plain
 
