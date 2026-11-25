@@ -21,6 +21,7 @@ import dev.aigw.core.provider.ProviderHooks
 import dev.aigw.core.provider.ProviderModel
 import dev.aigw.core.provider.ProviderModelCatalogView
 import dev.aigw.core.provider.PointsBill
+import dev.aigw.core.provider.PointsBillFilter
 import dev.aigw.core.provider.PointsBillListView
 import dev.aigw.core.provider.SSE_DONE
 import dev.aigw.core.provider.StreamFailureChatCall
