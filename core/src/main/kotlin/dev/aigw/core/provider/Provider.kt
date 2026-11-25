@@ -173,8 +173,12 @@ interface Provider {
      * 积分/额度流水明细（可选）；不支持账本的 provider 返回 null。
      *
      * 与 [creditPacks] 的分工：后者是「还剩多少」的额度包视角，这里是「每一笔怎么来的」流水视角。
+     * [filter] 用于区分收入/消耗口径；不支持筛选的供应商可以忽略它。
      */
-    fun pointsBills(account: ProviderAccount): PointsBillListView? = null
+    fun pointsBills(
+        account: ProviderAccount,
+        filter: PointsBillFilter = PointsBillFilter.ALL,
+    ): PointsBillListView? = null
 
     /**
      * 该供应商用到的上游域名后缀（不带子域前缀）。

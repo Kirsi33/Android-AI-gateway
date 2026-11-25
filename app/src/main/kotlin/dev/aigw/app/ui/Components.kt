@@ -28,6 +28,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
@@ -666,7 +667,7 @@ fun QuotaPackBar(pack: dev.aigw.core.provider.QuotaPack) {
 }
 
 /**
- * 一笔积分/额度流水：左侧事件名与时间，右侧带符号的变动值。
+ * 一笔积分/额度流水：左侧事件名与时间（收入行再带有效期），右侧带符号的变动值。
  *
  * 供应商无关：小浣熊的积分明细与「额度中心」的流水共用这一处渲染。
  */
@@ -678,6 +679,14 @@ fun PointsBillRow(bill: dev.aigw.core.provider.PointsBill, modifier: Modifier = 
                 java.text.DateFormat.SHORT,
                 java.text.DateFormat.SHORT,
             ).format(java.util.Date(bill.createdAtMillis))
+        } else {
+            ""
+        }
+    }
+    val expire = remember(bill.expireAtMillis) {
+        if (bill.expireAtMillis > 0) {
+            java.text.SimpleDateFormat("MM-dd HH:mm", java.util.Locale.getDefault())
+                .format(java.util.Date(bill.expireAtMillis))
         } else {
             ""
         }
@@ -701,6 +710,14 @@ fun PointsBillRow(bill: dev.aigw.core.provider.PointsBill, modifier: Modifier = 
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
+            // 收入行（每日发放等）才有有效期；充值/奖励积分不带 expire_at
+            if (expire.isNotEmpty()) {
+                Text(
+                    text = "有效期至 $expire",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = LocalAppColors.current.goldStart,
+                )
+            }
         }
         Text(
             text = if (bill.points > 0) "+${bill.points}" else bill.points.toString(),
@@ -722,6 +739,63 @@ fun PointsBillsHint(text: String, error: Boolean = false) {
         style = MaterialTheme.typography.bodySmall,
         color = if (error) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
     )
+}
+
+/** 积分流水状态键：providerId/uid/filter（收入与消耗分开缓存）。 */
+internal fun pointsBillsKey(
+    providerId: String,
+    uid: String,
+    filter: dev.aigw.core.provider.PointsBillFilter,
+): String = "$providerId/$uid/${filter.name}"
+
+/**
+ * 积分明细面板：收入/消耗两个口径各自拉取。
+ *
+ * 小浣熊的 `type=all` 只回最近 100 条且 offset 翻页无效，重度账号的每日发放会被
+ * 消费行挤出窗口；收入单独走 `type=income`（发放行稀疏，100 条覆盖数月）。
+ */
+@Composable
+fun PointsBillsPanel(
+    providerId: String,
+    uid: String,
+    viewOf: (dev.aigw.core.provider.PointsBillFilter) -> dev.aigw.core.provider.PointsBillListView?,
+    onLoad: (dev.aigw.core.provider.PointsBillFilter) -> Unit,
+) {
+    var filter by remember(providerId, uid) {
+        mutableStateOf(dev.aigw.core.provider.PointsBillFilter.INCOME)
+    }
+    LaunchedEffect(providerId, uid) {
+        onLoad(dev.aigw.core.provider.PointsBillFilter.INCOME)
+        onLoad(dev.aigw.core.provider.PointsBillFilter.CONSUMED)
+    }
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        SectionLabel("积分明细")
+        Icon(
+            Icons.Filled.Refresh,
+            contentDescription = "刷新积分明细",
+            tint = MaterialTheme.colorScheme.primary,
+            modifier = Modifier
+                .clickable { onLoad(filter) }
+                .padding(start = 8.dp, top = 2.dp, bottom = 2.dp, end = 2.dp),
+        )
+    }
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        ChoiceChip("收入", filter == dev.aigw.core.provider.PointsBillFilter.INCOME) {
+            filter = dev.aigw.core.provider.PointsBillFilter.INCOME
+        }
+        ChoiceChip("消耗", filter == dev.aigw.core.provider.PointsBillFilter.CONSUMED) {
+            filter = dev.aigw.core.provider.PointsBillFilter.CONSUMED
+        }
+    }
+    val view = viewOf(filter)
+    when {
+        view == null -> PointsBillsHint("正在加载积分明细…")
+        view.error.isNotEmpty() -> PointsBillsHint("加载失败：${view.error}", error = true)
+        view.bills.isEmpty() -> PointsBillsHint(
+            if (filter == dev.aigw.core.provider.PointsBillFilter.INCOME) "暂无收入记录" else "暂无消耗记录",
+        )
+        else -> for (bill in view.bills) PointsBillRow(bill)
+    }
 }
 
 /**

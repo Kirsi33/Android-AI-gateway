@@ -5,6 +5,7 @@ import com.google.gson.JsonParser
 import com.sun.net.httpserver.HttpServer
 import dev.aigw.core.provider.ACTION_CHECKIN
 import dev.aigw.core.provider.ErrorKind
+import dev.aigw.core.provider.PointsBillFilter
 import dev.aigw.core.provider.ProviderAccount
 import java.net.InetSocketAddress
 import java.util.Base64
@@ -330,7 +331,7 @@ class RaccoonProviderTest {
     @Test
     fun `积分明细按上游字段映射且保留正负号`() {
         val body = """{"code":0,"data":{"items":[
-            {"bill_id":"b1","event_name":"每日赠送积分","biz_type":"daily_grant","points":300,"created_at":"2026-10-14T00:00:05+08:00"},
+            {"bill_id":"b1","event_name":"每日赠送积分","biz_type":"daily_grant","points":300,"created_at":"2026-10-14T00:00:05+08:00","expire_at":"2026-10-21T23:59:59+08:00"},
             {"bill_id":"b2","biz_type":"daily_expire","points":-300,"created_at":"2026-10-14T23:59:59+08:00"}
         ],"paging":{"total":2}}}"""
         withUpstreamHeaders(BILLS_PATH, body) { base, _ ->
@@ -341,8 +342,29 @@ class RaccoonProviderTest {
             assertEquals(300L, view.bills[0].points)
             assertEquals("daily_grant", view.bills[0].bizType)
             assertTrue(view.bills[0].createdAtMillis > 0, "created_at 应被解析成毫秒")
+            assertTrue(
+                view.bills[0].expireAtMillis > view.bills[0].createdAtMillis,
+                "expire_at 应被解析成毫秒",
+            )
+            assertEquals(0L, view.bills[1].expireAtMillis, "没有 expire_at 的支出行应为 0")
             assertEquals(-300L, view.bills[1].points, "支出必须保留负号")
             assertEquals("daily_expire", view.bills[1].title, "event_name 缺失时回退 biz_type")
+        }
+    }
+
+    @Test
+    fun `消耗口径过滤掉收入行`() {
+        val body = """{"code":0,"data":{"items":[
+            {"bill_id":"i1","biz_type":"daily_grant","points":300,"created_at":"2026-10-14T00:00:05+08:00"},
+            {"bill_id":"c1","biz_type":"chat","points":-12,"created_at":"2026-10-14T10:00:00+08:00"}
+        ]}}"""
+        withUpstreamHeaders(BILLS_PATH, body) { base, _ ->
+            val view = assertNotNull(
+                RaccoonProvider(host = base).pointsBills(account(), PointsBillFilter.CONSUMED),
+            )
+            assertEquals(1, view.bills.size, view.bills.toString())
+            assertEquals("c1", view.bills[0].id)
+            assertEquals(-12L, view.bills[0].points)
         }
     }
 

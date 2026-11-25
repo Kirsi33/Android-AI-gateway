@@ -112,10 +112,28 @@ data class ProviderTaskListView(
 )
 
 /**
+ * 积分流水的筛选口径。
+ *
+ * 上游 `type=all` 只回最近 100 条且 `paging.offset` 是死参数：重度账号一天几十上百条消费，
+ * 100 条窗口只覆盖 1~2 天，每日发放会被消费行挤出去。所以收入必须单独用 `type=income`
+ * 查（发放行稀疏，100 条能覆盖数月），消耗则在 `type=all` 结果里按负号过滤。
+ */
+enum class PointsBillFilter {
+    /** 收支混排（默认，兼容旧调用）。 */
+    ALL,
+
+    /** 只看发放/奖励/充值入账（`type=income`）。 */
+    INCOME,
+
+    /** 只看支出（`type=all` 结果里 points < 0 的行）。 */
+    CONSUMED,
+}
+
+/**
  * 一笔积分/额度流水。
  *
  * 字段命名对齐小浣熊的 `/api/web/points/v1/bills`：`bill_id` / `event_name` /
- * `biz_type` / `points` / `created_at`。
+ * `biz_type` / `points` / `created_at`，收入行另带 `grant_at` / `expire_at`。
  *
  * 与 [QuotaPack] 的分工：额度包回答「还剩多少」，流水回答「每一笔怎么来的」。
  */
@@ -129,6 +147,8 @@ data class PointsBill(
     val bizType: String = "",
     /** 发生时间（毫秒；0 表示上游没给或无法解析）。 */
     val createdAtMillis: Long = 0,
+    /** 这笔积分的有效期（毫秒；0 表示上游没给或不过期，如充值/奖励积分）。 */
+    val expireAtMillis: Long = 0,
 )
 
 /**

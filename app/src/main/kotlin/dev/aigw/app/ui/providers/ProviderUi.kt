@@ -6,6 +6,7 @@ import com.google.gson.JsonObject
 import dev.aigw.core.gateway.ProviderSettings
 import dev.aigw.core.pool.AccountStatus
 import dev.aigw.core.provider.ProviderTaskListView
+import dev.aigw.core.provider.PointsBillFilter
 import dev.aigw.core.provider.PointsBillListView
 import dev.aigw.core.provider.QuotaPack
 
@@ -63,10 +64,12 @@ class ProviderUiActions(
     val taskListOf: (providerId: String, uid: String) -> ProviderTaskListView? = { _, _ -> null },
     /** 异步拉取账号的成长任务明细（打上游，结果回到 [taskListOf]）。 */
     val onLoadTaskList: (providerId: String, uid: String) -> Unit = { _, _ -> },
-    /** 读已拉取的积分流水明细（键 `providerId/uid`；需要拉取时调 [onLoadPointsBills]）。 */
-    val pointsBillsOf: (providerId: String, uid: String) -> PointsBillListView? = { _, _ -> null },
+    /** 读已拉取的积分流水明细（键 `providerId/uid/filter`；需要拉取时调 [onLoadPointsBills]）。 */
+    val pointsBillsOf: (providerId: String, uid: String, filter: PointsBillFilter) -> PointsBillListView? =
+        { _, _, _ -> null },
     /** 异步拉取账号的积分流水明细（打上游，结果回到 [pointsBillsOf]）。 */
-    val onLoadPointsBills: (providerId: String, uid: String) -> Unit = { _, _ -> },
+    val onLoadPointsBills: (providerId: String, uid: String, filter: PointsBillFilter) -> Unit =
+        { _, _, _ -> },
     /** 重新生成一套设备指纹（仅 Trae 用）。 */
     val onRegenerateDeviceId: (providerId: String, uid: String) -> Unit = { _, _ -> },
     /** 手动填入设备指纹（仅 Trae 用）。 */

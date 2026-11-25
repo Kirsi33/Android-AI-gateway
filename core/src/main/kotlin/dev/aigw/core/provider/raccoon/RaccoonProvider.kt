@@ -443,10 +443,15 @@ class RaccoonProvider(
         }
     }
 
-    /** 今日已到账的正积分合计（按积分流水的 created_at 判日）。 */
+    /**
+     * 今日已到账的正积分合计（按积分流水的 created_at 判日）。
+     *
+     * 必须用 `type=income`：`type=all` 只回最近 100 条，重度账号一天几十上百条消费，
+     * 凌晨那条 daily_grant 会被挤出窗口，签到判定就会假失败。
+     */
     private fun todayGrantedPoints(credential: Credential): Long {
         val (status, text) = runCatching {
-            getJson("$host$PATH_BILLS?paging.limit=20&paging.offset=0", jsonHeaders(credential))
+            getJson("$host$PATH_BILLS?paging.limit=$POINTS_BILLS_LIMIT&type=income", jsonHeaders(credential))
         }.getOrNull() ?: return 0L
         if (status !in 200..299) return 0L
         val data = envelopeData(text) ?: return 0L
@@ -473,26 +478,37 @@ class RaccoonProvider(
         return total
     }
 
-    /** 积分流水（`/api/web/points/v1/bills`），最近 [POINTS_BILLS_LIMIT] 条。 */
-    override fun pointsBills(account: ProviderAccount): PointsBillListView? {
+    /**
+     * 积分流水（`/api/web/points/v1/bills`），最多 [POINTS_BILLS_LIMIT] 条。
+     *
+     * 上游的 `paging.offset` 是死参数（>0 恒空），`type=all` 只能看最近 100 条；
+     * 收入行稀疏，单独用 `type=income` 才能覆盖数月，消耗则从 `type=all` 里按负号过滤。
+     */
+    override fun pointsBills(account: ProviderAccount, filter: PointsBillFilter): PointsBillListView? {
         val credential = parse(account) ?: return null
-        val url = "$host$PATH_BILLS?paging.limit=$POINTS_BILLS_LIMIT&paging.offset=0&type=all"
-        val (status, text) = getJson(url, jsonHeaders(credential))
+        val query = when (filter) {
+            PointsBillFilter.INCOME -> "paging.limit=$POINTS_BILLS_LIMIT&type=income"
+            else -> "paging.limit=$POINTS_BILLS_LIMIT&paging.offset=0&type=all"
+        }
+        val (status, text) = getJson("$host$PATH_BILLS?$query", jsonHeaders(credential))
         if (status !in 200..299) throw IllegalStateException("积分明细 HTTP $status")
         val data = envelopeData(text) ?: throw IllegalStateException("积分明细响应缺少 data")
         val items = data.arrayOrNull("items") ?: return PointsBillListView(emptyList())
+        val bills = items.mapNotNull { element ->
+            val item = element.takeIf { it.isJsonObject }?.asJsonObject ?: return@mapNotNull null
+            PointsBill(
+                id = item.firstString("bill_id", "id"),
+                title = item.firstString("event_name", "title", "biz_type").ifEmpty { "积分变动" },
+                // 不能用 firstLong：它把 ≤ 0 当作「未提供」，会把支出（负数）吞成 0。
+                points = item.longOrNull("points") ?: item.longOrNull("amount") ?: 0L,
+                bizType = item.firstString("biz_type"),
+                createdAtMillis = isoMillisOf(item.firstString("created_at", "createdAt")),
+                // 收入行（daily_grant 等）带 expire_at；充值/奖励积分可能没有，0 表示不过期
+                expireAtMillis = isoMillisOf(item.firstString("expire_at", "expireAt")),
+            )
+        }
         return PointsBillListView(
-            items.mapNotNull { element ->
-                val item = element.takeIf { it.isJsonObject }?.asJsonObject ?: return@mapNotNull null
-                PointsBill(
-                    id = item.firstString("bill_id", "id"),
-                    title = item.firstString("event_name", "title", "biz_type").ifEmpty { "积分变动" },
-                    // 不能用 firstLong：它把 ≤ 0 当作「未提供」，会把支出（负数）吞成 0。
-                    points = item.longOrNull("points") ?: item.longOrNull("amount") ?: 0L,
-                    bizType = item.firstString("biz_type"),
-                    createdAtMillis = isoMillisOf(item.firstString("created_at", "createdAt")),
-                )
-            },
+            if (filter == PointsBillFilter.CONSUMED) bills.filter { it.points < 0 } else bills,
         )
     }
 
@@ -619,10 +635,22 @@ class RaccoonProvider(
         "X-Client-Version" to CLIENT_VERSION,
     )
 
-    /** 上游 `created_at` 是 ISO-8601 字符串，转毫秒；解析不了就当未知（0）。 */
-    private fun isoMillisOf(value: String): Long = runCatching {
-        OffsetDateTime.parse(value.trim()).toInstant().toEpochMilli()
-    }.getOrDefault(0L)
+    /**
+     * 上游 `created_at` / `expire_at` 是 ISO-8601 字符串，转毫秒；解析不了就当未知（0）。
+     * 兼容带偏移（`...Z` / `+08:00`）与不带时区两种形态。
+     */
+    private fun isoMillisOf(value: String): Long {
+        val trimmed = value.trim()
+        if (trimmed.isEmpty()) return 0L
+        return runCatching {
+            OffsetDateTime.parse(trimmed).toInstant().toEpochMilli()
+        }.recoverCatching {
+            java.time.LocalDateTime.parse(trimmed.replace(' ', 'T'))
+                .atZone(java.time.ZoneId.systemDefault())
+                .toInstant()
+                .toEpochMilli()
+        }.getOrDefault(0L)
+    }
 
     private fun bearerHeaders(accessToken: String): Map<String, String> = mapOf(
         "Accept" to "application/json",
@@ -741,8 +769,13 @@ class RaccoonProvider(
 
         const val CLIENT_VERSION = "v1.0.0"
 
-        /** 积分明细一次拉取的条数（官方客户端用 20）。 */
-        const val POINTS_BILLS_LIMIT = 20
+        /**
+         * 积分明细一次拉取的条数。
+         *
+         * 上游 `type=all` 的硬上限就是 100 条且 offset 翻页无效；收入行稀疏，
+         * 100 条足够覆盖数月，所以统一取 100（官方客户端 20 条对重度账号只剩半天窗口）。
+         */
+        const val POINTS_BILLS_LIMIT = 100
 
         /** 伪装成官方桌面客户端的 UA（与 Buddy2api 的 office-raccoon/1.0.0 一致）。 */
         const val CLIENT_UA = "office-raccoon/1.0.0"

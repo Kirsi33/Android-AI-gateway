@@ -19,6 +19,7 @@ import dev.aigw.core.provider.ProviderAccount
 import dev.aigw.core.provider.ProviderActionResult
 import dev.aigw.core.provider.ProviderTaskListView
 import dev.aigw.core.provider.PointsBill
+import dev.aigw.core.provider.PointsBillFilter
 import dev.aigw.core.provider.PointsBillListView
 import dev.aigw.core.provider.ProviderCapability
 import dev.aigw.core.provider.ProviderHooks
@@ -1115,11 +1116,15 @@ class GatewayEngine(
      *
      * 只读快照；不支持账本的供应商返回 null。
      */
-    fun pointsBills(providerId: String, uid: String): PointsBillListView? {
+    fun pointsBills(
+        providerId: String,
+        uid: String,
+        filter: PointsBillFilter = PointsBillFilter.ALL,
+    ): PointsBillListView? {
         val provider = registry.get(providerId) ?: return null
         val account = pool.account(providerId, uid) ?: return null
         return try {
-            provider.pointsBills(freshAccount(provider, account))
+            provider.pointsBills(freshAccount(provider, account), filter)
         } catch (e: Exception) {
             logWarn("拉取积分明细失败（$providerId/$uid）：${e.message}")
             PointsBillListView(emptyList(), error = e.message ?: "拉取积分明细失败")

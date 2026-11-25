@@ -16,6 +16,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import dev.aigw.core.provider.PointsBillFilter
 import dev.aigw.core.provider.ProviderCapability
 
 /**
@@ -95,12 +96,9 @@ fun ProviderCreditsScreen(
     val displayName = state.providerOf(providerId)?.displayName ?: providerId
     val hasLedger = state.providerOf(providerId)?.capabilities?.contains(ProviderCapability.POINTS_BILLS) == true
 
-    // 进页面拉一次；账号变化时重拉
+    // 进页面拉一次额度包；积分流水由各账号卡片里的 PointsBillsPanel 自己拉（收入/消耗两个口径）
     LaunchedEffect(providerId, accounts.map { it.uid }) {
-        accounts.forEach {
-            viewModel.loadCreditPacks(providerId, it.uid)
-            if (hasLedger) viewModel.loadPointsBills(providerId, it.uid)
-        }
+        accounts.forEach { viewModel.loadCreditPacks(providerId, it.uid) }
     }
 
     PageScaffold(
@@ -117,7 +115,6 @@ fun ProviderCreditsScreen(
 
         for (account in accounts) {
             val packs = state.creditPacks["$providerId/${account.uid}"].orEmpty()
-            val bills = state.pointsBills["$providerId/${account.uid}"]
             SectionCard(enterIndex = 2) {
                 SectionLabel(account.nickname.ifEmpty { account.uid })
                 Text(
@@ -161,18 +158,24 @@ fun ProviderCreditsScreen(
                     }
                 }
                 if (hasLedger) {
-                    SectionLabel("积分明细")
-                    when {
-                        bills == null -> PointsBillsHint("正在加载积分明细…")
-                        bills.error.isNotEmpty() -> PointsBillsHint("加载失败：${bills.error}", error = true)
-                        bills.bills.isEmpty() -> PointsBillsHint("暂无积分明细")
-                        else -> for (bill in bills.bills) PointsBillRow(bill)
-                    }
+                    PointsBillsPanel(
+                        providerId = providerId,
+                        uid = account.uid,
+                        viewOf = { filter ->
+                            state.pointsBills[pointsBillsKey(providerId, account.uid, filter)]
+                        },
+                        onLoad = { filter ->
+                            viewModel.loadPointsBills(providerId, account.uid, filter)
+                        },
+                    )
                 }
                 OutlineActionButton("刷新") {
                     viewModel.refreshCredits(providerId, account.uid)
                     viewModel.loadCreditPacks(providerId, account.uid)
-                    if (hasLedger) viewModel.loadPointsBills(providerId, account.uid)
+                    if (hasLedger) {
+                        viewModel.loadPointsBills(providerId, account.uid, PointsBillFilter.INCOME)
+                        viewModel.loadPointsBills(providerId, account.uid, PointsBillFilter.CONSUMED)
+                    }
                 }
             }
         }

@@ -48,6 +48,7 @@ import dev.aigw.core.pool.PoolSummary
 import dev.aigw.core.provider.ACTION_CHECKIN
 import dev.aigw.core.provider.ACTION_TASKS
 import dev.aigw.core.provider.DeviceAuthPoll
+import dev.aigw.core.provider.PointsBillFilter
 import dev.aigw.core.provider.ProviderActionResult
 import dev.aigw.core.provider.ProviderCapability
 import dev.aigw.core.provider.QuotaPack
@@ -1896,12 +1897,16 @@ class AppViewModel(
     }
 
     /** 拉取某账号的积分流水明细（会打上游）；支持账本的供应商才返回结果。 */
-    fun loadPointsBills(providerId: String, uid: String) {
+    fun loadPointsBills(
+        providerId: String,
+        uid: String,
+        filter: PointsBillFilter = PointsBillFilter.ALL,
+    ) {
         viewModelScope.launch {
-            val view = withContext(Dispatchers.IO) { engine.pointsBills(providerId, uid) }
+            val view = withContext(Dispatchers.IO) { engine.pointsBills(providerId, uid, filter) }
             if (view == null) return@launch
             _state.value = _state.value.copy(
-                pointsBills = _state.value.pointsBills + ("$providerId/$uid" to view),
+                pointsBills = _state.value.pointsBills + (pointsBillsKey(providerId, uid, filter) to view),
             )
         }
     }
