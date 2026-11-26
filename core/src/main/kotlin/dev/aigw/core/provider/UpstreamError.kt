@@ -36,4 +36,12 @@ data class UpstreamError(
     val kind: ErrorKind,
     val message: String,
     val code: Long = 0,
+    /**
+     * 上游明确要求「这个账号一段时间内别再来」时的本地冷却时长。
+     *
+     * 0 表示由网关按通用策略处理（普通限流只晾十几秒）。小浣熊的「异常调用」风控
+     * 实测要次日才恢复，必须由供应商自己给出这个时长：否则网关会按普通 429
+     * 在几秒内反复重试同一个账号，把熔断计数刷满还继续撞墙。
+     */
+    val accountCooldownMillis: Long = 0L,
 )

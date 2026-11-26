@@ -758,8 +758,17 @@ class GatewayHttpServer(
                     // 到这里才是上游侧错误：计入熔断与健康指标
                     cb.recordFailure()
                     modelBreaker.recordFailure()
-                    // 上游刚报错：把这个账号晾一会儿，避免下一个请求立刻又选中它
-                    engine.pool.coolDown(currentRoute.providerId, account.uid, failoverCfg.accountCooldownMs)
+                    // 上游刚报错：把这个账号晾一会儿，避免下一个请求立刻又选中它。
+                    // 供应商若明确给了「晾到什么时候」（如小浣熊风控到次日），以它为准。
+                    val failureCooldownMs =
+                        failure.accountCooldownMillis.takeIf { it > 0 } ?: failoverCfg.accountCooldownMs
+                    engine.pool.coolDown(currentRoute.providerId, account.uid, failureCooldownMs)
+                    if (failure.accountCooldownMillis > 0) {
+                        log(
+                            "账号被上游限制，本地冷却 ${failure.accountCooldownMillis / 3_600_000} 小时" +
+                                "（${currentRoute.providerId}/${account.nickname}）：${failure.message}",
+                        )
+                    }
                     pMetrics.record(false, elapsed, failure.kind.name)
                     providerLastError = failure.message
                     failureKinds.add(failure.kind)
@@ -794,6 +803,17 @@ class GatewayHttpServer(
                         engine.logVerbose("返回原文", call.errorBody)
                     }
                     call.close()
+
+                    // 账号级风控（如小浣熊 429「异常调用」）：供应商带回一个长冷却时长。
+                    // 先冷却账号再走决策——后续重试的兜底选号也会跳过它，单账号时就不会在
+                    // 一次用户请求里连撞 3 次；之后的请求也会换供应商，而不是继续撞同一堵墙。
+                    if (error.accountCooldownMillis > 0) {
+                        engine.pool.coolDown(currentRoute.providerId, account.uid, error.accountCooldownMillis)
+                        log(
+                            "账号被上游限制，本地冷却 ${error.accountCooldownMillis / 3_600_000} 小时" +
+                                "（$providerId/${account.nickname}）：${error.message}",
+                        )
+                    }
 
                     // 错误决策：客户端不可重试错误（400/审核）立即中断返回客户端，不重试不换家
                     val decision = dev.aigw.core.failover.ClassifiedError(
