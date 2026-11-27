@@ -44,13 +44,11 @@ import dev.aigw.core.util.longOrNull
 import dev.aigw.core.util.newCompletionId
 import dev.aigw.core.util.objOrNull
 import dev.aigw.core.util.randomHex
-import dev.aigw.core.util.startOfDay
 import dev.aigw.core.util.stringOrNull
 import java.net.HttpURLConnection
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
 import java.time.OffsetDateTime
-import java.util.Calendar
 
 /**
  * 商汤「小浣熊」（`xiaohuanxiong.com`）的插件账号通道。
@@ -286,14 +284,14 @@ class RaccoonProvider(
             else -> ErrorKind.CLIENT
         }
         // 小浣熊的 429 分两类：普通限流与账号级风控。风控原文是「系统检测到当前账号存在
-        // 异常调用，模型调用功能已暂时受限…」，实测到第二天才恢复。必须把「晾到明天」
-        // 这个时长带回网关：否则网关按普通 429 在 300/600ms 后重试，单账号时还会通过
-        // 并发闸门的兜底选号重新选中同一个号，一次用户请求就要连撞 3 次上游。
+        // 异常调用，模型调用功能已暂时受限…」，实测约 7 小时后恢复。必须把冷却时长带回
+        // 网关：否则网关按普通 429 在 300/600ms 后重试，单账号时还会通过并发闸门的兜底
+        // 选号重新选中同一个号，一次用户请求就要连撞 3 次。
         val blocked = status == 429 && (body.contains("异常调用") || body.contains("暂时受限"))
         return UpstreamError(
             kind = kind,
             message = message,
-            accountCooldownMillis = if (blocked) dailyBlockCooldownMillis(nowMillis()) else 0L,
+            accountCooldownMillis = if (blocked) RACCOON_BLOCK_COOLDOWN_MS else 0L,
         )
     }
 
@@ -932,26 +930,12 @@ internal class RaccoonSseTranslator(
 private fun JsonObject.doubleOrNull(name: String): Double? =
     get(name)?.takeIf { it.isJsonPrimitive }?.asDouble
 
-/** 账号级风控的最短/最长本地冷却：短了必然在解封前再撞一次，长了会白白浪费恢复后的可用时间。 */
-internal const val RACCOON_BLOCK_MIN_COOLDOWN_MS = 4L * 60 * 60 * 1000
-
-internal const val RACCOON_BLOCK_MAX_COOLDOWN_MS = 24L * 60 * 60 * 1000
-
-/** 次日 0 点后再留 30 分钟缓冲，避开「整点刚过、上游还没解封」的窗口。 */
-private const val RACCOON_BLOCK_GRACE_MS = 30L * 60 * 1000
-
 /**
- * 小浣熊账号级风控后的本地冷却时长：冷却到次日 0:30，再夹到 [4h, 24h]。
+ * 小浣熊账号级风控的本地冷却：7 小时。
  *
- * 上游没有给出准确的解封时刻，只说「请稍后重试」，用户实测要到第二天才恢复。这里按
- * 「次日 0 点 + 30 分钟」估算，并设下限 4 小时（23:50 触发时也需要留出足够的沉默期）、
- * 上限 24 小时（避免因时区/滚动窗口差异把账号锁到第三天）。
+ * 上游不返回解封时间，只说「请稍后重试」。两个实测样本：13:00 触发、20:00 已恢复
+ * （7 小时）；20:14 触发、次日确认恢复（无法确认具体时刻，≥ 次日 0 点即 3.8h+）。
+ * 按 7 小时取值，宁可多晾一会儿也别再撞墙；上游若提前解封损失的是几小时可用时间，
+ * 而撞墙的代价是账号又被封 7 小时。界面上可随时手动解除（见 AccountCardShell）。
  */
-internal fun dailyBlockCooldownMillis(now: Long): Long {
-    val nextMidnight = Calendar.getInstance().apply {
-        timeInMillis = startOfDay(now)
-        add(Calendar.DAY_OF_YEAR, 1)
-    }.timeInMillis
-    val gap = nextMidnight + RACCOON_BLOCK_GRACE_MS - now
-    return gap.coerceIn(RACCOON_BLOCK_MIN_COOLDOWN_MS, RACCOON_BLOCK_MAX_COOLDOWN_MS)
-}
+internal const val RACCOON_BLOCK_COOLDOWN_MS = 7L * 60 * 60 * 1000

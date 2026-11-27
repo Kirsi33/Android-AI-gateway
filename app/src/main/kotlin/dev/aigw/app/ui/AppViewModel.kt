@@ -1501,6 +1501,12 @@ class AppViewModel(
         "账号已删除"
     }
 
+    /** 解除账号的本地限流冷却：官方客户端已经能用了，就不必干等剩余的冷却时间。 */
+    fun clearAccountCooldown(providerId: String, uid: String) = action {
+        engine.pool.clearCooldown(providerId, uid)
+        "已解除限流冷却"
+    }
+
     /** 调整账号使用优先级（↑/↓）：排在前面的先用，同级仍按余额。 */
     fun moveAccountPriority(providerId: String, uid: String, up: Boolean) = action {
         if (!engine.moveAccountPriority(providerId, uid, up)) throw IllegalStateException("已到列表尽头")

@@ -62,10 +62,14 @@ import dev.aigw.app.ui.theme.LocalAppColors
 import dev.aigw.core.pool.AccountStatus
 import dev.aigw.core.provider.CreditUnit
 
-/** 账号状态文案：只有凭证失效与手动停用两种异常态，正常即「可用」。 */
+/** 账号状态文案：异常态按严重度排列；限流冷却不算不可用，但要让人知道为什么暂时选不到它。 */
 fun accountStatusText(account: AccountStatus): String = when {
     account.disabled -> "凭证失效，需重新登录"
     !account.enabled -> "已停用"
+    account.cooldownUntilMillis > 0 ->
+        "限流冷却中，至 " + java.time.Instant.ofEpochMilli(account.cooldownUntilMillis)
+            .atZone(java.time.ZoneId.systemDefault())
+            .format(java.time.format.DateTimeFormatter.ofPattern("HH:mm"))
     else -> "可用"
 }
 

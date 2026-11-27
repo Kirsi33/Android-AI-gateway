@@ -66,6 +66,20 @@ class AccountCooldownTest {
     }
 
     @Test
+    fun `状态快照带冷却截止时刻，到期或解除后归零`() {
+        val pool = pool()
+        pool.upsert(account("a"))
+        pool.coolDown("codebuddy", "a", 15_000)
+        // UI 靠这个字段显示「限流冷却中，至 HH:mm」并提供手动解除入口
+        assertEquals(now + 15_000, assertNotNull(pool.status("codebuddy", "a")).cooldownUntilMillis)
+        now += 15_001
+        assertEquals(0L, assertNotNull(pool.status("codebuddy", "a")).cooldownUntilMillis)
+        pool.coolDown("codebuddy", "a", 15_000)
+        pool.clearCooldown("codebuddy", "a")
+        assertEquals(0L, assertNotNull(pool.status("codebuddy", "a")).cooldownUntilMillis)
+    }
+
+    @Test
     fun `成功一次就解除冷却`() {
         val pool = pool()
         pool.upsert(account("a"))

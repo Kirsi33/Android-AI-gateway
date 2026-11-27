@@ -46,6 +46,8 @@ data class AccountStatus(
      * 另一个账号身上，「优先」标就会带着跑。这里比的是「实际位置 vs 默认位置」。
      */
     val raised: Boolean = false,
+    /** 本地限流冷却的截止时刻（毫秒）；0 = 不在冷却。冷却不改 usable，只是选号会跳过。 */
+    val cooldownUntilMillis: Long = 0,
 ) {
     val usable: Boolean get() = !disabled && enabled
 }
@@ -500,6 +502,10 @@ class AccountPool(
         disabled = entry.disabled,
         enabled = entry.enabled,
         priority = entry.priority,
+        // 已过期的冷却在这里顺手清掉：isCooling 的清理只在选号时触发，长时间不选号的
+        // 账号会在界面残留「冷却中」的旧状态
+        cooldownUntilMillis = cooldowns[keyOf(entry.account.providerId, entry.account.uid)]
+            ?.takeIf { nowMillis() < it } ?: 0L,
     )
 
     private fun keyOf(providerId: String, uid: String) = "$providerId/$uid"

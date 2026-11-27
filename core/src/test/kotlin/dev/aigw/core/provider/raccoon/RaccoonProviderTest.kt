@@ -108,20 +108,14 @@ class RaccoonProviderTest {
 
     @Test
     fun `429 风控「异常调用」返回账号级长冷却`() {
-        // 2026-11-26 实测原文：客户端一次重试会在 3 秒内连撞 3 次，必须让网关把账号晾到次日
+        // 2026-11-26 实测原文：客户端一次重试会在 3 秒内连撞 3 次，必须让网关把账号晾开；
+        // 2026-11-27 实测 13:00 封、20:00 已恢复 → 冷却取 7 小时，界面可手动提前解除
         val body = """{"status":{"code":429900,"message":"系统检测到当前账号存在异常调用，""" +
             """模型调用功能已暂时受限。请稍后重试；如仍未恢复，或你认为是误判，请点击左下角头像，""" +
             """选择「问题反馈」提交说明。"}}"""
         val err = RaccoonProvider().classify(429, body)
         assertEquals(ErrorKind.SOFT_RATE, err.kind)
-        assertTrue(
-            err.accountCooldownMillis >= RACCOON_BLOCK_MIN_COOLDOWN_MS,
-            "账号级风控应至少冷却 4 小时，实际 ${err.accountCooldownMillis}",
-        )
-        assertTrue(
-            err.accountCooldownMillis <= RACCOON_BLOCK_MAX_COOLDOWN_MS,
-            "冷却不应超过 24 小时，实际 ${err.accountCooldownMillis}",
-        )
+        assertEquals(RACCOON_BLOCK_COOLDOWN_MS, err.accountCooldownMillis)
     }
 
     @Test
@@ -131,29 +125,6 @@ class RaccoonProviderTest {
         assertEquals(ErrorKind.SOFT_RATE, err.kind)
         assertEquals(0L, err.accountCooldownMillis)
     }
-
-    @Test
-    fun `风控冷却到次日 0 点半并夹在 4 到 24 小时之间`() {
-        val fourHours = 4L * 3_600_000
-        val dayMs = 24L * 3_600_000
-        // 20:14 触发：到次日 0:30 约 4h16m
-        val evening = localTime(20, 14)
-        val eveningGap = dailyBlockCooldownMillis(evening)
-        assertTrue(eveningGap > fourHours && eveningGap < fiveHours, "20:14 应冷却约 4h16m，实际 $eveningGap")
-        // 23:50 触发：到次日 0:30 只有 40 分钟，按 4 小时下限
-        assertEquals(fourHours, dailyBlockCooldownMillis(localTime(23, 50)))
-        // 00:10 触发：到次日 0:30 超过 24 小时，按 24 小时上限
-        assertEquals(dayMs, dailyBlockCooldownMillis(localTime(0, 10)))
-    }
-
-    private fun localTime(hour: Int, minute: Int): Long = java.util.Calendar.getInstance().apply {
-        set(java.util.Calendar.HOUR_OF_DAY, hour)
-        set(java.util.Calendar.MINUTE, minute)
-        set(java.util.Calendar.SECOND, 0)
-        set(java.util.Calendar.MILLISECOND, 0)
-    }.timeInMillis
-
-    private val fiveHours = 5L * 3_600_000
 
     // ------------------------------------------------------------------ 请求体转换
 

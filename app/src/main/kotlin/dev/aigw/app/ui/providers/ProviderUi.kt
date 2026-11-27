@@ -49,6 +49,8 @@ class ProviderUiActions(
     val onMoveAccountPriority: (providerId: String, uid: String, up: Boolean) -> Unit = { _, _, _ -> },
     val onToggleAccount: (providerId: String, uid: String, enabled: Boolean) -> Unit = { _, _, _ -> },
     val onRemoveAccount: (providerId: String, uid: String) -> Unit = { _, _ -> },
+    /** 解除账号的本地限流冷却（如小浣熊 429「异常调用」风控后的手动恢复入口）。 */
+    val onClearAccountCooldown: (providerId: String, uid: String) -> Unit = { _, _ -> },
     /** 账号凭证级修改（如 Trae 的设备指纹）：直接替换 secret。 */
     val onUpdateSecret: (providerId: String, uid: String, secret: String, notice: String) -> Unit =
         { _, _, _, _ -> },

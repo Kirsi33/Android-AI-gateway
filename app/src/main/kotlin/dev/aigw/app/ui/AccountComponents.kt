@@ -224,8 +224,9 @@ fun AccountCardShell(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
-                // 正常账号不占一行副标题：列表要能一眼扫完，异常才需要额外解释
-                if (!account.usable) {
+                // 正常账号不占一行副标题：列表要能一眼扫完，异常才需要额外解释。
+                // 限流冷却不算不可用（usable 仍 true），但请求会被本地跳过，必须让人看到原因
+                if (!account.usable || account.cooldownUntilMillis > 0) {
                     Text(
                         text = accountStatusText(account),
                         style = MaterialTheme.typography.bodySmall,
@@ -263,6 +264,31 @@ fun AccountCardShell(
                     }
                 },
             )
+            // 上游限流后的本地冷却（如小浣熊 429「异常调用」）：上游没给解封时间，
+            // 实测约 7 小时。允许手动解除——官方客户端能用了就该能立刻恢复选号。
+            if (account.cooldownUntilMillis > 0) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    Text(
+                        text = accountStatusText(account),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Text(
+                        text = "解除冷却",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier
+                            .clip(MaterialTheme.shapes.medium)
+                            .clickable { actions.onClearAccountCooldown(providerId, account.uid) }
+                            .padding(horizontal = 10.dp, vertical = 6.dp),
+                    )
+                }
+            }
             extra()
             footer?.invoke()
         }
